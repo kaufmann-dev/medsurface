@@ -356,18 +356,21 @@ def merge(
         say("print profile %s: %s" % (print_profile.name, print_profile.description))
         # Dilation distributes over union -- dilate(A | B) == dilate(A) | dilate(B) --
         # so thickening each scan before fusing is exactly thickening the fused
-        # solid, and it leaves each scan's fractional occupancy field intact.
+        # solid, and it leaves each scan's fractional occupancy field intact. The
+        # selection of *what* to thicken does not distribute (a wall thin in one
+        # scan may be thick in the other), which errs toward more material: safe.
         mask_a = step("re-segment fixed for printing",
                       lambda: pipeline.build_mask(vol_a.image, preset, value_a,
                                                   print_profile, say))
         mask_b = step("re-segment moving for printing",
                       lambda: pipeline.build_mask(vol_b.image, preset, value_b,
                                                   print_profile, say))
-        # Per scan: the two rarely share a voxel grid, and the realised growth
-        # follows the grid rather than the request.
-        for label, mask in (("fixed", mask_a), ("moving", mask_b)):
-            for message in pipeline.thickening_warning(mask, print_profile):
-                warnings.append("%s scan %s" % (label, message))
+        # Per scan: the two rarely share a voxel grid, so each gets its own
+        # printability grid and each can fall short of the request differently.
+        for label, mask, spacing in (("fixed", mask_a, vol_a.spacing),
+                                     ("moving", mask_b, vol_b.spacing)):
+            for message in pipeline.grid_warnings(mask, print_profile, spacing):
+                warnings.append("%s scan: %s" % (label, message))
 
     finest = min(min(vol_a.spacing), min(vol_b.spacing))
     if grid_mm > finest:

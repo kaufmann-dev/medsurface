@@ -141,7 +141,7 @@ def test_thickening_reduces_the_thin_fraction():
     """The point of the whole exercise."""
     wall = _slab(thickness_voxels=1)
     before = segment.thin_fraction(wall, 3.0)
-    after = segment.thin_fraction(segment.thicken(wall, 2.0, 3.0), 3.0)
+    after = segment.thin_fraction(segment.thicken(wall, 3.0), 3.0)
     assert before > after
     assert after < 0.5
 
@@ -167,7 +167,7 @@ def test_thicken_grows_only_the_thin_material():
     the model's outer surface for no benefit. Only the thin structures get the
     material."""
     image = _thin_sheet_beside_a_thick_block()
-    grown = segment.thicken(image, thicken_mm=2.0, min_feature_mm=3.0)
+    grown = segment.thicken(image, min_feature_mm=3.0)
 
     arr_before = sitk.GetArrayViewFromImage(image)
     arr_after = sitk.GetArrayViewFromImage(grown)
@@ -191,18 +191,9 @@ def test_thicken_is_a_no_op_when_nothing_is_thin():
     image = sitk.GetImageFromArray(arr)
     image.SetSpacing((1.0, 1.0, 1.0))
 
-    grown = segment.thicken(image, thicken_mm=1.0, min_feature_mm=3.0)
+    grown = segment.thicken(image, min_feature_mm=3.0)
     assert np.array_equal(sitk.GetArrayViewFromImage(image),
                           sitk.GetArrayViewFromImage(grown))
-
-
-def test_thicken_without_a_feature_size_uses_twice_the_radius():
-    """`--thicken-mm 1.0` on its own means "grow what is thinner than 2 mm"."""
-    image = _thin_sheet_beside_a_thick_block()
-    implicit = segment.thicken(image, thicken_mm=1.5)
-    explicit = segment.thicken(image, thicken_mm=1.5, min_feature_mm=3.0)
-    assert np.array_equal(sitk.GetArrayViewFromImage(implicit),
-                          sitk.GetArrayViewFromImage(explicit))
 
 
 def test_thin_mask_is_the_complement_of_the_opening():
@@ -236,7 +227,77 @@ def test_thin_mask_is_empty_without_a_feature_size():
 
 def test_thicken_of_zero_returns_the_input_untouched():
     image = _thin_sheet_beside_a_thick_block()
-    assert segment.thicken(image, 0.0, 3.0) is image
+    assert segment.thicken(image, 0.0) is image
+
+
+# --------------------------------------------------- the printability grid
+def test_the_printability_grid_realises_the_feature_size_exactly():
+    """Choosing mm = (T/2)/r for integer r makes the voxel radius exactly r and the
+    realised feature size exactly T, on any scan."""
+    for spacing in [(0.379, 0.379, 0.8), (0.45, 0.45, 0.3), (0.5, 0.5, 2.0)]:
+        for feature in (0.6, 1.2, 2.0):
+            image = _box(spacing=spacing)
+            mm = segment.printability_grid_mm(image, feature)
+            if mm is None:
+                continue
+            probe = _box(spacing=(mm, mm, mm))
+            assert max(segment.realised_feature_mm(probe, feature)) == \
+                pytest.approx(feature, rel=1e-6), (spacing, feature, mm)
+
+
+def test_the_printability_grid_is_never_coarser_than_the_data():
+    """Upsampling invents no detail but costs voxels; downsampling destroys thin
+    bone -- 0.6 mm once reopened 257 pores the closing had sealed."""
+    for spacing in [(0.379, 0.379, 0.8), (0.3, 0.3, 0.3), (0.5, 0.5, 2.0)]:
+        image = _box(spacing=spacing)
+        mm = segment.printability_grid_mm(image, 1.2)
+        if mm is not None:
+            assert mm <= min(spacing) + 1e-9, (spacing, mm)
+
+
+def test_an_already_isotropic_fine_grid_is_left_alone():
+    """The common case must pay nothing: no resample, no copy."""
+    assert segment.printability_grid_mm(_box(spacing=(0.3, 0.3, 0.3)), 1.2) is None
+    assert segment.printability_grid_mm(_box(spacing=(1.0, 1.0, 1.0)), 0.0) is None
+
+
+def test_the_voxel_budget_coarsens_the_grid_rather_than_exhausting_memory():
+    image = _box(spacing=(0.9, 0.9, 5.0))
+    generous = segment.printability_grid_mm(image, 1.2, budget=10 ** 12)
+    stingy = segment.printability_grid_mm(image, 1.2, budget=10 ** 5)
+    assert stingy > generous
+
+
+def test_a_coarse_slice_pitch_no_longer_inflates_the_model_along_z():
+    """The bug this grid exists for.
+
+    On a 0.9 x 0.9 x 5.0 mm survey CT, `dilation_radius_voxels(0.6)` rounds to one
+    voxel per axis, so the thickening "ball" acquires a 5 mm semi-axis. Guaranteeing
+    1.2 mm walls used to move the model's surface 5 mm along z. The scanner's slice
+    pitch must not become the printer's tolerance.
+    """
+    survey = (0.9, 0.9, 5.0)
+    arr = np.zeros((14, 60, 60), dtype=np.uint8)
+    arr[6:8, 10:50, 10:50] = 1          # a plate, thin in z
+    image = sitk.GetImageFromArray(arr)
+    image.SetSpacing(survey)
+
+    def z_extent_mm(img):
+        zs = np.argwhere(sitk.GetArrayViewFromImage(img))[:, 0]
+        return (zs.max() - zs.min() + 1) * img.GetSpacing()[2]
+
+    before = z_extent_mm(image)
+
+    naive = segment.thicken(image, 1.2)                      # on the native grid
+    mm = segment.printability_grid_mm(image, 1.2)
+    fixed = segment.thicken(segment.to_printability_grid(image, mm), 1.2)
+
+    naive_growth = z_extent_mm(naive) - before
+    fixed_growth = z_extent_mm(fixed) - before
+
+    assert naive_growth >= 9.0, "the native grid grows a full slice each way"
+    assert fixed_growth <= 2.5, ("the printability grid grows about the feature "
+                                 "size", fixed_growth)
 
 
 # ------------------------------------------------------------- the profiles
@@ -244,7 +305,6 @@ def test_anatomical_is_a_true_identity():
     """Every field is a no-op at zero, so there is no 'printing disabled' branch
     that could drift out of sync with the enabled one."""
     assert ANATOMICAL.closing_mm == 0.0
-    assert ANATOMICAL.thicken_mm == 0.0
     assert ANATOMICAL.min_island_mm3 == 0.0
     assert ANATOMICAL.min_feature_mm == 0.0
     assert PRINT_PROFILES["anatomical"] == ANATOMICAL
@@ -271,34 +331,32 @@ def test_profiles_only_add_printability(name):
     profile = PRINT_PROFILES[name]
     skin = presets.get("skin")
     assert max(skin.closing_mm, profile.closing_mm) >= skin.closing_mm
-    assert profile.thicken_mm > 0
     assert profile.min_feature_mm > 0
 
 
 def test_fdm_is_coarser_than_resin():
     fdm, resin = PRINT_PROFILES["fdm"], PRINT_PROFILES["resin"]
     assert fdm.closing_mm > resin.closing_mm
-    assert fdm.thicken_mm > resin.thicken_mm
     assert fdm.min_island_mm3 >= resin.min_island_mm3
     assert fdm.min_feature_mm > resin.min_feature_mm
 
 
 def test_a_flag_bent_profile_stops_claiming_to_be_the_original():
-    """`--thicken-mm 1.0` with the default profile used to log "anatomical: No
+    """`--min-feature-mm 1.0` with the default profile used to log "anatomical: No
     printability changes" while thickening by 1 mm."""
     import argparse
 
     from dicom_surface.cli import _resolve_print_profile
 
-    plain = argparse.Namespace(print_profile="anatomical", thicken_mm=None,
+    plain = argparse.Namespace(print_profile="anatomical", min_feature_mm=None,
                                closing_mm=None, min_island_mm3=None)
     assert _resolve_print_profile(plain) == ANATOMICAL
 
-    bent = argparse.Namespace(print_profile="anatomical", thicken_mm=1.0,
+    bent = argparse.Namespace(print_profile="anatomical", min_feature_mm=1.0,
                               closing_mm=None, min_island_mm3=None)
     profile = _resolve_print_profile(bent)
     assert profile != ANATOMICAL
-    assert profile.thicken_mm == 1.0
+    assert profile.min_feature_mm == 1.0
     assert "No printability changes" not in profile.description
     assert profile.name == "anatomical+flags"
 
@@ -329,8 +387,11 @@ def test_build_mask_seals_and_thickens_under_a_profile():
     printed_n = np.count_nonzero(sitk.GetArrayViewFromImage(printed))
     assert plain_n > 0 and printed_n > plain_n, "the resin profile must add material"
 
-    # the pore is gone
-    assert sitk.GetArrayViewFromImage(printed)[13, 13, 13] == 1
+    # The pore is gone. Ask in millimetres: a print profile moves the mask onto its
+    # own isotropic grid, so voxel indices are not comparable between the two.
+    pore_mm = plain.TransformIndexToPhysicalPoint((13, 13, 13))
+    assert printed[printed.TransformPhysicalPointToIndex(pore_mm)] == 1
+    assert plain[plain.TransformPhysicalPointToIndex(pore_mm)] == 0
 
 
 def test_a_profile_deletes_fragments_it_cannot_print():
@@ -351,22 +412,22 @@ def test_a_profile_deletes_fragments_it_cannot_print():
 
 
 def test_printability_warnings_are_silent_for_anatomical():
-    assert pipeline.printability_warnings(_box(), ANATOMICAL) == []
+    assert pipeline.printability_warnings(_box(), ANATOMICAL, (1.0, 1.0, 1.0)) == []
 
 
 def test_printability_warnings_report_thin_material():
     """A one-voxel wall against a 3 mm minimum feature: say so."""
     wall = _slab(thickness_voxels=1)
-    profile = presets.PrintProfile(name="t", description="d",
-                                   thicken_mm=1.0, min_feature_mm=3.0)
-    messages = " ".join(pipeline.printability_warnings(wall, profile))
+    profile = presets.PrintProfile(name="t", description="d", min_feature_mm=3.0)
+    messages = " ".join(pipeline.printability_warnings(wall, profile, (1.0, 1.0, 1.0)))
     assert "thinner than" in messages
 
 
-def test_thickening_is_silent_when_the_grid_can_honour_the_request():
-    """Isotropic 1 mm voxels realise a 1 mm request exactly. Nothing to warn about."""
-    profile = presets.PrintProfile(name="t", description="d", thicken_mm=1.0)
-    assert pipeline.thickening_warning(_box(spacing=(1.0, 1.0, 1.0)), profile) == []
+def test_grid_warnings_are_silent_when_the_grid_can_honour_the_request():
+    """Isotropic 1 mm voxels realise a 2 mm feature exactly. Nothing to warn about."""
+    profile = presets.PrintProfile(name="t", description="d", min_feature_mm=2.0)
+    grid = (1.0, 1.0, 1.0)
+    assert pipeline.grid_warnings(_box(spacing=grid), profile, grid) == []
 
 
 def test_thin_mask_speckles_a_voxelised_surface_which_is_why_thicken_ignores_it():
@@ -386,17 +447,18 @@ def test_thin_mask_speckles_a_voxelised_surface_which_is_why_thicken_ignores_it(
     assert speckle > 0, "the voxelised surface is locally sharp"
 
     # ... and yet a solid sphere must not grow at all
-    grown = segment.thicken(image, 1.5, 3.0)
+    grown = segment.thicken(image, 3.0)
     assert np.array_equal(sitk.GetArrayFromImage(image),
                           sitk.GetArrayFromImage(grown))
 
 
-def test_anisotropic_thickening_is_reported_not_hidden():
-    """On 0.8 mm slices a 0.4 mm request realises as 0.8 mm along z. Say so."""
-    image = _box(spacing=HEAD_CT)
-    profile = presets.PrintProfile(name="t", description="d", thicken_mm=0.4)
-    messages = " ".join(pipeline.printability_warnings(image, profile))
-    assert "realised as" in messages
+def test_the_scans_own_resolution_limit_is_reported_not_hidden():
+    """A 0.6 mm feature cannot be *measured* on 0.8 mm slices, however finely the
+    printability grid is chosen: bone that thin never entered the data."""
+    profile = presets.PrintProfile(name="t", description="d", min_feature_mm=0.6)
+    messages = " ".join(pipeline.grid_warnings(_box(spacing=(0.3, 0.3, 0.3)),
+                                               profile, HEAD_CT))
+    assert "not a measurement of the anatomy" in messages
 
 
 # ------------------------------------------------------------------- merge

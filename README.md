@@ -325,22 +325,52 @@ by the full thickening radius. So thin material is instead material that no
 sufficiently thick region can reach:
 
 ```
-core = opening(mask, feature / 2)         # everything thick enough
-thin = mask \ dilate(core, thicken_mm)    # beyond the core's reach
-out  = mask | dilate(thin, thicken_mm)
+r    = min_feature / 2
+core = opening(mask, r)         # everything already thick enough
+thin = mask \ dilate(core, r)    # beyond the thick material's reach
+out  = mask | dilate(thin, r)
 ```
 
-Measured: a solid sphere and a solid cube both grow by **+0.0%** with their bounding
-boxes unchanged; a one-voxel sheet grows from 1 voxel thick to 5. On the real skull,
-the `fdm` profile went from **+93.8% volume and +2.70 mm on the bounding box** with
-uniform dilation, to **+23.9% and +0.03 mm** by growing only the 1.6% of material
-that is genuinely too thin.
+One number, `--min-feature-mm`, because there is only one thing to say: *no wall
+thinner than T*. The probe that finds thin material and the growth that fixes it are
+the same ball of radius `T/2`. A separate "thickening distance" could only disagree
+with the minimum feature size about what was being promised.
 
-`--thicken-mm` is a *radius*, not a kernel extent. Every other millimetre parameter
-here is a kernel extent, floored so the realised kernel never exceeds the request,
-because overshooting a filter erases anatomy. Undershooting a thickening leaves a
-wall too thin to print — so it ceils, and never rounds a positive request down to
-nothing. On 0.8 mm slices a 0.4 mm request realises as 0.8 mm, and the tool says so.
+Measured: a solid sphere and a solid cube both grow by **+0.0%** with their bounding
+boxes unchanged. On the real skull the `fdm` profile grows only the 2.0% of material
+a 1.2 mm ball cannot reach, costing **+18.6% volume** and at most **+0.38 mm** on any
+bounding-box axis. Uniform dilation of everything costs +93.8% and +2.70 mm.
+
+### The scanner's slice pitch must not become the printer's tolerance
+
+Every kernel here is specified in millimetres and built from whole voxels. For the
+*floored* kernels that is harmless — they come out a little gentler than asked.
+For the thickening radius it is not. That one **ceils**, because undershooting a
+thickening leaves a wall too thin to print, and on an anisotropic grid the axes
+round independently. The "ball" becomes an ellipsoid:
+
+| scan | spacing (mm) | ball for a 1.2 mm wall | aspect |
+|---|---|---|---|
+| sinus CT | 0.45 × 0.45 × 0.30 | 0.90 × 0.90 × 0.60 | 1.5:1 |
+| facial CT | 0.32 × 0.32 × 0.80 | 0.63 × 0.63 × 0.80 | 1.3:1 |
+| routine head | 0.50 × 0.50 × 2.00 | 1.00 × 1.00 × **2.00** | 2.0:1 |
+| survey | 0.90 × 0.90 × 5.00 | 0.90 × 0.90 × **5.00** | 5.6:1 |
+
+On that last row, guaranteeing 1.2 mm walls would move the model's surface **5 mm**
+along z. So the grid is chosen from the feature size rather than inherited from the
+scan. Taking `mm = (T/2) / r` for integer `r` makes the voxel radius exactly `r` and
+the realised feature size exactly `T`; the smallest `r` whose grid is no coarser
+than the data wins. Upsampling invents no detail but costs voxels; downsampling
+destroys thin bone. Above a voxel budget the grid coarsens rather than exhausting
+memory, and the tool says by how much.
+
+A grid this fine is only built when a print profile asks for one. `anatomical` never
+resamples, and its output is byte-for-byte what it was before print profiles existed.
+
+It is not free. On a 0.32 × 0.32 × 0.80 mm head CT both profiles land on a 0.30 mm
+grid — 234 M voxels — and `convert` goes from 110 s and 3.2 GB to about 270 s and
+6.0 GB. In exchange, `resin` and `fdm` realise walls of exactly 0.60 mm and 1.20 mm
+on every axis, rather than 0.63 × 0.63 × 0.80 and 1.26 × 1.26 × 1.60.
 
 ### The thin-feature check
 
@@ -359,7 +389,12 @@ The probe is a ball rounded up to whole voxels, so on a coarse grid it tests for
 more material than you asked about. A solid sphere at 3 mm voxels reports 3.9% thin
 at a 1.2 mm feature size — an artefact of the probe, not of the geometry. When the
 realised probe exceeds twice the request, the tool reports *that* instead of a
-number. On 0.8 mm slices, a 0.6 mm feature is not assessable, and it says so. A printer's minimum feature size is a property of the
+number.
+
+There is a limit no grid can lift. A 0.6 mm wall cannot exist in a scan with 0.8 mm
+slices — it was never sampled. Thickening still *guarantees* 0.6 mm walls in the
+printed model, but that is a property of the model, not a measurement of the
+anatomy, and the tool says which one it is talking about. A printer's minimum feature size is a property of the
 printer, not of the anatomy, and the right answer to a thin orbital floor is a
 decision, not an automatic edit.
 

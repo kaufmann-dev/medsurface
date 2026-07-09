@@ -36,8 +36,8 @@ def _resolve_print_profile(args: argparse.Namespace):
     profile = presets_mod.get_print_profile(args.print_profile)
 
     changes = {}
-    if getattr(args, "thicken_mm", None) is not None:
-        changes["thicken_mm"] = args.thicken_mm
+    if getattr(args, "min_feature_mm", None) is not None:
+        changes["min_feature_mm"] = args.min_feature_mm
     if args.closing_mm is not None:
         changes["closing_mm"] = args.closing_mm
     if args.min_island_mm3 is not None:
@@ -47,7 +47,7 @@ def _resolve_print_profile(args: argparse.Namespace):
 
     # A profile bent by explicit flags is no longer the profile it was named after.
     # `anatomical` in particular must stop describing itself as "no changes" the
-    # moment --thicken-mm is given.
+    # moment --min-feature-mm is given.
     return replace(profile, name="%s+flags" % profile.name,
                    description="based on '%s', overridden on the command line" % profile.name,
                    **changes)
@@ -384,7 +384,8 @@ def cmd_presets(_args: argparse.Namespace) -> int:
     print("PRINT PROFILES  --  what a printer needs  (--print-profile)")
     print()
     print("  Composes with any preset: raises its closing and island filter, and")
-    print("  thickens walls. Triangle budget stays with --preset / --target-faces.")
+    print("  brings thin walls up to the printer's minimum feature size. Triangle")
+    print("  budget stays with --preset / --target-faces.")
     print()
     for name in sorted(PRINT_PROFILES):
         p = PRINT_PROFILES[name]
@@ -393,9 +394,8 @@ def cmd_presets(_args: argparse.Namespace) -> int:
         if p == presets_mod.ANATOMICAL:
             print("    (the default: no geometric changes at all)")
         else:
-            print("    closing>=%.1fmm  thicken=%.1fmm radius  islands>=%.0fmm3  "
-                  "min feature=%.1fmm"
-                  % (p.closing_mm, p.thicken_mm, p.min_island_mm3, p.min_feature_mm))
+            print("    closing>=%.1fmm  islands>=%.0fmm3  no wall thinner than %.1fmm"
+                  % (p.closing_mm, p.min_island_mm3, p.min_feature_mm))
         print()
     return 0
 
@@ -428,9 +428,10 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--print-profile", default="anatomical", choices=sorted(PRINT_PROFILES),
                     help="prepare the mesh for a printer (default: %(default)s, which "
                          "makes no printability changes)")
-    pc.add_argument("--thicken-mm", type=float,
-                    help="grow every surface outward by this radius, thickening walls. "
-                         "Also enlarges the model's outer dimensions.")
+    pc.add_argument("--min-feature-mm", type=float,
+                    help="the printer's minimum feature size: no wall thinner than this. "
+                         "Only material below it is grown, so bone that is already thick "
+                         "enough keeps its dimensions.")
     pc.add_argument("--all-islands", action="store_true",
                     help="keep every labelmap island, not just the largest")
     pc.add_argument("--all-components", action="store_true",
@@ -474,8 +475,8 @@ def build_parser() -> argparse.ArgumentParser:
     pm.add_argument("--print-profile", default="anatomical", choices=sorted(PRINT_PROFILES),
                     help="prepare the fused mesh for a printer (default: %(default)s). "
                          "Registration always runs on unmodified anatomy.")
-    pm.add_argument("--thicken-mm", type=float,
-                    help="grow every surface outward by this radius, thickening walls")
+    pm.add_argument("--min-feature-mm", type=float,
+                    help="the printer's minimum feature size: no wall thinner than this")
     pm.add_argument("--grid-mm", type=float, default=DEFAULT_GRID_MM,
                     help="isotropic voxel size of the fused grid (default %(default)s). "
                          "Finer keeps thinner bone, at cubic memory cost.")
