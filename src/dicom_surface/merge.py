@@ -41,13 +41,13 @@ Logger = Callable[[str], None]
 #: enough that a whole head fits in memory: a head at 0.4 mm is ~170M voxels.
 DEFAULT_GRID_MM = 0.4
 
-#: Surface defaults for the fused grid. Lighter than `convert`'s on purpose: an
-#: isotropic grid has no slice terracing to smooth away, so heavy smoothing would
-#: only cost detail.
-DEFAULT_SMOOTH_ITERS = 6
-DEFAULT_PASSBAND = 0.18
-DEFAULT_TARGET_FACES = 2_000_000
-DEFAULT_POST_SMOOTH_ITERS = 6
+#: The surface stage is the preset's, unchanged. An earlier version smoothed the
+#: fused grid far more lightly, on the theory that an isotropic grid has no slice
+#: terracing to remove. It does: the terracing is baked into each scan's *mask*
+#: by its own slice pitch, long before anything is resampled. Resampling a 0.8 mm
+#: staircase onto a 0.4 mm grid samples the staircase more finely; it does not
+#: flatten it. A fused surface must be smoothed exactly as a single-scan one is,
+#: or it looks visibly rougher than the scans it was built from.
 
 # --- acceptance gates -------------------------------------------------------
 # Calibrated against four true pairs and one deliberate impostor (a metal bar
@@ -312,14 +312,22 @@ def merge(
     output_path: str,
     threshold: float | None = None,
     grid_mm: float = DEFAULT_GRID_MM,
-    smooth_iters: int = DEFAULT_SMOOTH_ITERS,
-    passband: float = DEFAULT_PASSBAND,
-    target_faces: int = DEFAULT_TARGET_FACES,
-    post_smooth_iters: int = DEFAULT_POST_SMOOTH_ITERS,
+    smooth_iters: int | None = None,
+    passband: float | None = None,
+    target_faces: int | None = None,
+    post_smooth_iters: int | None = None,
     force: bool = False,
     log: Logger | None = None,
 ) -> MergeResult:
     started = time.time()
+
+    # Fall back to the preset, so a fused surface is finished exactly as a
+    # single-scan one is.
+    smooth_iters = preset.smooth_iters if smooth_iters is None else smooth_iters
+    passband = preset.passband if passband is None else passband
+    target_faces = preset.target_faces if target_faces is None else target_faces
+    post_smooth_iters = (preset.post_smooth_iters if post_smooth_iters is None
+                         else post_smooth_iters)
 
     def say(msg: str) -> None:
         if log:

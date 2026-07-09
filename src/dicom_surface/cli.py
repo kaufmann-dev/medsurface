@@ -418,11 +418,10 @@ def build_parser() -> argparse.ArgumentParser:
     pm.add_argument("--grid-mm", type=float, default=merge_defaults.DEFAULT_GRID_MM,
                     help="isotropic voxel size of the fused grid (default %(default)s). "
                          "Finer keeps thinner bone, at cubic memory cost.")
-    pm.add_argument("--smooth-iters", type=int, default=merge_defaults.DEFAULT_SMOOTH_ITERS)
-    pm.add_argument("--passband", type=float, default=merge_defaults.DEFAULT_PASSBAND)
-    pm.add_argument("--target-faces", type=int, default=merge_defaults.DEFAULT_TARGET_FACES)
-    pm.add_argument("--post-smooth-iters", type=int,
-                    default=merge_defaults.DEFAULT_POST_SMOOTH_ITERS)
+    pm.add_argument("--smooth-iters", type=int, help="default: from the preset")
+    pm.add_argument("--passband", type=float, help="default: from the preset")
+    pm.add_argument("--target-faces", type=int, help="default: from the preset")
+    pm.add_argument("--post-smooth-iters", type=int, help="default: from the preset")
     pm.add_argument("--force", action="store_true",
                     help="fuse even if the scans look like different patients or the "
                          "registration fails its quality gates")
