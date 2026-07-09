@@ -8,8 +8,8 @@ from typing import Any, Callable
 
 import SimpleITK as sitk
 
-from . import segment, surface, volume as volume_mod
-from .presets import Preset, accepts_modality
+from . import geometry, segment, surface, volume as volume_mod
+from .presets import ANATOMICAL, Preset, PrintProfile, accepts_modality
 from .series import Series
 
 Logger = Callable[[str], None]
@@ -36,21 +36,73 @@ class ModalityMismatch(ValueError):
 
 
 def build_mask(image: sitk.Image, preset: Preset, threshold: float,
+               profile: PrintProfile = ANATOMICAL,
                log: Callable[[str], None] | None = None) -> sitk.Image:
     """Threshold and clean a volume into a binary bone mask.
 
     Shared by ``convert`` and ``merge`` so the two can never drift apart: a fused
     surface must be built from exactly the mask a single-scan conversion would
     have produced.
+
+    The print profile composes with ``max()``, never assignment: a profile may
+    only *add* printability. It cannot quietly relax a tissue preset that already
+    closes harder than the printer needs -- ``skin`` closes 3.2 mm, more than the
+    resin profile asks for. With ``ANATOMICAL`` every term is zero and this is
+    exactly the anatomical pipeline.
     """
+    closing_mm = max(preset.closing_mm, profile.closing_mm)
+    min_island_mm3 = max(preset.min_island_mm3, profile.min_island_mm3)
+
     binary = segment.binarize(image, threshold, preset.threshold_max)
-    binary = segment.islands(binary, preset.keep_largest_island, preset.min_island_mm3, log)
+    binary = segment.islands(binary, preset.keep_largest_island, min_island_mm3, log)
     binary = segment.median(binary, preset.median_mm, log)
     if preset.opening_mm > 0:
         binary = segment.opening(binary, preset.opening_mm, log)
-    binary = segment.closing(binary, preset.closing_mm, log)
-    binary = segment.islands(binary, preset.keep_largest_island, preset.min_island_mm3, log)
+    binary = segment.closing(binary, closing_mm, log)
+    # Thicken after sealing: dilating first would widen every pore's rim before
+    # the closing had a chance to bridge it.
+    binary = segment.dilate(binary, profile.thicken_mm, log)
+    binary = segment.islands(binary, preset.keep_largest_island, min_island_mm3, log)
     return binary
+
+
+def thickening_warning(mask: sitk.Image, profile: PrintProfile) -> list[str]:
+    """State how far the surface actually moved. Cheap: no image is touched.
+
+    Reported per scan, because two scans of one body rarely share a voxel grid and
+    the realised growth follows the grid, not the request.
+    """
+    if profile.thicken_mm <= 0:
+        return []
+    radii = geometry.dilation_radius_voxels(profile.thicken_mm, mask.GetSpacing())
+    grown = geometry.dilation_extent_mm(radii, mask.GetSpacing())
+    if max(grown) > 1.25 * profile.thicken_mm:
+        return ["thickening by %.2f mm realised as %s mm on this voxel grid; outer "
+                "dimensions grow by twice that on each axis"
+                % (profile.thicken_mm, " x ".join("%.2f" % g for g in grown))]
+    return ["thickened by %.2f mm, so outer dimensions are %.2f mm larger on every "
+            "axis than the scan" % (profile.thicken_mm, 2 * profile.thicken_mm)]
+
+
+def thin_material_warning(mask: sitk.Image, profile: PrintProfile) -> list[str]:
+    """Measure what a ball of the printer's minimum feature size cannot reach.
+
+    Costs one morphological opening, so callers pass the mask they actually care
+    about rather than every intermediate.
+    """
+    if profile.min_feature_mm <= 0:
+        return []
+    thin = segment.thin_fraction(mask, profile.min_feature_mm)
+    if thin <= 0.05:
+        return []
+    return ["%.1f%% of the material is thinner than the %.1f mm minimum feature size "
+            "of the '%s' profile and may not print; raise --thicken-mm"
+            % (100 * thin, profile.min_feature_mm, profile.name)]
+
+
+def printability_warnings(mask: sitk.Image, profile: PrintProfile) -> list[str]:
+    """Report, never enforce. Empty for ``ANATOMICAL``."""
+    return thickening_warning(mask, profile) + thin_material_warning(mask, profile)
 
 
 def resolve_threshold(
@@ -78,6 +130,7 @@ def convert(
     output_path: str,
     threshold: float | None = None,
     cap_field_of_view: bool = True,
+    print_profile: PrintProfile = ANATOMICAL,
     log: Logger | None = None,
 ) -> Result:
     t0 = time.time()
@@ -108,7 +161,12 @@ def convert(
             "segmented" % (value, hi)
         )
 
-    binary = step("segment", lambda: build_mask(vol.image, preset, value, say))
+    # Value equality, not identity: --thicken-mm rebuilds the profile via replace().
+    if print_profile != ANATOMICAL:
+        say("print profile %s: %s" % (print_profile.name, print_profile.description))
+    binary = step("segment",
+                  lambda: build_mask(vol.image, preset, value, print_profile, say))
+    warnings.extend(printability_warnings(binary, print_profile))
 
     label_stats = sitk.LabelShapeStatisticsImageFilter()
     label_stats.Execute(sitk.ConnectedComponent(binary))
@@ -194,6 +252,7 @@ def convert(
         "preset": asdict(preset),
         "threshold": value,
         "threshold_source": source,
+        "print_profile": asdict(print_profile),
         "capped_field_of_view": bool(touches and cap_field_of_view),
         "coordinate_system": "LPS (DICOM patient space)",
     }

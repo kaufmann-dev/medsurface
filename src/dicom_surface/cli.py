@@ -6,8 +6,11 @@ import argparse
 import json
 import sys
 
+from dataclasses import replace
+
 from . import presets as presets_mod
 from .merge import DEFAULT_GRID_MM
+from .presets import PRINT_PROFILES
 from . import pipeline, series as series_mod, validate as validate_mod
 from .presets import PRESETS
 
@@ -22,6 +25,24 @@ def _quiet(msg: str) -> None:  # noqa: ARG001
 
 def _warn(msg: str) -> None:
     print("warning: %s" % msg, file=sys.stderr, flush=True)
+
+
+def _resolve_print_profile(args: argparse.Namespace):
+    """Compose the print profile, letting explicit flags beat it.
+
+    ``build_mask`` takes ``max(preset.closing_mm, profile.closing_mm)``, so an
+    explicit ``--closing-mm`` has to be written to *both* sides or the profile
+    would silently win whenever it asks for more.
+    """
+    profile = presets_mod.get_print_profile(args.print_profile)
+
+    if getattr(args, "thicken_mm", None) is not None:
+        profile = replace(profile, thicken_mm=args.thicken_mm)
+    if args.closing_mm is not None:
+        profile = replace(profile, closing_mm=args.closing_mm)
+    if args.min_island_mm3 is not None:
+        profile = replace(profile, min_island_mm3=args.min_island_mm3)
+    return profile
 
 
 # --------------------------------------------------------------------- list
@@ -151,6 +172,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
             output_path=args.output,
             threshold=threshold,
             cap_field_of_view=not args.no_cap,
+            print_profile=_resolve_print_profile(args),
             log=log,
         )
     except pipeline.ModalityMismatch as exc:
@@ -253,6 +275,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             passband=args.passband,
             target_faces=args.target_faces,
             post_smooth_iters=args.post_smooth_iters,
+            print_profile=_resolve_print_profile(args),
             force=args.force,
             log=log,
         )
@@ -337,15 +360,34 @@ def cmd_repair(args: argparse.Namespace) -> int:
 
 # ---------------------------------------------------------------- presets
 def cmd_presets(_args: argparse.Namespace) -> int:
+    print("PRESETS  --  what tissue to extract, and how finely  (--preset)")
+    print()
     for name in sorted(PRESETS):
         p = PRESETS[name]
         modality = ", ".join(p.modalities) if p.modalities else "any"
         thr = p.threshold if isinstance(p.threshold, str) else "%g" % p.threshold
-        print("%-12s  [%s]" % (name, modality))
-        print("  %s" % p.description)
+        print("  %-12s  [%s]" % (name, modality))
+        print("    %s" % p.description)
         triangles = f"{p.target_faces:,}" if p.target_faces else "all"
-        print("  threshold=%s  median=%.1fmm  closing=%.1fmm  smooth=%d  triangles=%s"
+        print("    threshold=%s  median=%.1fmm  closing=%.1fmm  smooth=%d  triangles=%s"
               % (thr, p.median_mm, p.closing_mm, p.smooth_iters, triangles))
+        print()
+
+    print("PRINT PROFILES  --  what a printer needs  (--print-profile)")
+    print()
+    print("  Composes with any preset: raises its closing and island filter, and")
+    print("  thickens walls. Orthogonal to `bone-print`, which is a triangle budget.")
+    print()
+    for name in sorted(PRINT_PROFILES):
+        p = PRINT_PROFILES[name]
+        print("  %-12s" % name)
+        print("    %s" % p.description)
+        if p == presets_mod.ANATOMICAL:
+            print("    (the default: no geometric changes at all)")
+        else:
+            print("    closing>=%.1fmm  thicken=%.1fmm radius  islands>=%.0fmm3  "
+                  "min feature=%.1fmm"
+                  % (p.closing_mm, p.thicken_mm, p.min_island_mm3, p.min_feature_mm))
         print()
     return 0
 
@@ -375,6 +417,12 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--closing-mm", type=float, help="pore-sealing kernel extent, mm")
     pc.add_argument("--opening-mm", type=float, help="bridge-breaking kernel extent, mm")
     pc.add_argument("--min-island-mm3", type=float, help="drop blobs smaller than this")
+    pc.add_argument("--print-profile", default="anatomical", choices=sorted(PRINT_PROFILES),
+                    help="prepare the mesh for a printer (default: %(default)s, which "
+                         "makes no printability changes)")
+    pc.add_argument("--thicken-mm", type=float,
+                    help="grow every surface outward by this radius, thickening walls. "
+                         "Also enlarges the model's outer dimensions.")
     pc.add_argument("--all-islands", action="store_true",
                     help="keep every labelmap island, not just the largest")
     pc.add_argument("--all-components", action="store_true",
@@ -415,6 +463,11 @@ def build_parser() -> argparse.ArgumentParser:
     pm.add_argument("--median-mm", type=float)
     pm.add_argument("--closing-mm", type=float)
     pm.add_argument("--min-island-mm3", type=float)
+    pm.add_argument("--print-profile", default="anatomical", choices=sorted(PRINT_PROFILES),
+                    help="prepare the fused mesh for a printer (default: %(default)s). "
+                         "Registration always runs on unmodified anatomy.")
+    pm.add_argument("--thicken-mm", type=float,
+                    help="grow every surface outward by this radius, thickening walls")
     pm.add_argument("--grid-mm", type=float, default=DEFAULT_GRID_MM,
                     help="isotropic voxel size of the fused grid (default %(default)s). "
                          "Finer keeps thinner bone, at cubic memory cost.")

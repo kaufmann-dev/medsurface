@@ -7,7 +7,13 @@ import math
 import numpy as np
 import SimpleITK as sitk
 
-from .geometry import kernel_extent_mm, kernel_radius_voxels, mm3_to_voxels
+from .geometry import (
+    dilation_extent_mm,
+    dilation_radius_voxels,
+    kernel_extent_mm,
+    kernel_radius_voxels,
+    mm3_to_voxels,
+)
 
 FOREGROUND = 1
 
@@ -146,6 +152,60 @@ def opening(image: sitk.Image, mm: float, log=None) -> sitk.Image:
         image, kernelRadius=r, kernelType=sitk.sitkBall,
         foregroundValue=FOREGROUND,
     )
+
+
+def dilate(image: sitk.Image, mm: float, log=None) -> sitk.Image:
+    """Grow the foreground outward by at least ``mm``, to thicken walls for printing.
+
+    ``mm`` is a radius, not a kernel extent -- the distance the surface moves --
+    which is why this uses :func:`geometry.dilation_radius_voxels` and not the
+    flooring converter every other filter here uses. Anisotropic voxels make the
+    realised growth exceed the request on the coarse axis; the log line says by
+    how much.
+
+    Note this inflates the model's outer dimensions too, by the same amount. That
+    is the honest cost of thickening a surface model: there is no way to fatten
+    the walls of a shell without moving its outside.
+    """
+    if mm <= 0:
+        return image
+    spacing = image.GetSpacing()
+    radii = dilation_radius_voxels(mm, spacing)
+    grown = dilation_extent_mm(radii, spacing)
+    if log:
+        log("thicken %-11s -> %s voxels = grows %s mm"
+            % ("%.2f mm" % mm, radii, _fmt(grown)))
+    return sitk.BinaryDilate(
+        image, kernelRadius=radii, kernelType=sitk.sitkBall,
+        foregroundValue=FOREGROUND,
+    )
+
+
+def thin_fraction(image: sitk.Image, min_feature_mm: float) -> float:
+    """Fraction of the material a ball of ``min_feature_mm`` diameter cannot reach.
+
+    Thin material is exactly the material that survives the mask but not a
+    morphological opening by that ball -- which is the definition of an opening,
+    so no distance transform or local-thickness estimator is needed.
+
+    Reported, never enforced. A printer's minimum feature size is a property of
+    the printer, not of the anatomy, and the right response to a thin orbital
+    floor is a decision, not an automatic edit.
+    """
+    if min_feature_mm <= 0:
+        return 0.0
+    total = float(np.count_nonzero(sitk.GetArrayViewFromImage(image)))
+    if total == 0:
+        return 0.0
+
+    # A ball of diameter d fits where an opening by radius d/2 survives.
+    radii = dilation_radius_voxels(min_feature_mm / 2.0, image.GetSpacing())
+    opened = sitk.BinaryMorphologicalOpening(
+        image, kernelRadius=radii, kernelType=sitk.sitkBall,
+        foregroundValue=FOREGROUND,
+    )
+    thick = float(np.count_nonzero(sitk.GetArrayViewFromImage(opened)))
+    return max(0.0, (total - thick) / total)
 
 
 def islands(
