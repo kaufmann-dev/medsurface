@@ -353,9 +353,13 @@ thin_fraction = |mask \ opening(mask, radius = min_feature / 2)| / |mask|
 ```
 
 This is the right measure for *reporting* local thickness and the wrong one for
-*selecting* what to grow — see above. It carries a small, curvature-dependent floor
-from the voxelised surface: a solid sphere of radius 20 mm reports 0.09% thin at a
-3 mm feature size, one of radius 10 mm reports 1.6%. Above 5%, `convert` warns. A printer's minimum feature size is a property of the
+*selecting* what to grow — see above. Above 5%, `convert` warns.
+
+The probe is a ball rounded up to whole voxels, so on a coarse grid it tests for
+more material than you asked about. A solid sphere at 3 mm voxels reports 3.9% thin
+at a 1.2 mm feature size — an artefact of the probe, not of the geometry. When the
+realised probe exceeds twice the request, the tool reports *that* instead of a
+number. On 0.8 mm slices, a 0.6 mm feature is not assessable, and it says so. A printer's minimum feature size is a property of the
 printer, not of the anatomy, and the right answer to a thin orbital floor is a
 decision, not an automatic edit.
 

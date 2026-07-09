@@ -95,6 +95,44 @@ def test_thin_fraction_flags_a_thin_slab_and_clears_a_thick_one():
     assert segment.thin_fraction(thick, 3.0) < 0.5
 
 
+def test_realised_feature_reports_what_the_grid_actually_probes():
+    """The probe is a ball rounded up to whole voxels, so on a coarse grid it is
+    larger than requested. Saying so is the difference between a diagnostic and a
+    fiction."""
+    image = _box(spacing=(0.315, 0.315, 0.8))
+    assert segment.realised_feature_mm(image, 1.2) == pytest.approx([1.26, 1.26, 1.6])
+    assert segment.realised_feature_mm(image, 0.0) == [0.0, 0.0, 0.0]
+
+
+def test_a_feature_smaller_than_the_slice_pitch_is_not_measurable():
+    """0.6 mm walls cannot be assessed on 0.8 mm slices: the probe becomes 1.6 mm."""
+    anisotropic = _box(spacing=(0.315, 0.315, 0.8))
+    assert segment.feature_is_resolvable(anisotropic, 1.2)
+    assert not segment.feature_is_resolvable(anisotropic, 0.6)
+
+    coarse = _box(spacing=(3.0, 3.0, 3.0))
+    assert not segment.feature_is_resolvable(coarse, 1.2)
+    assert segment.feature_is_resolvable(_box(spacing=(0.5, 0.5, 0.5)), 1.2)
+
+
+def test_unmeasurable_feature_reports_that_instead_of_a_number():
+    """A solid sphere at 3 mm voxels reports 3.9% thin at a 1.2 mm feature size --
+    an artefact of the probe, not of the geometry. Report the limitation, not the
+    artefact."""
+    profile = presets.PrintProfile(name="t", description="d", min_feature_mm=1.2)
+    coarse = pipeline.thin_material_warning(_box(spacing=(3.0, 3.0, 3.0)), profile)
+    assert coarse and "cannot assess" in coarse[0]
+
+    # A genuinely thick block: 8 mm across at 0.2 mm voxels. (`_box` is only
+    # 1.6 mm across there, which really is thin against a 1.2 mm feature.)
+    arr = np.zeros((60, 60, 60), dtype=np.uint8)
+    arr[10:50, 10:50, 10:50] = 1
+    thick = sitk.GetImageFromArray(arr)
+    thick.SetSpacing((0.2, 0.2, 0.2))
+    assert pipeline.thin_material_warning(thick, profile) == [], \
+        "an 8 mm block is not thin against a 1.2 mm feature"
+
+
 def test_thin_fraction_is_zero_when_not_asked_for():
     assert segment.thin_fraction(_slab(1), 0.0) == 0.0
 
