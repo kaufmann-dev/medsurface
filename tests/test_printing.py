@@ -9,8 +9,6 @@ still moved the surface by up to 0.40 mm and dropped the mean dihedral angle fro
 11.90 to 10.22 degrees.
 """
 
-import math
-
 import numpy as np
 import pytest
 import SimpleITK as sitk
@@ -245,6 +243,26 @@ def test_fdm_is_coarser_than_resin():
     assert fdm.thicken_mm > resin.thicken_mm
     assert fdm.min_island_mm3 >= resin.min_island_mm3
     assert fdm.min_feature_mm > resin.min_feature_mm
+
+
+def test_a_flag_bent_profile_stops_claiming_to_be_the_original():
+    """`--thicken-mm 1.0` with the default profile used to log "anatomical: No
+    printability changes" while thickening by 1 mm."""
+    import argparse
+
+    from dicom_surface.cli import _resolve_print_profile
+
+    plain = argparse.Namespace(print_profile="anatomical", thicken_mm=None,
+                               closing_mm=None, min_island_mm3=None)
+    assert _resolve_print_profile(plain) == ANATOMICAL
+
+    bent = argparse.Namespace(print_profile="anatomical", thicken_mm=1.0,
+                              closing_mm=None, min_island_mm3=None)
+    profile = _resolve_print_profile(bent)
+    assert profile != ANATOMICAL
+    assert profile.thicken_mm == 1.0
+    assert "No printability changes" not in profile.description
+    assert profile.name == "anatomical+flags"
 
 
 def test_unknown_profile_lists_alternatives():
