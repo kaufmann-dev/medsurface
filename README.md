@@ -37,7 +37,15 @@ pip install dicom-surface                 # core
 pip install 'dicom-surface[repair]'       # + repair of meshes from elsewhere
 ```
 
-Python 3.10+. No 3D Slicer, no system packages.
+Python 3.10+. No 3D Slicer.
+
+Desktop Linux already has what you need. On a minimal image — a container, a CI
+runner, a headless server — install the OpenGL libraries that pymeshlab's plugins
+link against, or decimation fails with `Filter does not exists`:
+
+```sh
+apt install libgl1 libopengl0
+```
 
 ## Usage
 
