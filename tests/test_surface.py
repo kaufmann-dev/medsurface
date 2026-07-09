@@ -143,6 +143,35 @@ def test_decimation_hits_the_triangle_budget(solid_sphere, tmp_path):
     assert smaller.GetNumberOfPolys() == pytest.approx(target, rel=0.25)
 
 
+def test_smoothing_trades_roughness_for_displacement(solid_sphere):
+    """More iterations means a smoother surface that sits further from the data.
+
+    Guards the one knob users actually feel. Windowed-sinc must not shrink the
+    surface either -- a plain Laplacian would contract it toward the centroid.
+    """
+    import numpy as np
+    import trimesh
+
+    image, radius = solid_sphere
+    padded = segment.pad(image, 1)
+    affine = surface.index_to_physical(padded)
+    raw = surface.transform(surface.marching_cubes(surface.to_vtk_image(padded)), affine)
+
+    ref = trimesh.Trimesh(*surface.to_arrays(raw), process=True)
+    exact = 4.0 / 3.0 * math.pi * radius**3
+
+    roughness = []
+    for iterations in (0, 10, 25, 40):
+        poly = surface.smooth(raw, iterations, 0.1) if iterations else raw
+        m = trimesh.Trimesh(*surface.to_arrays(poly), process=True)
+        roughness.append(float(np.degrees(m.face_adjacency_angles).mean()))
+        # no shrinkage: volume stays within 2% of the analytic sphere
+        assert m.volume == pytest.approx(exact, rel=0.02), iterations
+
+    assert roughness == sorted(roughness, reverse=True), roughness
+    assert roughness[0] > roughness[-1]
+
+
 def test_count_defects_matches_validate(clipped_sphere, solid_sphere):
     closed = _mesh(solid_sphere[0])
     assert surface.count_defects(closed) == (0, 0)

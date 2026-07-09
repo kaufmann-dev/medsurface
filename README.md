@@ -140,6 +140,34 @@ to voxel centres, putting its zero level half a voxel inside the true boundary: 
 6% volume loss on a 20 mm sphere. Smoothed fractional occupancy, thresholded at
 0.5, keeps the error under 0.5%.
 
+## Smoothing
+
+Smoothing is the one knob you will feel, and it is a real trade: every iteration
+buys a smoother surface by moving it further from the data. Windowed-sinc is used
+rather than a plain Laplacian, which would shrink a closed surface toward its
+centroid on every pass.
+
+Measured on a head CT (600k triangles, deviation against the unsmoothed surface):
+
+| `--post-smooth-iters` | mean dihedral | creased edges | RMS error | max error |
+|---|---|---|---|---|
+| 0 | 19.7° | 21.4% | 0.045 mm | 0.23 mm |
+| 12 | 15.1° | 13.6% | 0.069 mm | 0.28 mm |
+| **25** (default) | **11.7°** | **8.8%** | **0.107 mm** | **0.52 mm** |
+| 40 | 10.8° | 7.5% | 0.131 mm | 0.64 mm |
+
+25 is the default because it is where the curve turns. The scan's slices are
+0.8 mm apart, so its stair-step artefact has an amplitude around 0.4 mm --
+*five times* the 0.085 mm mean displacement the filter introduces to remove it.
+Smoothing here erases more error than it creates. Past 25, the returns collapse:
+40 iterations buy 0.9° of smoothness for another 0.024 mm of RMS.
+
+The cost is not evenly spread. Mean displacement stays far below one voxel, but
+the *maximum* lands on thin spicules and sharp crests -- exactly where a CT is
+least trustworthy, and exactly where the geometry is real. If you are measuring
+rather than looking, use `bone-detail`, which smooths lightly (~0.02 mm mean) and
+lets you see the scanner's stair-steps instead of a filter's opinion of them.
+
 ## Sharp kernels
 
 CT reconstruction kernels trade noise against resolution. Sharp ones (Siemens
