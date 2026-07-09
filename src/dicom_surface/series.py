@@ -1,6 +1,6 @@
 """DICOM series discovery, ordering and ranking.
 
-Two things routinely go wrong when reading a DICOM directory:
+Three things routinely go wrong when reading a DICOM directory:
 
 1. **Filenames carry no ordering guarantee.** Instances are frequently written in
    acquisition or arbitrary order. Sorting by filename produces a volume with
@@ -11,6 +11,14 @@ Two things routinely go wrong when reading a DICOM directory:
 2. **One directory holds many series.** A single study typically contains scout
    images, several reconstruction kernels, and multi-planar reformats. Picking
    "the DICOM files in this folder" silently mixes them.
+
+3. **One SeriesInstanceUID may hold many orientations.** Nothing in DICOM forbids
+   it, and reformat/secondary-capture series do it routinely. A real study seen
+   here had 64 axial frames and one perpendicular frame under a single UID.
+   Taking the slice normal from whichever instance the filesystem yields first
+   then projects every position onto the wrong axis: slice spacing collapses from
+   2.0 mm to 3.9e-07 mm, ordering is scrambled, and nothing raises. Instances are
+   therefore grouped by ``(SeriesInstanceUID, orientation)``.
 
 This module never reads patient identifiers. Only geometry, modality and
 acquisition parameters are extracted.
@@ -35,6 +43,18 @@ SHARP_KERNEL_RE = re.compile(r"(?:^|[^0-9])(?:[BHUY]r?|BONE|EDGE|LUNG)\s*_?([6-9
 #: Series we should never try to reconstruct.
 _NON_IMAGE_MODALITIES = {"SR", "PR", "KO", "SEG", "RTSTRUCT", "RTPLAN", "RTDOSE", "DOC"}
 
+#: Minimum slices for a stack to be worth reconstructing.
+MIN_SLICES = 5
+
+#: No clinical scanner reconstructs slices thinner than this. A value below it
+#: means the geometry was computed wrong, not that the scan is very fine.
+MIN_SLICE_SPACING_MM = 0.01
+
+#: Instances whose orientations agree to within this angle belong to the same
+#: stack. Exact equality is too strict: oblique reformats carry float jitter in
+#: ImageOrientationPatient.
+ORIENTATION_TOLERANCE_DEG = 2.0
+
 
 @dataclass
 class Series:
@@ -51,6 +71,11 @@ class Series:
     is_localizer: bool = False
     #: Unit normal of the slice plane, in patient coordinates.
     normal: tuple[float, float, float] | None = None
+    #: Which orientation group of its SeriesInstanceUID this is, 1-based, and how
+    #: many groups that UID was split into. ``n_parts > 1`` means the UID mixed
+    #: orientations.
+    part: int = 1
+    n_parts: int = 1
     #: Populated by :meth:`finalise`.
     slice_spacing: float | None = None
     spacing_uniform: bool = True
@@ -61,6 +86,14 @@ class Series:
     @property
     def n_slices(self) -> int:
         return len(self.files)
+
+    @property
+    def ident(self) -> str:
+        """Stable handle for ``--series``. ``6`` normally, ``1021.2`` when split."""
+        number = self.series_number if self.series_number is not None else "?"
+        if self.n_parts > 1:
+            return "%s.%d" % (number, self.part)
+        return "%s" % number
 
     @property
     def voxel_volume_mm3(self) -> float | None:
@@ -84,12 +117,33 @@ class Series:
         return ("sagittal", "coronal", "axial")[axis]
 
     @property
+    def unusable_reason(self) -> str | None:
+        """Why this stack cannot be reconstructed, or None if it can.
+
+        The geometry checks are not paranoia. A stack whose slice spacing is a
+        fraction of a micron, or whose spacing varies by more than half its own
+        median, cannot be placed on a regular grid; SimpleITK will resample it
+        anyway and hand back a confidently wrong volume.
+        """
+        if self.is_localizer:
+            return "localizer"
+        if self.modality in _NON_IMAGE_MODALITIES:
+            return "not an image series"
+        if self.n_slices < MIN_SLICES:
+            return "only %d slice(s)" % self.n_slices
+
+        spacing = self.slice_spacing
+        if spacing is None or not math.isfinite(spacing):
+            return "no slice spacing"
+        if spacing < MIN_SLICE_SPACING_MM:
+            return "implausible slice spacing (%.2g mm)" % spacing
+        if self.spacing_spread_mm > max(0.1, 0.5 * spacing):
+            return "irregular spacing (spread %.2f mm)" % self.spacing_spread_mm
+        return None
+
+    @property
     def usable(self) -> bool:
-        return (
-            self.n_slices >= 5
-            and not self.is_localizer
-            and self.modality not in _NON_IMAGE_MODALITIES
-        )
+        return self.unusable_reason is None
 
     def label(self) -> str:
         parts = [self.modality, self.description or "(no description)"]
@@ -108,24 +162,58 @@ def _read_header(path: str):
         return None
 
 
-def discover(root: str) -> list[Series]:
-    """Walk ``root`` and group every readable DICOM instance by SeriesInstanceUID."""
-    by_uid: dict[str, Series] = {}
-    positions: dict[str, list[tuple[float, str]]] = {}
-    normals: dict[str, np.ndarray] = {}
+def _orientation_matches(a: np.ndarray, b: np.ndarray, tol_deg: float) -> bool:
+    """Same slice plane *and* same in-plane axes, within an angular tolerance."""
+    cos_lim = math.cos(math.radians(tol_deg))
+    for i in (0, 1):  # row direction, column direction
+        u, v = a[3 * i:3 * i + 3], b[3 * i:3 * i + 3]
+        nu, nv = np.linalg.norm(u), np.linalg.norm(v)
+        if nu == 0 or nv == 0:
+            return False
+        if float(np.dot(u, v) / (nu * nv)) < cos_lim:
+            return False
+    return True
 
-    for dirpath, _dirnames, filenames in os.walk(root):
-        for fn in filenames:
+
+def discover(root: str) -> list[Series]:
+    """Walk ``root``, grouping instances by (SeriesInstanceUID, orientation).
+
+    Grouping on the UID alone is not enough: a single UID may carry several
+    orientations, and the slice normal taken from an arbitrary member then
+    scrambles the ordering of all the others. Directory and file names are sorted
+    so that discovery does not depend on filesystem iteration order.
+    """
+    groups: dict[tuple[str, int], Series] = {}
+    positions: dict[tuple[str, int], list[tuple[float, str]]] = {}
+    normals: dict[tuple[str, int], np.ndarray] = {}
+    #: Representative orientation vectors per UID, in first-seen order.
+    orientations: dict[str, list[np.ndarray]] = {}
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for fn in sorted(filenames):
             path = os.path.join(dirpath, fn)
             ds = _read_header(path)
             if ds is None or not hasattr(ds, "SeriesInstanceUID"):
                 continue
             uid = str(ds.SeriesInstanceUID)
 
-            if uid not in by_uid:
+            iop = np.asarray(
+                getattr(ds, "ImageOrientationPatient", [1, 0, 0, 0, 1, 0]), dtype=float
+            )
+            reps = orientations.setdefault(uid, [])
+            for index, rep in enumerate(reps):
+                if _orientation_matches(iop, rep, ORIENTATION_TOLERANCE_DEG):
+                    break
+            else:
+                reps.append(iop)
+                index = len(reps) - 1
+            key = (uid, index)
+
+            if key not in groups:
                 ps = getattr(ds, "PixelSpacing", None)
                 image_type = [str(x).upper() for x in getattr(ds, "ImageType", [])]
-                by_uid[uid] = Series(
+                groups[key] = Series(
                     uid=uid,
                     modality=str(getattr(ds, "Modality", "?")),
                     description=str(getattr(ds, "SeriesDescription", "")).strip(),
@@ -137,30 +225,44 @@ def discover(root: str) -> list[Series]:
                     kernel=_kernel_of(ds),
                     is_localizer="LOCALIZER" in image_type,
                 )
-                normals[uid] = _slice_normal(
-                    getattr(ds, "ImageOrientationPatient", [1, 0, 0, 0, 1, 0])
-                )
-                by_uid[uid].normal = tuple(float(v) for v in normals[uid])  # type: ignore[assignment]
-                positions[uid] = []
+                normals[key] = _slice_normal(iop)
+                groups[key].normal = tuple(float(v) for v in normals[key])  # type: ignore[assignment]
+                positions[key] = []
 
-            by_uid[uid].files.append(path)
+            groups[key].files.append(path)
 
             ipp = getattr(ds, "ImagePositionPatient", None)
             if ipp is not None:
-                depth = float(np.dot(np.asarray(ipp, dtype=float), normals[uid]))
+                depth = float(np.dot(np.asarray(ipp, dtype=float), normals[key]))
             else:
                 # No position: fall back to InstanceNumber, which at least beats
                 # filename order.
                 depth = float(_as_int(getattr(ds, "InstanceNumber", 0)) or 0)
-            positions[uid].append((depth, path))
+            positions[key].append((depth, path))
 
-    out = []
-    for uid, series in by_uid.items():
-        series.finalise = None  # type: ignore[attr-defined]
-        _finalise(series, positions[uid])
-        out.append(series)
+    for key, series in groups.items():
+        _finalise(series, positions[key])
 
-    out.sort(key=lambda s: (s.series_number if s.series_number is not None else 1 << 30, s.uid))
+    # Number the orientation groups of a split UID, biggest stack first.
+    by_uid: dict[str, list[Series]] = {}
+    for (uid, _index), series in groups.items():
+        by_uid.setdefault(uid, []).append(series)
+    for uid, members in by_uid.items():
+        if len(members) == 1:
+            continue
+        members.sort(key=lambda s: (-s.n_slices, s.files[0] if s.files else ""))
+        for part, series in enumerate(members, start=1):
+            series.part = part
+            series.n_parts = len(members)
+
+    out = list(groups.values())
+    out.sort(
+        key=lambda s: (
+            s.series_number if s.series_number is not None else 1 << 30,
+            s.uid,
+            s.part,
+        )
+    )
     return out
 
 
@@ -236,7 +338,12 @@ def rank(series: Iterable[Series]) -> list[Series]:
     """
 
     def key(s: Series):
-        vv = s.voxel_volume_mm3 or 1e9
+        vv = s.voxel_volume_mm3
+        # A degenerate voxel volume must sort last, never first. Before geometry
+        # was validated, a mis-derived 3.9e-07 mm slice spacing made a reformat
+        # look like the finest series in the study and win this comparison.
+        if vv is None or not math.isfinite(vv) or vv <= 0:
+            vv = 1e9
         return (
             0 if s.usable else 1,
             _significant(vv),
@@ -247,8 +354,21 @@ def rank(series: Iterable[Series]) -> list[Series]:
     return sorted(series, key=key)
 
 
+def _resolve(hits: list[Series], what: str) -> Series:
+    """One match, or the single usable one among several, else an error."""
+    if len(hits) == 1:
+        return hits[0]
+    usable = [s for s in hits if s.usable]
+    if len(usable) == 1:
+        return usable[0]
+    raise ValueError(
+        "%s is ambiguous (%d stacks: %s); pass one of them explicitly"
+        % (what, len(hits), ", ".join(s.ident for s in hits))
+    )
+
+
 def select(series: list[Series], wanted: str | None) -> Series:
-    """Resolve ``wanted`` (a UID, a series number, or a description substring)."""
+    """Resolve ``wanted``: an ident (``6``, ``1021.2``), a UID, or a description."""
     usable = [s for s in series if s.usable]
     if not usable:
         raise ValueError("no usable image series found")
@@ -257,22 +377,22 @@ def select(series: list[Series], wanted: str | None) -> Series:
         return rank(usable)[0]
 
     for s in series:
-        if s.uid == wanted:
+        if s.ident == wanted:
             return s
+
+    hits = [s for s in series if s.uid == wanted]
+    if hits:
+        return _resolve(hits, "series UID %s" % wanted)
+
     if wanted.isdigit():
         n = int(wanted)
         hits = [s for s in series if s.series_number == n]
-        if len(hits) == 1:
-            return hits[0]
-        if len(hits) > 1:
-            raise ValueError("series number %d is ambiguous (%d matches)" % (n, len(hits)))
+        if hits:
+            return _resolve(hits, "series number %d" % n)
+
     lowered = wanted.lower()
     hits = [s for s in series if lowered in s.description.lower()]
-    if len(hits) == 1:
-        return hits[0]
-    if len(hits) > 1:
-        raise ValueError(
-            "description %r matches %d series: %s"
-            % (wanted, len(hits), ", ".join(s.description for s in hits))
-        )
+    if hits:
+        return _resolve(hits, "description %r" % wanted)
+
     raise ValueError("no series matches %r" % wanted)

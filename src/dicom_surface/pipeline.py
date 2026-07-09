@@ -179,6 +179,8 @@ def convert(
 
     provenance = {
         "series_uid": series.uid,
+        "series_ident": series.ident,
+        "series_orientation_part": [series.part, series.n_parts],
         "series_description": series.description,
         "series_number": series.series_number,
         "modality": series.modality,

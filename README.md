@@ -4,13 +4,15 @@ Turn a DICOM series into a **watertight** 3D surface mesh.
 
 ```console
 $ dicom-surface list ~/scans/head-ct
-#    MOD  DESCRIPTION                      SLICES VOXEL mm               PLANE     NOTES
---------------------------------------------------------------------------------------------
-1    CT   Topogramm 0,60 sag Tr20 MPR           1 -                      -         localizer
-2    CT   GS nativ 3,00 ax Hr40 A3 MPR         92 0.345 x 0.345 x 2.000  axial
-6    CT   GS nativ 1,00 ax Hr68 A1 MPR        231 0.315 x 0.315 x 0.800  axial     <- default, sharp kernel Hr68
-8    CT   GS nativ 1,00 sag Hr68 A1 MPR       242 0.315 x 0.315 x 0.800  sagittal  sharp kernel Hr68
-501  CT   Patientenprotokoll                    1 -                      -         not an image series
+#      MOD  DESCRIPTION                      SLICES VOXEL mm               PLANE     NOTES
+------------------------------------------------------------------------------------------------
+1      CT   Topogramm 0,60 sag Tr20 MPR           1 -                      -         localizer
+2      CT   GS nativ 3,00 ax Hr40 A3 MPR         92 0.345 x 0.345 x 2.000  axial
+6      CT   GS nativ 1,00 ax Hr68 A1 MPR        231 0.315 x 0.315 x 0.800  axial     <- default, sharp kernel Hr68
+8      CT   GS nativ 1,00 sag Hr68 A1 MPR       242 0.315 x 0.315 x 0.800  sagittal  sharp kernel Hr68
+501    CT   Patientenprotokoll                    1 -                      -         only 1 slice(s)
+1021.1 CT   mpr ax 3/2                           64 0.289 x 0.289 x 2.000  axial     orientation 1 of 2 in this UID
+1021.2 CT   mpr ax 3/2                            1 1.066 x 1.066 x 0.500  -         only 1 slice(s), orientation 2 of 2
 
 $ dicom-surface convert ~/scans/head-ct -o skull.stl --preset bone
 ...
@@ -71,9 +73,10 @@ dicom-surface convert scans/ -o out.stl \
 ### Not every scan is a head CT
 
 - **Series selection.** A study holds scouts, several reconstruction kernels, and
-  reformats. `list` shows them all; `--series` takes a number, a UID, or a
-  description substring. The default pick prefers small voxels, then the axial
-  (acquired) plane, and only then slice count.
+  reformats. `list` shows them all; `--series` takes an ident (`6`, `1021.2`), a
+  UID, or a description substring. The default pick prefers small voxels, then
+  the axial (acquired) plane, and only then slice count. Stacks whose geometry
+  does not hold up are rejected with a reason, never silently reconstructed.
 - **Modality.** Hounsfield thresholds are meaningful only on CT. Ask for
   `--preset bone` on an MR and the tool refuses rather than emitting a
   confidently wrong mesh. Use `--preset auto` (Otsu) or an explicit
@@ -86,13 +89,30 @@ dicom-surface convert scans/ -o out.stl \
 
 ## Why the output is watertight
 
-Seven things silently produce a plausible-looking but wrong mesh. This tool handles
-each, and the test suite has a regression test for every one.
+These are the ways a DICOM directory silently produces a plausible-looking but
+wrong mesh. This tool handles each, and the test suite has a regression test for
+every one.
 
 **1. Filenames are not slice order.** In the study this was built on, file `1`
 held instance 222 and file `231` held instance 226. Sorting by name gives a
 scrambled volume that still renders as a convincing blob. Slices are ordered by
 `ImagePositionPatient` projected on the slice normal.
+
+**1b. One SeriesInstanceUID may hold several orientations.** Nothing in DICOM
+forbids it, and reformat series do it routinely: one real study had 64 axial
+frames and a single perpendicular frame sharing a UID. Take the slice normal from
+whichever instance the filesystem happens to yield first, and every position is
+projected onto the wrong axis -- slice spacing collapses from 2.0 mm to
+3.9e-07 mm, the ordering scrambles, and nothing raises. Worse, that fake voxel
+size then looks like the finest data in the study and wins automatic selection.
+
+Instances are grouped by `(SeriesInstanceUID, orientation)`, orientations matched
+within 2° so float jitter in `ImageOrientationPatient` does not shatter a stack.
+Split UIDs get dotted idents (`1021.1`, `1021.2`). Geometry is validated: a stack
+whose slice spacing is implausible, or whose spacing varies by more than half its
+own median, is rejected with a reason rather than resampled onto a regular grid it
+does not fit. Directory and file names are sorted, so discovery does not depend on
+filesystem iteration order.
 
 **2. Marching cubes does not cap the volume boundary.** When anatomy runs off the
 edge of the scan -- a cranial vault truncated by the field of view -- the surface
