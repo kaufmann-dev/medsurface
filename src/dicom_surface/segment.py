@@ -155,38 +155,64 @@ def opening(image: sitk.Image, mm: float, log=None) -> sitk.Image:
 
 
 def dilate(image: sitk.Image, mm: float, log=None) -> sitk.Image:
-    """Grow the foreground outward by at least ``mm``, to thicken walls for printing.
+    """Grow the foreground outward by at least ``mm``.
 
     ``mm`` is a radius, not a kernel extent -- the distance the surface moves --
     which is why this uses :func:`geometry.dilation_radius_voxels` and not the
     flooring converter every other filter here uses. Anisotropic voxels make the
-    realised growth exceed the request on the coarse axis; the log line says by
-    how much.
+    realised growth exceed the request on the coarse axis.
 
-    Note this inflates the model's outer dimensions too, by the same amount. That
-    is the honest cost of thickening a surface model: there is no way to fatten
-    the walls of a shell without moving its outside.
+    This is the primitive. For printing, use :func:`thicken`, which applies it
+    only where the material is actually too thin.
     """
     if mm <= 0:
         return image
     spacing = image.GetSpacing()
     radii = dilation_radius_voxels(mm, spacing)
-    grown = dilation_extent_mm(radii, spacing)
     if log:
-        log("thicken %-11s -> %s voxels = grows %s mm"
-            % ("%.2f mm" % mm, radii, _fmt(grown)))
+        log("dilate %-11s -> %s voxels = grows %s mm"
+            % ("%.2f mm" % mm, radii, _fmt(dilation_extent_mm(radii, spacing))))
     return sitk.BinaryDilate(
         image, kernelRadius=radii, kernelType=sitk.sitkBall,
         foregroundValue=FOREGROUND,
     )
 
 
-def thin_fraction(image: sitk.Image, min_feature_mm: float) -> float:
-    """Fraction of the material a ball of ``min_feature_mm`` diameter cannot reach.
+def thin_mask(image: sitk.Image, min_feature_mm: float) -> sitk.Image:
+    """The material a ball of ``min_feature_mm`` diameter cannot reach.
 
-    Thin material is exactly the material that survives the mask but not a
-    morphological opening by that ball -- which is the definition of an opening,
-    so no distance transform or local-thickness estimator is needed.
+    That ball fits exactly where an opening by radius ``min_feature_mm / 2``
+    survives, so the thin material is what the mask keeps and the opening throws
+    away. No distance transform, no local-thickness estimator: an opening *is*
+    the definition.
+    """
+    if min_feature_mm <= 0:
+        empty = sitk.Image(image.GetSize(), sitk.sitkUInt8)
+        empty.CopyInformation(image)
+        return empty
+
+    radii = dilation_radius_voxels(min_feature_mm / 2.0, image.GetSpacing())
+    opened = sitk.BinaryMorphologicalOpening(
+        image, kernelRadius=radii, kernelType=sitk.sitkBall,
+        foregroundValue=FOREGROUND,
+    )
+    return sitk.And(sitk.Cast(image, sitk.sitkUInt8), sitk.Not(opened))
+
+
+def count_foreground(image: sitk.Image) -> int:
+    """Number of non-zero voxels.
+
+    Exists so that no caller ever writes ``GetArrayViewFromImage(some_filter(...))``.
+    That returns a numpy *view* into the image's buffer, and the temporary image is
+    freed the moment the call returns, leaving the view pointing at released memory.
+    It reads fine on a small test volume and segfaults on an 80M-voxel scan. Binding
+    the image to a parameter keeps it alive for the duration of the count.
+    """
+    return int(np.count_nonzero(sitk.GetArrayViewFromImage(image)))
+
+
+def thin_fraction(image: sitk.Image, min_feature_mm: float) -> float:
+    """Fraction of the material that is thinner than ``min_feature_mm``.
 
     Reported, never enforced. A printer's minimum feature size is a property of
     the printer, not of the anatomy, and the right response to a thin orbital
@@ -194,18 +220,75 @@ def thin_fraction(image: sitk.Image, min_feature_mm: float) -> float:
     """
     if min_feature_mm <= 0:
         return 0.0
-    total = float(np.count_nonzero(sitk.GetArrayViewFromImage(image)))
+    total = count_foreground(image)
     if total == 0:
         return 0.0
+    return count_foreground(thin_mask(image, min_feature_mm)) / total
 
-    # A ball of diameter d fits where an opening by radius d/2 survives.
+
+def _thick_core(image: sitk.Image, min_feature_mm: float) -> sitk.Image:
+    """Everything a ball of ``min_feature_mm`` diameter can reach: the opening."""
     radii = dilation_radius_voxels(min_feature_mm / 2.0, image.GetSpacing())
-    opened = sitk.BinaryMorphologicalOpening(
+    return sitk.BinaryMorphologicalOpening(
         image, kernelRadius=radii, kernelType=sitk.sitkBall,
         foregroundValue=FOREGROUND,
     )
-    thick = float(np.count_nonzero(sitk.GetArrayViewFromImage(opened)))
-    return max(0.0, (total - thick) / total)
+
+
+def thicken(image: sitk.Image, thicken_mm: float, min_feature_mm: float = 0.0,
+            log=None) -> sitk.Image:
+    """Grow only the material that is too thin to print, and leave the rest alone.
+
+    Dilating everything is simpler, and it is what a naive print-prep step does,
+    but it is dimensionally wrong. A cranial vault is 5 mm of solid bone and needs
+    nothing; inflating it moves the model's outer surface for no benefit. Only the
+    paper-thin structures -- orbital floor, ethmoid, nasal septum -- need material.
+
+    Selecting the thin set is subtler than it looks. ``mask \\ opening(mask, r)``
+    is the textbook answer and it is wrong here: an opening is the union of the
+    balls it contains, so it cannot reach into a sharp convex corner, and *every
+    surface of a voxelised object is locally sharp*. That set is a speckle over
+    the whole surface, and dilating it inflates the entire model -- a voxelised
+    sphere grows its bounding box by the full thickening radius.
+
+    So thin material is material that no sufficiently thick region can reach::
+
+        core = opening(mask, feature / 2)          # everything thick enough
+        thin = mask \\ dilate(core, thicken_mm)     # beyond the core's reach
+        out  = mask | dilate(thin, thicken_mm)
+
+    A solid block is entirely within its own core's reach and does not move. A
+    one-voxel sheet has no core at all and is grown everywhere.
+
+    With no minimum feature size, material thinner than twice the thickening
+    radius is treated as thin -- what asking to "thicken by 1 mm" implies.
+    """
+    if thicken_mm <= 0:
+        return image
+
+    feature = min_feature_mm if min_feature_mm > 0 else 2.0 * thicken_mm
+    binary = sitk.Cast(image, sitk.sitkUInt8)
+
+    reachable = dilate(_thick_core(binary, feature), thicken_mm)
+    thin = sitk.And(binary, sitk.Not(reachable))
+
+    thin_voxels = count_foreground(thin)
+    if thin_voxels == 0:
+        if log:
+            log("thicken %.2f mm: nothing thinner than %.2f mm, nothing to do"
+                % (thicken_mm, feature))
+        return image
+
+    total = count_foreground(binary)
+    spacing = image.GetSpacing()
+    radii = dilation_radius_voxels(thicken_mm, spacing)
+    if log:
+        log("thicken %-11s -> %s voxels = grows %s mm, applied to the %.1f%% of "
+            "material out of reach of bone thicker than %.2f mm"
+            % ("%.2f mm" % thicken_mm, radii, _fmt(dilation_extent_mm(radii, spacing)),
+               100.0 * thin_voxels / max(total, 1), feature))
+
+    return sitk.Or(binary, dilate(thin, thicken_mm))
 
 
 def islands(

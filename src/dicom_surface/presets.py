@@ -79,18 +79,6 @@ PRESETS: dict[str, Preset] = {
         smooth_iters=8,
         target_faces=0,
     ),
-    "bone-print": Preset(
-        name="bone-print",
-        description="Smooth, watertight, low-poly bone for 3D printing. Sacrifices fine detail.",
-        modalities=_HU,
-        threshold=350.0,
-        median_mm=1.4,
-        closing_mm=3.2,
-        min_island_mm3=200.0,
-        smooth_iters=30,
-        target_faces=250_000,
-        post_smooth_iters=15,
-    ),
     "teeth": Preset(
         name="teeth",
         description="Enamel and dense dentin only. Minimal morphology to keep cusps sharp.",
@@ -149,11 +137,13 @@ class PrintProfile:
     description: str
     #: Kernel extent (diameter) the closing is raised to, if the preset's is smaller.
     closing_mm: float = 0.0
-    #: Outward growth of every surface, a radius. Inflates outer dimensions too.
+    #: Radius by which material thinner than ``min_feature_mm`` is grown. Bone that
+    #: is already thick enough keeps its dimensions.
     thicken_mm: float = 0.0
     #: Floor on the island filter: fragments below this are unprintable anyway.
     min_island_mm3: float = 0.0
-    #: The printer's minimum feature size. Diagnostic only -- never enforced.
+    #: The printer's minimum feature size. Selects what counts as thin, and is
+    #: reported as a diagnostic. Never enforced.
     min_feature_mm: float = 0.0
 
 

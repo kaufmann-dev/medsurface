@@ -142,12 +142,16 @@ def compare_patients(path_a: str, path_b: str) -> PatientMatch:
     real studies of one skull differed in both ``PatientID`` (7 vs 15 characters)
     and ``PatientName`` formatting, while agreeing exactly on birth date and sex.
 
-    Conflicting demographics are treated as proof of different people; a matching
-    ID, or a matching name plus birth date, as proof of the same one. Anything
+    Conflicting demographics are treated as evidence of different people; a
+    matching ID, or a matching name plus birth date, as sufficient corroboration
+    that the studies come from the same person. Neither is proof -- identifiers
+    are re-issued, pseudonymised and mistyped -- so `--force` exists. Anything
     else is ``unknown`` and left to the caller.
 
-    Only field *names* ever appear in the result. Values are never returned,
-    logged, or raised.
+    This is the only place in the package that reads patient-identifying fields,
+    and it reads them solely to compare them. Only field *names* ever appear in
+    the result. Values are never returned, logged, raised, or written to
+    provenance.
     """
     fa, fb = _patient_fields(path_a), _patient_fields(path_b)
     if fa is None or fb is None or not any(fa.values()) or not any(fb.values()):

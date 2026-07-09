@@ -41,7 +41,8 @@ Python 3.10+. No 3D Slicer.
 
 Desktop Linux already has what you need. On a minimal image — a container, a CI
 runner, a headless server — install the OpenGL libraries that pymeshlab's plugins
-link against, or decimation fails with `Filter does not exists`:
+link against, or decimation fails with pymeshlab's `Filter does not exists.`
+(the typo is upstream's, quoted verbatim so it is greppable):
 
 ```sh
 apt install libgl1 libopengl0
@@ -50,16 +51,17 @@ apt install libgl1 libopengl0
 ## Usage
 
 ```sh
-dicom-surface list    DICOM_DIR                    # what's in this folder?
+dicom-surface list     DICOM_DIR                   # what's in this folder?
 dicom-surface presets                              # what can I ask for?
-dicom-surface convert DICOM_DIR -o out.stl         # do the thing
-dicom-surface merge   DIR_A DIR_B -o out.stl       # fuse two scans of one body
+dicom-surface convert  DICOM_DIR -o out.stl        # do the thing
+dicom-surface merge    DIR_A DIR_B -o out.stl      # fuse two scans of one body
 dicom-surface validate mesh.stl                    # is this mesh sound?
 dicom-surface repair   mesh.stl -o fixed.stl       # make it watertight
 ```
 
 Output format follows the extension: `.stl`, `.ply`, `.obj`, `.vtp`.
-Coordinates are **LPS** (DICOM patient space), which is what STL consumers expect.
+Coordinates are emitted in millimetres in DICOM patient (**LPS**) space. STL stores
+no coordinate-system metadata, so downstream tools will treat them as ordinary XYZ.
 
 ### Presets
 
@@ -67,7 +69,6 @@ Coordinates are **LPS** (DICOM patient space), which is what STL consumers expec
 |---|---|---|---|---|
 | `bone` | CT | 300 HU | 600k | general bone. Denoises without erasing teeth or sutures. |
 | `bone-detail` | CT | 300 HU | all | maximum fidelity, very large files |
-| `bone-print` | CT | 350 HU | 250k | smooth low-poly bone for 3D printing |
 | `teeth` | CT | 1200 HU | 300k | enamel and dense dentin |
 | `skin` | CT | -300 HU | 400k | outer skin surface |
 | `auto` | any | Otsu | 600k | MR, CBCT, or any uncalibrated intensity |
@@ -179,12 +180,17 @@ registers one onto the other and fuses them.
 dicom-surface merge facial-ct/ sinus-ct/ --series-a 6 --series-b 2 -o skull.stl
 ```
 
-The two scans sit in different patient coordinate frames -- the frame is anchored
-to the scanner table, not the body -- so in one real case the meshes were 847 mm
-apart with a 10.6° difference in head tilt. Registration is global first
-(exhaustive translation search by FFT cross-correlation, no initial guess to get
-wrong) then local (point-to-plane ICP, which converged to 0.12 mm where
-point-to-point was still descending at 0.93 mm after 60 iterations).
+Two studies rarely share a usable frame of reference. DICOM patient coordinates are
+patient-oriented (LPS), but origin, pose and head tilt are set by the acquisition,
+so in one real case the meshes were 847 mm apart with a 10.6° difference in tilt.
+
+Registration is global first, then local. The global stage is an exhaustive
+**translation** search by FFT cross-correlation: every integer lag is scored at
+once, so the translation needs no initial guess. Rotation is not searched there —
+it is left entirely to point-to-plane ICP, and so still depends on that method's
+basin of attraction. Measured on a phantom, it recovers 3° to 40° to under 1° and
+fails beyond roughly 60°. Point-to-plane converged to 0.12 mm on the real pair,
+where point-to-point was still descending at 0.93 mm after 60 iterations.
 
 Correspondences are trimmed, because the scans may overlap only partially — but
 the trim then *widens* to the overlap actually measured. A fixed 45% trim breaks
@@ -246,9 +252,11 @@ second body.
 issuing institution — which is why DICOM carries `IssuerOfPatientID` — and two
 real studies of one skull differed in both `PatientID` (7 vs 15 characters) and
 `PatientName` formatting while agreeing exactly on birth date and sex. Conflicting
-demographics prove different people; a matching ID, or a matching name plus birth
-date, proves the same one. Identifiers are compared, never logged, raised, or
-written to the provenance record — only field *names* ever appear.
+demographics are treated as evidence of different people; a matching ID, or a
+matching name plus birth date, as sufficient corroboration that the studies come
+from the same person. Neither is proof — identifiers get re-issued, pseudonymised
+and mistyped — which is what `--force` is for. Identifiers are compared, never
+logged, raised, or written to the provenance record; only field *names* ever appear.
 
 **De-identified data merges without complaint.** Scans stripped of identifiers
 land on "unknown", which warns and proceeds. Studies sharing a pseudonymous ID are
@@ -281,8 +289,8 @@ branch that could drift out of sync with the enabled one.
 
 Profiles compose with any preset using `max()`, never assignment — a profile can
 only *add* printability, never relax a preset that already closes harder than the
-printer needs (`skin` closes 3.2 mm). `bone-print` is orthogonal: it is a triangle
-budget and a smoothing level, not printability morphology.
+printer needs (`skin` closes 3.2 mm). Triangle budget stays where it belongs, on
+`--preset` and `--target-faces`.
 
 ### It happens on the mask, not on the mesh
 
@@ -301,17 +309,38 @@ occupancy this tool already holds — then runs marching cubes, windowed-sinc
 smoothing and quadric decimation a *second* time. Doing the closing and the
 dilation on the mask skips all of it.
 
-### `--thicken-mm` is a radius, not a kernel
+### Thickening grows only what is too thin
 
-Every other millimetre parameter here is a kernel *extent*, floored so the realised
-kernel never exceeds the request; overshooting a filter erases anatomy.
-`--thicken-mm` is the distance the surface moves, and *undershooting* it leaves a
+Dilating everything is simpler, and it is what a naive print-prep step does, but it
+is dimensionally wrong. A cranial vault is 5 mm of solid bone; inflating it moves
+the model's outer surface for no benefit. Only the paper-thin structures — orbital
+floor, ethmoid, nasal septum — need material.
+
+Selecting the thin set is subtler than it looks. `mask \ opening(mask, r)` is the
+textbook answer and it is **wrong here**. An opening is the union of the balls it
+contains, so it cannot reach into a sharp convex corner — and every surface of a
+voxelised object is locally sharp. That set is a speckle over the *entire* surface,
+and dilating it inflates the whole model: a voxelised sphere grows its bounding box
+by the full thickening radius. So thin material is instead material that no
+sufficiently thick region can reach:
+
+```
+core = opening(mask, feature / 2)         # everything thick enough
+thin = mask \ dilate(core, thicken_mm)    # beyond the core's reach
+out  = mask | dilate(thin, thicken_mm)
+```
+
+Measured: a solid sphere and a solid cube both grow by **+0.0%** with their bounding
+boxes unchanged; a one-voxel sheet grows from 1 voxel thick to 5. On the real skull,
+the `fdm` profile went from **+93.8% volume and +2.70 mm on the bounding box** with
+uniform dilation, to **+23.9% and +0.03 mm** by growing only the 1.6% of material
+that is genuinely too thin.
+
+`--thicken-mm` is a *radius*, not a kernel extent. Every other millimetre parameter
+here is a kernel extent, floored so the realised kernel never exceeds the request,
+because overshooting a filter erases anatomy. Undershooting a thickening leaves a
 wall too thin to print — so it ceils, and never rounds a positive request down to
 nothing. On 0.8 mm slices a 0.4 mm request realises as 0.8 mm, and the tool says so.
-
-Thickening inflates the model's outer dimensions by the same amount, on every axis.
-There is no way to fatten the walls of a shell without moving its outside, and the
-tool warns rather than pretending otherwise.
 
 ### The thin-feature check
 
@@ -323,7 +352,10 @@ estimator required:
 thin_fraction = |mask \ opening(mask, radius = min_feature / 2)| / |mask|
 ```
 
-Above 5%, `convert` warns. A printer's minimum feature size is a property of the
+This is the right measure for *reporting* local thickness and the wrong one for
+*selecting* what to grow — see above. It carries a small, curvature-dependent floor
+from the voxelised surface: a solid sphere of radius 20 mm reports 0.09% thin at a
+3 mm feature size, one of radius 10 mm reports 1.6%. Above 5%, `convert` warns. A printer's minimum feature size is a property of the
 printer, not of the anatomy, and the right answer to a thin orbital floor is a
 decision, not an automatic edit.
 
@@ -395,10 +427,21 @@ meaningless number the divergence theorem yields.
 
 ## Privacy
 
-The tool reads geometry, modality and acquisition parameters. It never reads or
-writes patient names, IDs, or dates, and the JSON provenance record contains none.
-Meshes derived from a scan are still personal health data -- a skull is
-recognisable. Treat outputs accordingly.
+`list`, `convert`, `validate` and `repair` read geometry, modality and acquisition
+parameters only.
+
+`merge` additionally reads a limited set of patient-identifying fields —
+`PatientID`, `IssuerOfPatientID`, `PatientName`, `PatientBirthDate`, `PatientSex` —
+for the sole purpose of checking whether two studies plausibly belong to the same
+person. It has to: geometry alone cannot tell two people apart — see
+"[It refuses input it should refuse](#it-refuses-input-it-should-refuse)".
+
+Those values are compared and discarded. They are never logged, raised in an error,
+or written to the JSON provenance record — only *field names* ever appear in
+messages, as in "`birth_date` differs". Nothing else in the package reads them.
+
+Meshes derived from a scan are still personal health data: a skull is recognisable.
+Treat outputs accordingly.
 
 ## Not a medical device
 

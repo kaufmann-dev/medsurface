@@ -376,7 +376,7 @@ def cmd_presets(_args: argparse.Namespace) -> int:
     print("PRINT PROFILES  --  what a printer needs  (--print-profile)")
     print()
     print("  Composes with any preset: raises its closing and island filter, and")
-    print("  thickens walls. Orthogonal to `bone-print`, which is a triangle budget.")
+    print("  thickens walls. Triangle budget stays with --preset / --target-faces.")
     print()
     for name in sorted(PRINT_PROFILES):
         p = PRINT_PROFILES[name]

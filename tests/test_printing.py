@@ -105,9 +105,102 @@ def test_thickening_reduces_the_thin_fraction():
     """The point of the whole exercise."""
     wall = _slab(thickness_voxels=1)
     before = segment.thin_fraction(wall, 3.0)
-    after = segment.thin_fraction(segment.dilate(wall, 2.0), 3.0)
+    after = segment.thin_fraction(segment.thicken(wall, 2.0, 3.0), 3.0)
     assert before > after
     assert after < 0.5
+
+
+# ------------------------------------------------------- selective thickening
+def _thin_sheet_beside_a_thick_block(spacing=(1.0, 1.0, 1.0)):
+    """A 1 mm sheet and an 8 mm block, far apart. Only the sheet is too thin."""
+    arr = np.zeros((24, 40, 24), dtype=np.uint8)
+    arr[8:16, 4:12, 8:16] = 1     # block: 8 mm on every axis
+    arr[8:16, 30:31, 8:16] = 1    # sheet: 1 mm thick
+    img = sitk.GetImageFromArray(arr)
+    img.SetSpacing(spacing)
+    return img
+
+
+def _extent(image, y_slice):
+    arr = sitk.GetArrayViewFromImage(image)[:, y_slice, :]
+    return int(np.count_nonzero(arr))
+
+
+def test_thicken_grows_only_the_thin_material():
+    """A cranial vault is 5 mm of solid bone and needs nothing; inflating it moves
+    the model's outer surface for no benefit. Only the thin structures get the
+    material."""
+    image = _thin_sheet_beside_a_thick_block()
+    grown = segment.thicken(image, thicken_mm=2.0, min_feature_mm=3.0)
+
+    arr_before = sitk.GetArrayViewFromImage(image)
+    arr_after = sitk.GetArrayViewFromImage(grown)
+
+    # the block keeps its bounding box on every axis
+    block_before = np.argwhere(arr_before[:, :20, :])
+    block_after = np.argwhere(arr_after[:, :20, :])
+    assert (block_before.max(0) - block_before.min(0)).tolist() == \
+           (block_after.max(0) - block_after.min(0)).tolist()
+
+    # the sheet gets thicker
+    sheet_before = np.count_nonzero(arr_before[:, 20:, :])
+    sheet_after = np.count_nonzero(arr_after[:, 20:, :])
+    assert sheet_after > 2 * sheet_before
+
+
+def test_thicken_is_a_no_op_when_nothing_is_thin():
+    """Nothing thinner than the minimum feature means nothing to do."""
+    arr = np.zeros((24, 24, 24), dtype=np.uint8)
+    arr[4:20, 4:20, 4:20] = 1  # 16 mm cube
+    image = sitk.GetImageFromArray(arr)
+    image.SetSpacing((1.0, 1.0, 1.0))
+
+    grown = segment.thicken(image, thicken_mm=1.0, min_feature_mm=3.0)
+    assert np.array_equal(sitk.GetArrayViewFromImage(image),
+                          sitk.GetArrayViewFromImage(grown))
+
+
+def test_thicken_without_a_feature_size_uses_twice_the_radius():
+    """`--thicken-mm 1.0` on its own means "grow what is thinner than 2 mm"."""
+    image = _thin_sheet_beside_a_thick_block()
+    implicit = segment.thicken(image, thicken_mm=1.5)
+    explicit = segment.thicken(image, thicken_mm=1.5, min_feature_mm=3.0)
+    assert np.array_equal(sitk.GetArrayViewFromImage(implicit),
+                          sitk.GetArrayViewFromImage(explicit))
+
+
+def test_thin_mask_is_the_complement_of_the_opening():
+    image = _thin_sheet_beside_a_thick_block()
+    thin = sitk.GetArrayFromImage(segment.thin_mask(image, 3.0))
+    whole = sitk.GetArrayViewFromImage(image)
+
+    assert np.all(thin <= whole), "thin material must be a subset of the material"
+    assert np.count_nonzero(thin[:, 20:, :]) > 0, "the sheet is thin"
+    assert np.count_nonzero(thin[8:16, 6:10, 10:14]) == 0, "the block core is not"
+
+
+def test_counting_a_temporary_image_does_not_read_freed_memory():
+    """`sitk.GetArrayViewFromImage` returns a view into the image's buffer. Take it
+    from a temporary and the image is freed the moment the call returns, leaving
+    the view pointing at released memory: it reads plausible garbage on a small
+    volume and segfaults on an 80M-voxel scan. `count_foreground` binds the image
+    to a parameter, which keeps it alive for the duration of the count."""
+    image = _thin_sheet_beside_a_thick_block()
+    expected = int(np.count_nonzero(sitk.GetArrayFromImage(segment.thin_mask(image, 3.0))))
+
+    # 200 rounds so a freed buffer would very likely be reused by something else
+    for _ in range(200):
+        assert segment.count_foreground(segment.thin_mask(image, 3.0)) == expected
+
+
+def test_thin_mask_is_empty_without_a_feature_size():
+    image = _thin_sheet_beside_a_thick_block()
+    assert np.count_nonzero(sitk.GetArrayFromImage(segment.thin_mask(image, 0.0))) == 0
+
+
+def test_thicken_of_zero_returns_the_input_untouched():
+    image = _thin_sheet_beside_a_thick_block()
+    assert segment.thicken(image, 0.0, 3.0) is image
 
 
 # ------------------------------------------------------------- the profiles
@@ -205,13 +298,41 @@ def test_printability_warnings_are_silent_for_anatomical():
     assert pipeline.printability_warnings(_box(), ANATOMICAL) == []
 
 
-def test_printability_warnings_report_thickening_and_thin_material():
+def test_printability_warnings_report_thin_material():
+    """A one-voxel wall against a 3 mm minimum feature: say so."""
     wall = _slab(thickness_voxels=1)
     profile = presets.PrintProfile(name="t", description="d",
                                    thicken_mm=1.0, min_feature_mm=3.0)
     messages = " ".join(pipeline.printability_warnings(wall, profile))
-    assert "thickened" in messages or "thickening" in messages
     assert "thinner than" in messages
+
+
+def test_thickening_is_silent_when_the_grid_can_honour_the_request():
+    """Isotropic 1 mm voxels realise a 1 mm request exactly. Nothing to warn about."""
+    profile = presets.PrintProfile(name="t", description="d", thicken_mm=1.0)
+    assert pipeline.thickening_warning(_box(spacing=(1.0, 1.0, 1.0)), profile) == []
+
+
+def test_thin_mask_speckles_a_voxelised_surface_which_is_why_thicken_ignores_it():
+    """An opening is the union of the balls it contains, so it cannot reach into a
+    sharp convex corner -- and every surface of a voxelised object is locally
+    sharp. `thin_mask` therefore marks a speckle over even a solid sphere. It is
+    the right measure for *reporting* local thickness and the wrong one for
+    *selecting* what to grow, which is why `thicken` uses the thick core's reach
+    instead."""
+    n = 40
+    zz, yy, xx = np.indices((n, n, n))
+    sphere = ((zz - 20) ** 2 + (yy - 20) ** 2 + (xx - 20) ** 2 <= 12 ** 2)
+    image = sitk.GetImageFromArray(sphere.astype(np.uint8))
+    image.SetSpacing((1.0, 1.0, 1.0))
+
+    speckle = np.count_nonzero(sitk.GetArrayFromImage(segment.thin_mask(image, 3.0)))
+    assert speckle > 0, "the voxelised surface is locally sharp"
+
+    # ... and yet a solid sphere must not grow at all
+    grown = segment.thicken(image, 1.5, 3.0)
+    assert np.array_equal(sitk.GetArrayFromImage(image),
+                          sitk.GetArrayFromImage(grown))
 
 
 def test_anisotropic_thickening_is_reported_not_hidden():
