@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.tmp/
+.pytest_cache/
+.ruff_cache/
+
+# never commit derived patient data
+*.stl
+*.ply
+*.obj
+*.vtp
+*.dcm

@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dicom-surface"
+version = "0.1.0"
+description = "Turn a DICOM series into a watertight 3D surface mesh"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "David Kaufmann", email = "david@kaufmann.dev" }]
+keywords = ["dicom", "ct", "mri", "stl", "mesh", "marching-cubes", "3d-printing", "medical-imaging"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Medical Science Apps.",
+  "Topic :: Multimedia :: Graphics :: 3D Modeling",
+]
+dependencies = [
+  "numpy>=1.24",
+  "pydicom>=2.4",
+  "SimpleITK>=2.3",
+  "vtk>=9.2",
+  "trimesh>=4.0",
+  # trimesh needs a graph backend for connected-component splitting; without it
+  # mesh.split() raises "no graph engines available".
+  "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+repair = ["meshlib>=3.0"]
+quality = ["pymeshlab>=2023.12"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+dicom-surface = "dicom_surface.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/kaufmann-dev/dicom-surface"
+Issues = "https://github.com/kaufmann-dev/dicom-surface/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dicom_surface"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
