@@ -10,9 +10,8 @@ from dataclasses import replace
 
 from . import presets as presets_mod
 from .merge import DEFAULT_GRID_MM
-from .presets import PRINT_PROFILES
 from . import pipeline, series as series_mod, validate as validate_mod
-from .presets import PRESETS
+from .presets import PRESETS, PRINT_PROFILES
 
 
 def _log(msg: str) -> None:
@@ -36,13 +35,22 @@ def _resolve_print_profile(args: argparse.Namespace):
     """
     profile = presets_mod.get_print_profile(args.print_profile)
 
+    changes = {}
     if getattr(args, "thicken_mm", None) is not None:
-        profile = replace(profile, thicken_mm=args.thicken_mm)
+        changes["thicken_mm"] = args.thicken_mm
     if args.closing_mm is not None:
-        profile = replace(profile, closing_mm=args.closing_mm)
+        changes["closing_mm"] = args.closing_mm
     if args.min_island_mm3 is not None:
-        profile = replace(profile, min_island_mm3=args.min_island_mm3)
-    return profile
+        changes["min_island_mm3"] = args.min_island_mm3
+    if not changes:
+        return profile
+
+    # A profile bent by explicit flags is no longer the profile it was named after.
+    # `anatomical` in particular must stop describing itself as "no changes" the
+    # moment --thicken-mm is given.
+    return replace(profile, name="%s+flags" % profile.name,
+                   description="based on '%s', overridden on the command line" % profile.name,
+                   **changes)
 
 
 # --------------------------------------------------------------------- list
