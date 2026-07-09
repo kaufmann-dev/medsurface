@@ -185,7 +185,13 @@ apart with a 10.6° difference in head tilt. Registration is global first
 (exhaustive translation search by FFT cross-correlation, no initial guess to get
 wrong) then local (point-to-plane ICP, which converged to 0.12 mm where
 point-to-point was still descending at 0.93 mm after 60 iterations).
-Correspondences are trimmed, because the scans overlap only partially.
+
+Correspondences are trimmed, because the scans may overlap only partially — but
+the trim then *widens* to the overlap actually measured. A fixed 45% trim breaks
+small rotations: the correspondences it discards are the ones furthest from the
+rotation axis, which is exactly where the rotational signal lives. A 5°
+misalignment of two identical volumes converged 4.49° off. Refitting with the
+trim widened brings it to 0.44°.
 
 The union is taken on the **masks**, not the meshes. Boolean-unioning two shells
 leaves a seam ridge wherever they disagree by a fraction of a millimetre; fusing
@@ -207,15 +213,6 @@ Registration cannot fail on its own. FFT always has a peak, ICP always converges
 somewhere. Point two unrelated scans at it and you get a confident transform and a
 mesh made of two bodies stuck together. So the answer is checked, not trusted.
 
-`merge` refuses when the demographics conflict, and when the geometry does not
-agree. `PatientID` equality is *not* the identity test: medical record numbers are
-scoped to the issuing institution — which is why DICOM has `IssuerOfPatientID` —
-and two real studies of one skull differed in both `PatientID` (7 vs 15
-characters) and `PatientName` formatting while agreeing exactly on birth date and
-sex. Conflicting demographics prove different people; a matching ID, or a matching
-name plus birth date, proves the same one. Identifiers are compared, never logged,
-raised, or written to the provenance record.
-
 The geometric gates are calibrated against four true pairs and one deliberate
 impostor — a metal bar phantom, handed the skull's own patient identity:
 
@@ -226,15 +223,37 @@ impostor — a metal bar phantom, handed the skull's own patient identity:
 | 2024 × 2024, 3 mm reconstruction | 0.969 | 0.852 | 0.187 mm |
 | 2024 × 2024, sagittal reformat | 0.991 | 0.932 | 0.090 mm |
 | **bar phantom, unrelated anatomy** | **0.270** | **0.323** | 0.432 mm |
-| gate | 0.60 | 0.55 | 1.0 mm |
+| gate | 0.60 | 0.55 | *not gated* |
 
-Two lessons are baked into that table. **The residual does not discriminate**: the
-impostor's 0.43 mm sits comfortably inside any sane bound, because ICP drives
-*some* residual down no matter what it is fitting. And **surface overlap must be
-symmetric**: measured only moving→fixed, the bar scored 96.4%, since a small dense
-object buried in a large one finds a neighbouring surface almost everywhere.
-Measured the other way it collapses to 26.6%. The gate uses the weaker direction,
-each restricted to the other scan's field of view.
+Three lessons are baked into that table.
+
+**The residual is not evidence.** The impostor's 0.43 mm sits inside any plausible
+bound, because ICP drives *some* residual down no matter what it is fitting. It is
+reported, not gated on. A gate that has never fired is a false sense of security.
+
+**Surface overlap must be symmetric.** Measured only moving→fixed, the bar scored
+96.4%: a small dense object buried in a large one finds a neighbouring surface
+almost everywhere. Measured the other way it collapses to 26.6%. The gate takes
+the weaker direction, each restricted to the other scan's field of view.
+
+**Geometry cannot tell two people apart.** A skull uniformly scaled by 3% — well
+inside person-to-person variation, and something rigid registration cannot absorb
+— still passes both gates (overlap 0.989, dice 0.675). So `merge` checks
+demographics too. This is not bureaucracy; it is the only check that catches a
+second body.
+
+`PatientID` equality is *not* that check. Medical record numbers are scoped to the
+issuing institution — which is why DICOM carries `IssuerOfPatientID` — and two
+real studies of one skull differed in both `PatientID` (7 vs 15 characters) and
+`PatientName` formatting while agreeing exactly on birth date and sex. Conflicting
+demographics prove different people; a matching ID, or a matching name plus birth
+date, proves the same one. Identifiers are compared, never logged, raised, or
+written to the provenance record — only field *names* ever appear.
+
+**De-identified data merges without complaint.** Scans stripped of identifiers
+land on "unknown", which warns and proceeds. Studies sharing a pseudonymous ID are
+accepted outright. Only two differing IDs with nothing to corroborate them are
+refused, and that message names de-identification as the likely cause.
 
 `--force` overrides every gate, and says so in the provenance.
 
