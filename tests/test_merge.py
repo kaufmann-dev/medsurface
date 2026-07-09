@@ -173,6 +173,31 @@ def test_gates_have_margin_against_real_measurements():
     assert worst_true_dice - merge_mod.MIN_SHARED_FOV_DICE > 0.15
 
 
+def test_merge_defaults_its_surface_stage_to_the_preset():
+    """Regression: merge once carried its own lighter smoothing constants, on the
+    theory that an isotropic fused grid has no slice terracing to remove. The
+    terracing is baked into each scan's mask by its own slice pitch, so the fused
+    surface came out visibly rougher than either single-scan surface. A fused
+    mesh must be finished exactly as a single-scan one is."""
+    import inspect
+
+    from dicom_surface import presets
+
+    signature = inspect.signature(merge_mod.merge)
+    for name in ("smooth_iters", "passband", "target_faces", "post_smooth_iters"):
+        assert signature.parameters[name].default is None, (
+            "%s must default to the preset, not to a merge-specific constant" % name
+        )
+
+    # and the module must not reintroduce them
+    for leftover in ("DEFAULT_SMOOTH_ITERS", "DEFAULT_PASSBAND",
+                     "DEFAULT_TARGET_FACES", "DEFAULT_POST_SMOOTH_ITERS"):
+        assert not hasattr(merge_mod, leftover), leftover
+
+    bone = presets.get("bone")
+    assert (bone.smooth_iters, bone.passband, bone.post_smooth_iters) == (20, 0.1, 25)
+
+
 def test_force_overrides_the_gates():
     merge_mod.check_registration(
         _result(overlap_moving_in_fixed=0.0, overlap_fixed_in_moving=0.0,

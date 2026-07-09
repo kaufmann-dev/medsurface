@@ -190,8 +190,16 @@ Correspondences are trimmed, because the scans overlap only partially.
 The union is taken on the **masks**, not the meshes. Boolean-unioning two shells
 leaves a seam ridge wherever they disagree by a fraction of a millimetre; fusing
 the solids and running marching cubes once gives a single continuous surface. The
-fused grid is **isotropic**: merging a 0.3 mm sinus CT onto a 0.8 mm facial CT's
-grid made the vault inherit the coarser scan's slice terracing.
+fused grid is **isotropic**: resampling a 0.3 mm sinus CT onto a 0.8 mm facial
+CT's grid would throw away the finer scan's resolution and stamp the coarser
+scan's slice pitch across the whole vault.
+
+An isotropic grid does not, however, *remove* terracing. Each scan's staircase is
+baked into its own mask by its own slice pitch, and resampling a 0.8 mm staircase
+onto a 0.4 mm grid merely samples it more finely. So the fused surface is smoothed
+with the preset's settings, exactly as a single-scan surface is — 20 iterations,
+then 25 more after decimation. An earlier version used its own lighter constants
+and came out visibly rougher than either scan it was built from.
 
 ### It refuses input it should refuse
 
