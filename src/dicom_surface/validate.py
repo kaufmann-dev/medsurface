@@ -18,11 +18,10 @@ import trimesh
 
 
 def _self_intersections(path: str) -> int | str:
-    """Optional: requires the ``quality`` extra (pymeshlab)."""
     try:
         import pymeshlab
-    except ImportError:
-        return "not measured (pip install 'dicom-surface[quality]')"
+    except ImportError:  # pragma: no cover - pymeshlab is a hard dependency
+        return "not measured (pymeshlab unavailable)"
     try:
         ms = pymeshlab.MeshSet()
         ms.load_new_mesh(path)

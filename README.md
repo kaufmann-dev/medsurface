@@ -15,13 +15,14 @@ $ dicom-surface list ~/scans/head-ct
 $ dicom-surface convert ~/scans/head-ct -o skull.stl --preset bone
 ...
 quality:
-  triangles           1,916,624
+  triangles           600,000
   components          1
   watertight          yes
   boundary edges      0
   non-manifold edges  0
   degenerate faces    0
-  volume              384295 mm3
+  genus               1225
+  volume              385394 mm3
 ```
 
 Every conversion is validated before it is handed back. If the mesh is not
@@ -32,10 +33,9 @@ watertight, the tool says so rather than letting you find out in a slicer.
 ```sh
 pip install dicom-surface                 # core
 pip install 'dicom-surface[repair]'       # + repair of meshes from elsewhere
-pip install 'dicom-surface[quality]'      # + self-intersection counting
 ```
 
-Python 3.10+. No 3D Slicer, no MeshLab, no system packages.
+Python 3.10+. No 3D Slicer, no system packages.
 
 ## Usage
 
@@ -52,20 +52,20 @@ Coordinates are **LPS** (DICOM patient space), which is what STL consumers expec
 
 ### Presets
 
-| preset | modality | threshold | grid | for |
+| preset | modality | threshold | triangles | for |
 |---|---|---|---|---|
-| `bone` | CT | 300 HU | 0.6 mm | general bone. Denoises without erasing teeth or sutures. |
-| `bone-detail` | CT | 300 HU | native | maximum fidelity, very large files |
-| `bone-print` | CT | 350 HU | 1.0 mm | smooth low-poly bone for 3D printing |
-| `teeth` | CT | 1200 HU | 0.3 mm | enamel and dense dentin |
-| `skin` | CT | -300 HU | 1.0 mm | outer skin surface |
-| `auto` | any | Otsu | 0.6 mm | MR, CBCT, or any uncalibrated intensity |
+| `bone` | CT | 300 HU | 600k | general bone. Denoises without erasing teeth or sutures. |
+| `bone-detail` | CT | 300 HU | all | maximum fidelity, very large files |
+| `bone-print` | CT | 350 HU | 250k | smooth low-poly bone for 3D printing |
+| `teeth` | CT | 1200 HU | 300k | enamel and dense dentin |
+| `skin` | CT | -300 HU | 400k | outer skin surface |
+| `auto` | any | Otsu | 600k | MR, CBCT, or any uncalibrated intensity |
 
 Every preset parameter is overridable:
 
 ```sh
 dicom-surface convert scans/ -o out.stl \
-    --series 6 --threshold 250 --closing-mm 3.2 --resample-mm 0.8 --smooth-iters 25
+    --series 6 --threshold 250 --closing-mm 3.2 --target-faces 250000 --smooth-iters 25
 ```
 
 ### Not every scan is a head CT
@@ -86,7 +86,7 @@ dicom-surface convert scans/ -o out.stl \
 
 ## Why the output is watertight
 
-Six things silently produce a plausible-looking but wrong mesh. This tool handles
+Seven things silently produce a plausible-looking but wrong mesh. This tool handles
 each, and the test suite has a regression test for every one.
 
 **1. Filenames are not slice order.** In the study this was built on, file `1`
@@ -111,22 +111,34 @@ kernel vanishes instead.
 closed shells inside the mesh. Only keeping the largest *surface component* drops
 them (2,477 of them, on one head CT).
 
-**5. Decimation tears thin walls.** A skull's orbital walls are one voxel thick;
-edge collapses weld their opposite faces together. Measured on a 4M-triangle
-skull, `vtkQuadricDecimation` leaks defects at *every* reduction -- 6 boundary
-edges at 50%, 90 at 85% -- so no backoff converges. `vtkDecimatePro` with
-`PreserveTopologyOn` both misses the target and emits non-manifold edges.
+**5. VTK's decimators tear thin walls.** A skull's orbital walls are one voxel
+thick; edge collapses weld their opposite faces together. Measured on a
+4M-triangle skull, `vtkQuadricDecimation` leaks defects at *every* reduction --
+6 boundary edges at 50%, 90 boundary and 207 non-manifold at 85% -- so no backoff
+converges. `vtkDecimatePro` with `PreserveTopologyOn` both misses the target
+(898k triangles when asked for 600k) and still emits non-manifold edges.
 
-Triangle count is therefore controlled by `--resample-mm`, which resamples the
-mask onto an isotropic grid before meshing. Marching cubes always returns a
-manifold surface, so this cannot introduce a defect. `--target-faces` still
-exists, is verified after the fact, and warns if it broke the mesh.
+MeshLab's quadric edge collapse with `preservetopology=True` is used instead. It
+hits the target exactly and holds genus and volume constant: 1225 and ~385,200
+mm³ at 600k *and* at 250k triangles. Decimation is still verified afterwards, and
+the tool warns if it ever breaks the mesh.
 
-**6. A signed distance field is not free.** It is the textbook way to resample a
-mask, but ITK's Maurer transform quantises distance to voxel centres, putting its
-zero level half a voxel inside the true boundary -- a 6% volume loss on a 20 mm
-sphere. Smoothed fractional occupancy, thresholded at 0.5, keeps the error under
-0.5%.
+**6. Resampling erases what the closing sealed.** Resampling the mask onto a
+coarser isotropic grid *is* topology-safe -- marching cubes always returns a
+manifold surface -- and it is tempting, being 25x faster than decimation. But the
+morphological closing seals a pore with a membrane one voxel thick, and a coarser
+grid blurs that membrane below the occupancy threshold, so the pore reopens.
+
+On a head CT, `--resample-mm 0.6` added 257 tunnels (genus 1225 → 1482), perforated
+the brow and orbital walls, and terraced the vault with interpolation contours.
+The default is therefore the native grid. `--resample-mm` remains available for
+speed and memory, and warns when it is coarser than the native voxel.
+
+**7. A signed distance field is not free.** If you *do* resample, the textbook
+choice is a signed distance field -- but ITK's Maurer transform quantises distance
+to voxel centres, putting its zero level half a voxel inside the true boundary: a
+6% volume loss on a 20 mm sphere. Smoothed fractional occupancy, thresholded at
+0.5, keeps the error under 0.5%.
 
 ## Sharp kernels
 
@@ -149,7 +161,7 @@ as closed.
 
 Reported: triangle and vertex counts, connected components, watertightness,
 winding consistency, boundary edges, non-manifold edges, degenerate faces, genus,
-volume, bounding box, and (with the `quality` extra) self-intersecting faces.
+volume, bounding box, and self-intersecting faces.
 
 Volume is reported as `undefined` on an open mesh rather than printing the
 meaningless number the divergence theorem yields.
@@ -170,7 +182,7 @@ diagnosis, surgical planning, or any clinical use.
 
 ```sh
 uv venv --python 3.12
-uv pip install -e '.[dev,repair,quality]'
+uv pip install -e '.[dev,repair]'
 pytest
 ```
 

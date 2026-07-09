@@ -195,16 +195,95 @@ def test_resampling_preserves_physical_placement(solid_sphere):
         assert grid.GetSize()[axis] * 1.0 >= padded.GetSize()[axis] * padded.GetSpacing()[axis]
 
 
-def test_decimation_is_documented_as_unsafe(solid_sphere, tmp_path):
-    """Decimation may open a closed mesh. We do not assert that it does -- on a
-    smooth sphere it happens not to -- only that the pipeline checks."""
-    image, _ = solid_sphere
+@pytest.mark.parametrize("keep", [0.5, 0.2, 0.05])
+def test_decimation_never_opens_a_closed_mesh(solid_sphere, tmp_path, keep):
+    """Regression: both of VTK's decimators tear a closed surface.
+
+    vtkQuadricDecimation leaks boundary edges at every reduction (6 at 50%, 90 at
+    85% on a real skull); vtkDecimatePro with PreserveTopologyOn misses the target
+    and still emits non-manifold edges. The MeshLab decimator holds topology, so a
+    watertight mesh stays watertight and its volume barely moves.
+    """
+    image, radius = solid_sphere
     poly = _mesh(image, smooth_iters=10)
     assert surface.count_defects(poly) == (0, 0)
-    smaller = surface.decimate(poly, poly.GetNumberOfPolys() // 5)
-    assert smaller.GetNumberOfPolys() < poly.GetNumberOfPolys()
-    # count_defects is what the pipeline uses to detect the damage
-    assert isinstance(surface.count_defects(smaller), tuple)
+
+    target = max(64, int(poly.GetNumberOfPolys() * keep))
+    smaller = surface.decimate(poly, target)
+
+    assert surface.count_defects(smaller) == (0, 0)
+    report = validate.validate(_write(smaller, tmp_path, "dec_%s.stl" % keep),
+                               self_intersections=False)
+    assert report["watertight"], report
+    assert report["components"] == 1
+    assert report["genus"] == 0
+    expected = 4.0 / 3.0 * math.pi * radius**3
+    assert report["volume_mm3"] == pytest.approx(expected, rel=0.05)
+
+
+def test_decimation_hits_the_target(solid_sphere):
+    """Within a triangle or two: a closed surface has an even face count, so an
+    odd target cannot be hit exactly."""
+    image, _ = solid_sphere
+    poly = _mesh(image, smooth_iters=5)
+    target = poly.GetNumberOfPolys() // 3
+    assert surface.decimate(poly, target).GetNumberOfPolys() == pytest.approx(target, abs=2)
+
+
+def test_decimation_preserves_genus(tmp_path):
+    """A skull has genus >1000. Decimation must not close its tunnels."""
+    import trimesh
+    import vtk as _vtk
+
+    torus = trimesh.creation.torus(major_radius=10.0, minor_radius=3.0,
+                                   major_sections=192, minor_sections=96)
+    p = os.path.join(str(tmp_path), "torus.stl")
+    torus.export(p)
+    assert validate.validate(p, self_intersections=False)["genus"] == 1
+
+    reader = _vtk.vtkSTLReader()
+    reader.SetFileName(p)
+    reader.Update()
+    poly = reader.GetOutput()
+
+    smaller = surface.decimate(poly, max(64, poly.GetNumberOfPolys() // 6))
+    after = validate.validate(_write(smaller, tmp_path, "torus_dec.stl"),
+                              self_intersections=False)
+    assert after["watertight"]
+    assert after["genus"] == 1, "decimation closed the tunnel"
+
+
+def _slab_survives(thickness_voxels, mm, spacing=0.2):
+    """Does a slab of the given thickness still register as foreground after
+    resampling onto an `mm` isotropic grid?"""
+    import numpy as np
+    import SimpleITK as sitk
+
+    arr = np.zeros((40, 60, 40), dtype=np.uint8)
+    y0 = 30
+    arr[5:35, y0:y0 + thickness_voxels, 5:35] = 1
+    img = sitk.GetImageFromArray(arr)
+    img.SetSpacing((spacing, spacing, spacing))
+
+    grid = segment.resample_isotropic(img, mm)
+    a = sitk.GetArrayViewFromImage(grid)
+    return bool((a > segment.ISO_OCCUPANCY).any())
+
+
+def test_resampling_erases_structures_thinner_than_the_target_voxel():
+    """Regression for the quality bug that shipped.
+
+    Resampling onto a coarser grid destroys sub-voxel structure. The morphological
+    closing seals a pore with a membrane one voxel thick; resampling to 0.6 mm
+    blurs that membrane below the 0.5 occupancy level and the pore reopens. On a
+    head CT this added 257 tunnels (genus 1225 -> 1482) and terraced the vault.
+    """
+    # 2 voxels = 0.4 mm of bone.
+    assert _slab_survives(2, 0.2), "a membrane must survive its own resolution"
+    assert not _slab_survives(2, 1.5), "0.4 mm cannot survive a 1.5 mm grid"
+
+    # Thick cortical bone is unaffected: 20 voxels = 4 mm.
+    assert _slab_survives(20, 1.5), "4 mm of bone must survive a 1.5 mm grid"
 
 
 def test_decimation_is_a_noop_when_already_under_budget(solid_sphere):

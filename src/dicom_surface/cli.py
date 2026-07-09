@@ -229,10 +229,9 @@ def cmd_presets(_args: argparse.Namespace) -> int:
         thr = p.threshold if isinstance(p.threshold, str) else "%g" % p.threshold
         print("%-12s  [%s]" % (name, modality))
         print("  %s" % p.description)
-        print("  threshold=%s  median=%.1fmm  closing=%.1fmm  resample=%s  smooth=%d"
-              % (thr, p.median_mm, p.closing_mm,
-                 ("%.1fmm" % p.resample_mm) if p.resample_mm else "native",
-                 p.smooth_iters))
+        triangles = f"{p.target_faces:,}" if p.target_faces else "all"
+        print("  threshold=%s  median=%.1fmm  closing=%.1fmm  smooth=%d  triangles=%s"
+              % (thr, p.median_mm, p.closing_mm, p.smooth_iters, triangles))
         print()
     return 0
 
@@ -268,12 +267,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="keep every surface shell, including internal cavities")
     pc.add_argument("--resample-mm", type=float,
                     help="isotropic voxel size for the surface grid, mm (0 = native). "
-                         "The topology-safe way to control triangle count.")
+                         "Fast and low-memory, but ERASES structures thinner than the "
+                         "target voxel; prefer --target-faces")
     pc.add_argument("--smooth-iters", type=int, help="windowed-sinc iterations")
     pc.add_argument("--passband", type=float, help="windowed-sinc passband (lower = smoother)")
     pc.add_argument("--target-faces", type=int,
-                    help="decimate to roughly this many triangles. WARNING: can open a "
-                         "closed surface on thin-walled anatomy; prefer --resample-mm")
+                    help="decimate to this many triangles, preserving topology (0 = off)")
     pc.add_argument("--post-smooth-iters", type=int, help="smoothing after decimation")
     pc.add_argument("--no-cap", action="store_true",
                     help="do not close the surface where anatomy leaves the field of view")
