@@ -49,10 +49,9 @@ CORRESPONDENCE_TOL_MM = 4.0
 #: A second pass then re-fits with the trim widened to the overlap actually
 #: measured. Trimming is necessary when the scans overlap partially, but harmful
 #: when they overlap fully: the discarded correspondences are the ones furthest
-#: from the rotation axis, which is where the rotational signal lives. Fixed at
-#: 0.45, a 5 degree misalignment of two identical volumes converged to 4.49
-#: degrees of residual error; the same case with the trim widened converges to
-#: 0.44.
+#: from the rotation axis, which is where the rotational signal lives. Held at
+#: 0.45, a 5 degree misalignment of two identical volumes converges 4.49 degrees
+#: off; widening the trim brings the same case to 0.44.
 TRIM_KEEP = 0.45
 
 #: Never trim beyond this, so a stray outlier cannot dominate the final fit.

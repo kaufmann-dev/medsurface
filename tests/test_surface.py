@@ -300,12 +300,12 @@ def _slab_survives(thickness_voxels, mm, spacing=0.2):
 
 
 def test_resampling_erases_structures_thinner_than_the_target_voxel():
-    """Regression for the quality bug that shipped.
+    """Resampling onto a coarser grid destroys sub-voxel structure.
 
-    Resampling onto a coarser grid destroys sub-voxel structure. The morphological
-    closing seals a pore with a membrane one voxel thick; resampling to 0.6 mm
-    blurs that membrane below the 0.5 occupancy level and the pore reopens. On a
-    head CT this added 257 tunnels (genus 1225 -> 1482) and terraced the vault.
+    The morphological closing seals a pore with a membrane one voxel thick;
+    resampling to 0.6 mm blurs that membrane below the 0.5 occupancy level and the
+    pore reopens. On a head CT that adds 257 tunnels (genus 1225 -> 1482) and
+    terraces the vault. Hence the native grid by default.
     """
     # 2 voxels = 0.4 mm of bone.
     assert _slab_survives(2, 0.2), "a membrane must survive its own resolution"
