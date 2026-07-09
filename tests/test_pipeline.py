@@ -5,7 +5,7 @@ import pytest
 import SimpleITK as sitk
 
 from dicom_surface import presets, validate
-from dicom_surface.pipeline import ModalityMismatch, _resolve_threshold
+from dicom_surface.pipeline import ModalityMismatch, resolve_threshold
 from dicom_surface.series import Series
 
 
@@ -25,12 +25,12 @@ def _ct_image():
 
 
 def test_explicit_threshold_wins_over_preset():
-    v, src = _resolve_threshold(_ct_image(), _series(), presets.get("bone"), 123.0)
+    v, src = resolve_threshold(_ct_image(), _series(), presets.get("bone"), 123.0)
     assert v == 123.0 and src == "explicit"
 
 
 def test_preset_threshold_used_for_ct():
-    v, src = _resolve_threshold(_ct_image(), _series("CT"), presets.get("bone"), None)
+    v, src = resolve_threshold(_ct_image(), _series("CT"), presets.get("bone"), None)
     assert v == 300.0 and src == "preset:bone"
 
 
@@ -39,18 +39,18 @@ def test_hu_preset_rejected_for_non_ct():
     a confidently wrong mesh."""
     for modality in ("MR", "US", "PT", "XA"):
         with pytest.raises(ModalityMismatch, match="only.*meaningful for CT"):
-            _resolve_threshold(_ct_image(), _series(modality), presets.get("bone"), None)
+            resolve_threshold(_ct_image(), _series(modality), presets.get("bone"), None)
 
 
 def test_auto_preset_works_on_any_modality():
     for modality in ("CT", "MR", "US"):
-        v, src = _resolve_threshold(_ct_image(), _series(modality), presets.get("auto"), None)
+        v, src = resolve_threshold(_ct_image(), _series(modality), presets.get("auto"), None)
         assert src == "otsu"
         assert np.isfinite(v)
 
 
 def test_explicit_threshold_bypasses_the_modality_guard():
-    v, src = _resolve_threshold(_ct_image(), _series("MR"), presets.get("bone"), 500.0)
+    v, src = resolve_threshold(_ct_image(), _series("MR"), presets.get("bone"), 500.0)
     assert v == 500.0 and src == "explicit"
 
 

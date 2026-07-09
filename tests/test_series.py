@@ -26,7 +26,7 @@ SAGITTAL = [0, 1, 0, 0, 0, -1]
 
 def _write_slice(path, z, series_uid=SERIES_UID, *, modality="CT", localizer=False,
                  description="TEST SERIES", kernel="Hr68", series_number=6, rows=8,
-                 orientation=None, pixel_spacing=(0.5, 0.5)):
+                 orientation=None, pixel_spacing=(0.5, 0.5), patient_id=None):
     fm = FileMetaDataset()
     fm.MediaStorageSOPClassUID = CTImageStorage
     fm.MediaStorageSOPInstanceUID = generate_uid()
@@ -39,6 +39,8 @@ def _write_slice(path, z, series_uid=SERIES_UID, *, modality="CT", localizer=Fal
     ds.SeriesInstanceUID = series_uid
     ds.StudyInstanceUID = generate_uid()
     ds.Modality = modality
+    if patient_id is not None:
+        ds.PatientID = patient_id
     ds.SeriesDescription = description
     ds.SeriesNumber = series_number
     ds.ConvolutionKernel = kernel

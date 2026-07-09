@@ -7,6 +7,7 @@ import json
 import sys
 
 from . import presets as presets_mod
+from . import merge as merge_defaults
 from . import pipeline, series as series_mod, validate as validate_mod
 from .presets import PRESETS
 
@@ -201,6 +202,110 @@ def cmd_convert(args: argparse.Namespace) -> int:
     return 0
 
 
+# -------------------------------------------------------------------- merge
+def cmd_merge(args: argparse.Namespace) -> int:
+    from . import merge as merge_mod
+
+    log = _quiet if args.quiet else _log
+
+    dir_b = args.dicom_dir_b or args.dicom_dir_a
+    found_a = series_mod.discover(args.dicom_dir_a)
+    found_b = found_a if dir_b == args.dicom_dir_a else series_mod.discover(dir_b)
+    if not found_a or not found_b:
+        print("no DICOM instances found", file=sys.stderr)
+        return 1
+
+    try:
+        chosen_a = series_mod.select(found_a, args.series_a)
+        chosen_b = series_mod.select(found_b, args.series_b)
+    except ValueError as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        return 2
+
+    preset = presets_mod.get(args.preset)
+    preset = presets_mod.override(
+        preset,
+        median_mm=args.median_mm,
+        closing_mm=args.closing_mm,
+        min_island_mm3=args.min_island_mm3,
+    )
+
+    threshold = None
+    if args.threshold is not None:
+        if args.threshold == "auto":
+            preset = presets_mod.override(preset, threshold="auto")
+        else:
+            try:
+                threshold = float(args.threshold)
+            except ValueError:
+                print("error: --threshold must be a number or 'auto'", file=sys.stderr)
+                return 2
+
+    try:
+        result = merge_mod.merge(
+            series_a=chosen_a,
+            series_b=chosen_b,
+            preset=preset,
+            output_path=args.output,
+            threshold=threshold,
+            grid_mm=args.grid_mm,
+            smooth_iters=args.smooth_iters,
+            passband=args.passband,
+            target_faces=args.target_faces,
+            post_smooth_iters=args.post_smooth_iters,
+            force=args.force,
+            log=log,
+        )
+    except merge_mod.MergeError as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        return 3
+    except (pipeline.ModalityMismatch, ValueError) as exc:
+        print("error: %s" % exc, file=sys.stderr)
+        return 2
+
+    for w in result.warnings:
+        _warn(w)
+
+    log("")
+    log("wrote %s" % result.output_path)
+    log("  triangles %s   vertices %s   %.1fs"
+        % (f"{result.triangles:,}", f"{result.vertices:,}", result.seconds))
+
+    report = None
+    if not args.no_validate:
+        report = validate_mod.validate(result.output_path,
+                                       self_intersections=args.self_intersections)
+        log("")
+        log("quality:")
+        log(validate_mod.summarise(report))
+        if not report["watertight"]:
+            _warn("fused mesh is not watertight; try 'dicom-surface repair'")
+
+    if args.json:
+        payload = {
+            "result": {
+                "output": result.output_path,
+                "triangles": result.triangles,
+                "vertices": result.vertices,
+                "bounds_mm": list(result.bounds_mm),
+                "grid_mm": result.grid_mm,
+                "grid_size": list(result.grid_size),
+                "volume_fixed_mm3": result.volume_a_mm3,
+                "volume_moving_mm3": result.volume_b_mm3,
+                "volume_fused_mm3": result.volume_union_mm3,
+                "seconds": result.seconds,
+                "warnings": result.warnings,
+            },
+            "provenance": result.provenance,
+            "quality": report,
+        }
+        with open(args.json, "w") as fh:
+            json.dump(payload, fh, indent=2)
+        log("wrote %s" % args.json)
+
+    return 0
+
+
 # ----------------------------------------------------------------- validate
 def cmd_validate(args: argparse.Namespace) -> int:
     report = validate_mod.validate(args.mesh, self_intersections=args.self_intersections)
@@ -291,6 +396,41 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--json", help="write results and provenance to this JSON file")
     pc.add_argument("-q", "--quiet", action="store_true")
     pc.set_defaults(func=cmd_convert)
+
+    pm = sub.add_parser(
+        "merge",
+        help="fuse two scans of the same anatomy into one surface",
+        description="Rigidly register two DICOM series of the same anatomy and fuse "
+                    "them into a single watertight surface. Refuses pairs that do "
+                    "not pass registration quality gates.",
+    )
+    pm.add_argument("dicom_dir_a", help="fixed scan (defines the output coordinate frame)")
+    pm.add_argument("dicom_dir_b", nargs="?",
+                    help="moving scan; omit to fuse two series from the first directory")
+    pm.add_argument("-o", "--output", required=True)
+    pm.add_argument("--series-a", help="series ident in the fixed scan")
+    pm.add_argument("--series-b", help="series ident in the moving scan")
+    pm.add_argument("--preset", default="bone", choices=sorted(PRESETS))
+    pm.add_argument("--threshold", help="intensity (HU for CT) or 'auto'; applies to both")
+    pm.add_argument("--median-mm", type=float)
+    pm.add_argument("--closing-mm", type=float)
+    pm.add_argument("--min-island-mm3", type=float)
+    pm.add_argument("--grid-mm", type=float, default=merge_defaults.DEFAULT_GRID_MM,
+                    help="isotropic voxel size of the fused grid (default %(default)s). "
+                         "Finer keeps thinner bone, at cubic memory cost.")
+    pm.add_argument("--smooth-iters", type=int, default=merge_defaults.DEFAULT_SMOOTH_ITERS)
+    pm.add_argument("--passband", type=float, default=merge_defaults.DEFAULT_PASSBAND)
+    pm.add_argument("--target-faces", type=int, default=merge_defaults.DEFAULT_TARGET_FACES)
+    pm.add_argument("--post-smooth-iters", type=int,
+                    default=merge_defaults.DEFAULT_POST_SMOOTH_ITERS)
+    pm.add_argument("--force", action="store_true",
+                    help="fuse even if the scans look like different patients or the "
+                         "registration fails its quality gates")
+    pm.add_argument("--no-validate", action="store_true")
+    pm.add_argument("--self-intersections", action="store_true")
+    pm.add_argument("--json", help="write results and provenance to this JSON file")
+    pm.add_argument("-q", "--quiet", action="store_true")
+    pm.set_defaults(func=cmd_merge)
 
     pv = sub.add_parser("validate", help="report mesh quality")
     pv.add_argument("mesh")
