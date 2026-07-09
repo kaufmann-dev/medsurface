@@ -69,17 +69,24 @@ def _rigid(rotation_deg, axis, translation):
 
 
 def _apply_to_image(mask, transform):
-    """Resample a mask so its anatomy moves by `transform` in world coordinates."""
+    """Resample a mask so its anatomy moves by `transform` in world coordinates.
+
+    Occupancy is resampled linearly and re-thresholded, not nearest-neighbour.
+    Nearest-neighbour quantises the ground truth to the voxel grid, which put a
+    floor of ~1 degree on how accurately any registration could be *seen* to
+    recover a small rotation -- the fixture, not the algorithm.
+    """
     inv = registration.inverse_transform(transform)
     r = sitk.ResampleImageFilter()
     r.SetReferenceImage(mask)
     size = np.asarray(mask.GetSize()) + 40
     r.SetSize([int(v) for v in size])
     r.SetOutputOrigin([o - 20.0 * s for o, s in zip(mask.GetOrigin(), mask.GetSpacing())])
-    r.SetInterpolator(sitk.sitkNearestNeighbor)
-    r.SetDefaultPixelValue(0)
+    r.SetInterpolator(sitk.sitkLinear)
+    r.SetDefaultPixelValue(0.0)
     r.SetTransform(inv)
-    return r.Execute(mask)
+    resampled = r.Execute(sitk.Cast(mask, sitk.sitkFloat32))
+    return sitk.BinaryThreshold(resampled, 0.5, 1e9, 1, 0)
 
 
 # ------------------------------------------------------------- registration
@@ -99,6 +106,40 @@ def test_recovers_a_known_rigid_transform():
     assert result.inlier_rms_mm < 0.6
     assert result.surface_overlap > 0.9
     assert result.shared_fov_dice > 0.85
+
+
+@pytest.mark.parametrize("degrees", [3.0, 8.0, 25.0, 40.0])
+def test_recovers_rotations_across_the_capture_range(degrees):
+    """Regression, twice over.
+
+    A fixed 45% trim broke *small* rotations: the discarded correspondences are
+    the ones furthest from the rotation axis, which is exactly where the
+    rotational signal lives. A 5 degree misalignment of two identical volumes
+    converged to 4.49 degrees of residual error. The trim is now widened to the
+    overlap actually measured.
+
+    And a point-to-point ICP bootstrap, which used to run first, broke *large*
+    rotations: at 40 degrees it converged into a wrong basin (33 degrees of
+    residual error) that point-to-plane alone handles cleanly. It has been
+    removed; it never improved any case.
+    """
+    fixed = _image(_lumpy_shell())
+    truth = _rigid(degrees, (0.3, 0.4, 1.0), (6.0, -4.0, 8.0))
+    moving = _apply_to_image(fixed, truth)
+
+    result = registration.rigid_register(fixed, moving, samples=20000)
+
+    composed = result.transform @ truth
+    angle = math.degrees(math.acos(max(-1.0, min(1.0, (np.trace(composed[:3, :3]) - 1) / 2))))
+    assert angle < 1.0, "rotation error %.2f deg at %.0f deg" % (angle, degrees)
+    assert np.linalg.norm(composed[:3, 3]) < 1.0
+
+
+def test_point_to_point_icp_is_gone():
+    """It never improved a case, cost 9 seconds on the real pair, and drove the
+    40 degree case into a wrong basin."""
+    assert not hasattr(registration, "_icp_point_to_point")
+    assert not hasattr(registration, "_kabsch")
 
 
 def test_identical_input_registers_to_the_identity():
@@ -148,7 +189,6 @@ def test_surface_overlap_is_the_weaker_direction():
     [
         ({"overlap_fixed_in_moving": 0.02}, "surfaces agree over only"),
         ({"overlap_moving_in_fixed": 0.02}, "surfaces agree over only"),
-        ({"inlier_rms_mm": 6.0}, "residual"),
         ({"shared_fov_dice": 0.05}, "bone agreement"),
         ({"shared_fov_mm3": 100.0}, "share only"),
     ],
@@ -156,6 +196,23 @@ def test_surface_overlap_is_the_weaker_direction():
 def test_bad_registration_is_refused_with_a_reason(kw, expected):
     with pytest.raises(MergeError, match=expected):
         merge_mod.check_registration(_result(**kw))
+
+
+def test_residual_is_reported_but_not_gated():
+    """It never discriminated: impostor 0.43 mm, 5%-oversized skull 0.41 mm, true
+    pairs 0.09-0.21 mm. A gate that has never fired is a false sense of security."""
+    assert not hasattr(merge_mod, "MAX_INLIER_RMS_MM")
+    merge_mod.check_registration(_result(inlier_rms_mm=9.9))  # must not raise
+    assert "rms" in _result().summary()
+
+
+def test_geometry_alone_cannot_reject_a_similar_body():
+    """Measured on a real skull scaled by 3%, within person-to-person variation:
+    overlap 0.989, dice 0.675 -- both gates pass. This is why the demographic
+    check exists, and why removing it would not be a simplification."""
+    similar_body = _result(overlap_moving_in_fixed=0.989, overlap_fixed_in_moving=0.989,
+                           shared_fov_dice=0.675)
+    merge_mod.check_registration(similar_body)  # geometry waves it through
 
 
 def test_gates_have_margin_against_real_measurements():
@@ -347,8 +404,9 @@ def test_patient_values_never_appear_in_output(tmp_path):
     b = _dicom_with_patient(tmp_path, "b", "1.2.4", PatientID="PAT-OTHER",
                             PatientName="Othername^Bob")
 
-    fp = merge_mod._patient_fingerprint(a.files[0])
-    assert fp and len(fp) == 16 and "SECRET" not in fp.upper()
+    match = merge_mod.compare_patients(a.files[0], b.files[0])
+    assert match.verdict == "different"
+    assert match.conflicts == ["name"]          # field names only, never values
 
     with pytest.raises(MergeError) as exc:
         merge_mod.check_compatible(a, b)

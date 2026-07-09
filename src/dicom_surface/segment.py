@@ -202,6 +202,25 @@ ISO_OCCUPANCY = 0.5
 _ANTIALIAS_SIGMA_FACTOR = 0.3
 
 
+def antialias_for_grid(image: sitk.Image, grid_mm: float) -> sitk.Image:
+    """Blur only the axes that are about to be downsampled.
+
+    Point-sampling a mask onto a coarser grid makes thin structures blink in and
+    out depending on where the samples land. Axes being *up*sampled need no
+    pre-filter, and blurring them would only cost detail. SimpleITK rejects a
+    vector sigma containing zeros, so the axes are filtered one at a time.
+    """
+    out = sitk.Cast(image, sitk.sitkFloat32)
+    for axis, spacing in enumerate(image.GetSpacing()):
+        if grid_mm <= spacing:
+            continue
+        blur = sitk.RecursiveGaussianImageFilter()
+        blur.SetDirection(axis)
+        blur.SetSigma(_ANTIALIAS_SIGMA_FACTOR * grid_mm)
+        out = blur.Execute(out)
+    return out
+
+
 def resample_isotropic(binary: sitk.Image, mm: float, log=None) -> sitk.Image:
     """Resample the mask onto an isotropic grid as a fractional-occupancy field.
 
@@ -216,12 +235,7 @@ def resample_isotropic(binary: sitk.Image, mm: float, log=None) -> sitk.Image:
     voxel inside the true boundary. Measured on a 20 mm sphere that shrinks the
     volume by 6%. Smoothed occupancy keeps the error under 0.5%.
     """
-    field = sitk.Cast(binary, sitk.sitkFloat32)
-
-    native = min(field.GetSpacing())
-    if mm > native:  # only downsampling needs an anti-aliasing pre-filter
-        sigma = _ANTIALIAS_SIGMA_FACTOR * mm
-        field = sitk.SmoothingRecursiveGaussian(field, sigma)
+    field = antialias_for_grid(binary, mm)
 
     size = [
         max(1, int(math.ceil(n * s / mm)))

@@ -7,7 +7,7 @@ import json
 import sys
 
 from . import presets as presets_mod
-from . import merge as merge_defaults
+from .merge import DEFAULT_GRID_MM
 from . import pipeline, series as series_mod, validate as validate_mod
 from .presets import PRESETS
 
@@ -415,7 +415,7 @@ def build_parser() -> argparse.ArgumentParser:
     pm.add_argument("--median-mm", type=float)
     pm.add_argument("--closing-mm", type=float)
     pm.add_argument("--min-island-mm3", type=float)
-    pm.add_argument("--grid-mm", type=float, default=merge_defaults.DEFAULT_GRID_MM,
+    pm.add_argument("--grid-mm", type=float, default=DEFAULT_GRID_MM,
                     help="isotropic voxel size of the fused grid (default %(default)s). "
                          "Finer keeps thinner bone, at cubic memory cost.")
     pm.add_argument("--smooth-iters", type=int, help="default: from the preset")

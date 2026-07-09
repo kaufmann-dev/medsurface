@@ -17,11 +17,17 @@ transform -- FFT and ICP cannot fail, they can only converge somewhere useless -
 so the answer must be checked, not trusted. Two unrelated scans produce a
 confident-looking transform and a mesh made of two skulls stuck together at
 random. The gates below exist to make that outcome an error instead.
+
+Geometry alone cannot do it. Measured: a skull uniformly scaled by 3%, which is
+well inside person-to-person variation, passes both geometric gates (overlap
+0.989, dice 0.675) because rigid registration parks it neatly on top. So the
+demographics are checked too -- not out of bureaucracy, but because the geometry
+demonstrably cannot tell two similar bodies apart. Scans with no identifiers at
+all (de-identified data) warn and proceed.
 """
 
 from __future__ import annotations
 
-import hashlib
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -65,12 +71,14 @@ DEFAULT_GRID_MM = 0.4
 MIN_SURFACE_OVERLAP = 0.60
 #: Agreement of the two bone masks where both scans have data.
 MIN_SHARED_FOV_DICE = 0.55
-#: A sanity bound, not a discriminator: the impostor's residual (0.43 mm) sits
-#: comfortably inside it. ICP drives *some* residual down no matter what it is
-#: fitting, which is exactly why overlap and Dice carry the decision.
-MAX_INLIER_RMS_MM = 1.0
-#: If the scans barely see the same space, there is nothing to register on.
+#: If the scans barely see the same space, there is nothing to register on --
+#: and Dice over a few cubic centimetres proves nothing either way.
 MIN_SHARED_FOV_MM3 = 20_000.0
+
+# There is deliberately no gate on the ICP residual. It never discriminated: the
+# impostor scored 0.43 mm and a 5%-oversized skull 0.41 mm, both well inside any
+# plausible bound. ICP drives *some* residual down no matter what it is fitting.
+# The residual is reported, because it is informative; it is not evidence.
 
 
 class MergeError(RuntimeError):
@@ -93,15 +101,6 @@ class MergeResult:
     seconds: float
     warnings: list[str] = field(default_factory=list)
     provenance: dict[str, Any] = field(default_factory=dict)
-
-
-def _patient_fingerprint(path: str) -> str | None:
-    """A hash of the patient identifiers. Compared, never stored or shown."""
-    fields = _patient_fields(path)
-    if fields is None or not any(fields.values()):
-        return None
-    joined = "|".join(fields[k] for k in sorted(fields))
-    return hashlib.sha256(joined.encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def _normalise_name(value: str) -> str:
@@ -206,10 +205,14 @@ def check_compatible(a: Series, b: Series, force: bool = False) -> list[str]:
         fields = ", ".join(match.conflicts)
         msg = ("the two series appear to be different patients (%s %s; values not "
                "shown)" % (fields, "differ" if len(match.conflicts) > 1 else "differs"))
+        if match.conflicts == ["id"]:
+            msg += (". If these are de-identified studies of one person that were "
+                    "given different pseudonyms, pass --force")
         if not force:
             raise MergeError(msg + ". Pass --force if these really are the same body.")
         warnings.append(msg)
     elif match.verdict == "unknown":
+        # De-identified data lands here, and merges without complaint.
         warnings.append("cannot verify that both scans are of the same person "
                         "(no comparable patient identifiers)")
 
@@ -236,10 +239,6 @@ def check_registration(result: RegistrationResult, force: bool = False) -> None:
                100 * result.overlap_moving_in_fixed,
                100 * result.overlap_fixed_in_moving,
                100 * MIN_SURFACE_OVERLAP))
-    if result.inlier_rms_mm > MAX_INLIER_RMS_MM:
-        problems.append(
-            "point-to-plane residual %.2f mm exceeds %.2f mm"
-            % (result.inlier_rms_mm, MAX_INLIER_RMS_MM))
     if result.shared_fov_dice < MIN_SHARED_FOV_DICE:
         problems.append(
             "bone agreement in the shared field of view is %.3f (need %.2f)"
@@ -255,23 +254,6 @@ def check_registration(result: RegistrationResult, force: bool = False) -> None:
     if force:
         return
     raise MergeError(message + "\nPass --force to fuse them anyway.")
-
-
-def _antialias(image: sitk.Image, grid_mm: float) -> sitk.Image:
-    """Blur only the axes being downsampled, or thin bone aliases away.
-
-    A vector sigma with zeros in it is rejected by SimpleITK, so the axes are
-    filtered one at a time.
-    """
-    out = sitk.Cast(image, sitk.sitkFloat32)
-    for axis, spacing in enumerate(image.GetSpacing()):
-        if grid_mm <= spacing:
-            continue
-        blur = sitk.RecursiveGaussianImageFilter()
-        blur.SetDirection(axis)
-        blur.SetSigma(segment._ANTIALIAS_SIGMA_FACTOR * grid_mm)
-        out = blur.Execute(out)
-    return out
 
 
 def _corners(image: sitk.Image) -> np.ndarray:
@@ -383,10 +365,10 @@ def merge(
     inverse = registration.inverse_transform(reg.transform)
 
     field_a = step("resample fixed",
-                   lambda: _resample_field(_antialias(mask_a, grid_mm), size, origin,
+                   lambda: _resample_field(segment.antialias_for_grid(mask_a, grid_mm), size, origin,
                                            grid_mm, identity))
     field_b = step("resample moving",
-                   lambda: _resample_field(_antialias(mask_b, grid_mm), size, origin,
+                   lambda: _resample_field(segment.antialias_for_grid(mask_b, grid_mm), size, origin,
                                            grid_mm, inverse))
 
     # Union of occupancy, not of labels: keeps the sub-voxel boundary each scan

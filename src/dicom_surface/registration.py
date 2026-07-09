@@ -43,9 +43,20 @@ LATTICE_MM = 2.0
 #: counterpart (the scans cover different anatomy) rather than to be misaligned.
 CORRESPONDENCE_TOL_MM = 4.0
 
-#: Fraction of source points kept when fitting. The rest are treated as
-#: non-overlapping.
+#: Fraction of source points kept in the first, robust fitting pass. The rest are
+#: assumed to have no counterpart.
+#:
+#: A second pass then re-fits with the trim widened to the overlap actually
+#: measured. Trimming is necessary when the scans overlap partially, but harmful
+#: when they overlap fully: the discarded correspondences are the ones furthest
+#: from the rotation axis, which is where the rotational signal lives. Fixed at
+#: 0.45, a 5 degree misalignment of two identical volumes converged to 4.49
+#: degrees of residual error; the same case with the trim widened converges to
+#: 0.44.
 TRIM_KEEP = 0.45
+
+#: Never trim beyond this, so a stray outlier cannot dominate the final fit.
+TRIM_KEEP_MAX = 0.95
 
 
 class RegistrationError(RuntimeError):
@@ -134,27 +145,10 @@ def _fft_translation(a: np.ndarray, oa: np.ndarray,
     return (np.asarray(oa) - np.asarray(ob)) + mm * lag[::-1]  # (z,y,x) -> (x,y,z)
 
 
-def _kabsch(p: np.ndarray, q: np.ndarray) -> np.ndarray:
-    pc, qc = p.mean(0), q.mean(0)
-    u, _s, vt = np.linalg.svd((p - pc).T @ (q - qc))
-    d = np.sign(np.linalg.det(vt.T @ u.T))
-    rot = vt.T @ np.diag([1.0, 1.0, d]) @ u.T
-    out = np.eye(4)
-    out[:3, :3] = rot
-    out[:3, 3] = qc - rot @ pc
-    return out
-
-
-def _icp_point_to_point(src, tgt_tree, transform, iterations=40, keep=TRIM_KEEP):
-    t = transform.copy()
-    for _ in range(iterations):
-        p = (t[:3, :3] @ src.T).T + t[:3, 3]
-        d, idx = tgt_tree.query(p, workers=-1)
-        sel = d <= max(np.quantile(d, keep), 1e-9)
-        if sel.sum() < 100:
-            break
-        t = _kabsch(src[sel], tgt_tree.data[idx[sel]])
-    return t
+def _matched_fraction(src, tree, transform, max_dist) -> float:
+    moved = (transform[:3, :3] @ src.T).T + transform[:3, 3]
+    dist, _ = tree.query(moved, workers=-1)
+    return float((dist < max_dist).mean())
 
 
 def _icp_point_to_plane(src, tgt, tgt_normals, tgt_tree, transform,
@@ -326,8 +320,14 @@ def rigid_register(mask_a: sitk.Image, mask_b: sitk.Image,
         src = src[rng.choice(len(src), samples, replace=False)]
 
     tree = cKDTree(tgt)
-    transform = _icp_point_to_point(src, tree, transform)
-    transform = _icp_point_to_plane(src, tgt, tgt_normals, tree, transform)
+    # Pass 1: trim hard, so non-overlapping anatomy cannot drag the fit.
+    transform = _icp_point_to_plane(src, tgt, tgt_normals, tree, transform, keep=TRIM_KEEP)
+    # Pass 2: widen the trim to the overlap we actually found, so a fully
+    # overlapping pair keeps the correspondences that carry the rotation.
+    matched = _matched_fraction(src, tree, transform, CORRESPONDENCE_TOL_MM)
+    keep = min(TRIM_KEEP_MAX, max(TRIM_KEEP, 0.9 * matched))
+    say("  matched %.0f%% of moving surface -> refitting with trim %.2f" % (100 * matched, keep))
+    transform = _icp_point_to_plane(src, tgt, tgt_normals, tree, transform, keep=keep)
 
     rot, trans = transform[:3, :3], transform[:3, 3]
     moved = (rot @ src.T).T + trans
