@@ -33,7 +33,10 @@ def cmd_list(args: argparse.Namespace) -> int:
     if args.json:
         payload = [
             {
+                "ident": s.ident,
                 "uid": s.uid,
+                "part": s.part,
+                "n_parts": s.n_parts,
                 "series_number": s.series_number,
                 "modality": s.modality,
                 "description": s.description,
@@ -46,8 +49,10 @@ def cmd_list(args: argparse.Namespace) -> int:
                 "kernel": s.kernel,
                 "sharp_kernel": s.sharp_kernel,
                 "spacing_uniform": s.spacing_uniform,
+                "spacing_spread_mm": s.spacing_spread_mm,
                 "localizer": s.is_localizer,
                 "usable": s.usable,
+                "unusable_reason": s.unusable_reason,
             }
             for s in found
         ]
@@ -55,28 +60,29 @@ def cmd_list(args: argparse.Namespace) -> int:
         return 0
 
     best = series_mod.rank([s for s in found if s.usable])
-    recommended = best[0].uid if best else None
+    recommended = best[0] if best else None
 
     header = ("#", "MOD", "DESCRIPTION", "SLICES", "VOXEL mm", "PLANE", "NOTES")
-    print("%-4s %-4s %-32s %6s %-22s %-9s %s" % header)
-    print("-" * 112)
+    print("%-6s %-4s %-32s %6s %-22s %-9s %s" % header)
+    print("-" * 114)
+    split_seen = False
     for s in found:
         voxel = "-"
         if s.pixel_spacing and s.slice_spacing:
             voxel = "%.3f x %.3f x %.3f" % (s.pixel_spacing[0], s.pixel_spacing[1], s.slice_spacing)
         notes = []
-        if s.uid == recommended:
+        if recommended is not None and s is recommended:
             notes.append("<- default")
-        if s.is_localizer:
-            notes.append("localizer")
-        if not s.usable and not s.is_localizer:
-            notes.append("not an image series")
+        reason = s.unusable_reason
+        if reason:
+            notes.append(reason)
+        if s.n_parts > 1:
+            split_seen = True
+            notes.append("orientation %d of %d in this UID" % (s.part, s.n_parts))
         if s.sharp_kernel:
             notes.append("sharp kernel %s" % s.kernel)
-        if not s.spacing_uniform:
-            notes.append("irregular spacing")
-        print("%-4s %-4s %-32s %6d %-22s %-9s %s" % (
-            s.series_number if s.series_number is not None else "?",
+        print("%-6s %-4s %-32s %6d %-22s %-9s %s" % (
+            s.ident,
             s.modality,
             (s.description or "(none)")[:32],
             s.n_slices,
@@ -85,6 +91,10 @@ def cmd_list(args: argparse.Namespace) -> int:
             ", ".join(notes),
         ))
     print()
+    if split_seen:
+        print("Some SeriesInstanceUIDs hold more than one orientation and were split;")
+        print("select those with their dotted ident, e.g. --series 1021.1")
+        print()
     print("Convert the default with:  dicom-surface convert %s -o out.stl" % args.dicom_dir)
     return 0
 
@@ -104,8 +114,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
         print("error: %s" % exc, file=sys.stderr)
         return 2
 
-    log("series %s  %s  (%d slices)" % (
-        chosen.series_number, chosen.label(), chosen.n_slices))
+    log("series %s  %s  (%d slices)" % (chosen.ident, chosen.label(), chosen.n_slices))
 
     preset = presets_mod.get(args.preset)
     preset = presets_mod.override(

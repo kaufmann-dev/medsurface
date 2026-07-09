@@ -174,6 +174,165 @@ def test_select_by_number_uid_and_description(tmp_path):
         series_mod.select(found, "does-not-exist")
 
 
+def test_uid_holding_two_orientations_is_split(tmp_path):
+    """Regression, from a real study: SeriesInstanceUID 1021 held 64 axial frames
+    and one perpendicular frame. Nothing in DICOM forbids that."""
+    d = str(tmp_path)
+    uid = generate_uid()
+    # The odd frame sorts FIRST by filename, so a naive walk picks its normal.
+    _write_slice(os.path.join(d, "aaa_odd"), 0, series_uid=uid, series_number=1021,
+                 orientation=SAGITTAL)
+    for i in range(20):
+        _write_slice(os.path.join(d, "zzz_%02d" % i), i * 2.0, series_uid=uid,
+                     series_number=1021, orientation=AXIAL)
+
+    found = series_mod.discover(d)
+    assert len(found) == 2, [s.ident for s in found]
+    assert {s.n_parts for s in found} == {2}
+
+    big = [s for s in found if s.n_slices == 20][0]
+    small = [s for s in found if s.n_slices == 1][0]
+
+    assert big.ident == "1021.1"     # largest stack is part 1
+    assert small.ident == "1021.2"
+    assert big.plane == "axial"
+    assert big.slice_spacing == pytest.approx(2.0)
+    assert big.usable
+    assert not small.usable
+    assert "only 1 slice" in small.unusable_reason
+
+
+def test_wrong_normal_would_collapse_the_spacing(tmp_path):
+    """The failure this prevents: projecting axial positions onto a sagittal
+    normal collapses every depth to ~0, giving a sub-micron slice spacing that
+    then wins the ranking and scrambles the slice order."""
+    d = str(tmp_path)
+    uid = generate_uid()
+    _write_slice(os.path.join(d, "aaa_odd"), 0, series_uid=uid, series_number=1021,
+                 orientation=SAGITTAL)
+    for i in range(20):
+        _write_slice(os.path.join(d, "zzz_%02d" % i), i * 2.0, series_uid=uid,
+                     series_number=1021, orientation=AXIAL)
+    # a genuine, finer axial acquisition elsewhere in the study
+    real = generate_uid()
+    for i in range(30):
+        _write_slice(os.path.join(d, "real_%02d" % i), i * 0.5, series_uid=real,
+                     series_number=2, orientation=AXIAL, pixel_spacing=(0.4, 0.4))
+
+    found = series_mod.discover(d)
+    for s in found:
+        if s.usable:
+            assert s.slice_spacing > series_mod.MIN_SLICE_SPACING_MM
+            assert s.voxel_volume_mm3 > 1e-4
+
+    # the real acquisition wins; the reformat does not sneak in on a bogus voxel size
+    chosen = series_mod.select(found, None)
+    assert chosen.uid == real
+    assert chosen.n_slices == 30
+
+
+def test_discovery_is_independent_of_filesystem_order(tmp_path):
+    """The slice normal must not depend on which file os.walk yields first."""
+    import os as _os
+
+    orders = []
+    for run, names in enumerate((["a", "b", "c", "d", "e", "f"],
+                                 ["f", "e", "d", "c", "b", "a"])):
+        d = str(tmp_path / ("run%d" % run))
+        _os.makedirs(d)
+        for name, z in zip(names, [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]):
+            _write_slice(_os.path.join(d, name), z)
+        s = series_mod.discover(d)[0]
+        orders.append([_os.path.basename(f) for f in s.files])
+        assert s.normal == pytest.approx((0.0, 0.0, 1.0))
+    # both runs order slices by position, giving mirrored filename sequences
+    assert orders[0] == list(reversed(orders[1]))
+
+
+def test_geometry_guards_reject_degenerate_stacks(tmp_path):
+    d = str(tmp_path)
+    for i in range(8):
+        _write_slice(os.path.join(d, "s%d" % i), i * 1.0)
+    s = series_mod.discover(d)[0]
+    assert s.usable and s.unusable_reason is None
+
+    s.slice_spacing = 3.9e-07  # what the wrong-normal bug produced
+    assert not s.usable
+    assert "implausible slice spacing" in s.unusable_reason
+
+    s.slice_spacing = 1.0
+    s.spacing_spread_mm = 73.77  # the real reformat's spread
+    assert not s.usable
+    assert "irregular spacing" in s.unusable_reason
+
+
+def test_rank_sends_degenerate_voxel_volume_last(tmp_path):
+    d = str(tmp_path)
+    good = generate_uid()
+    for i in range(10):
+        _write_slice(os.path.join(d, "g%02d" % i), i * 1.0, series_uid=good, series_number=2)
+    found = series_mod.discover(d)
+    bad = found[0]
+    ranked = series_mod.rank([bad])
+    assert ranked  # sanity
+
+    # a stack whose geometry did not survive: it must never outrank a real one
+    broken = series_mod.Series(uid="x", modality="CT", description="broken",
+                               series_number=9, normal=(0.0, 0.0, 1.0))
+    broken.files = list(bad.files)
+    broken.pixel_spacing = (1.0, 1.0)
+    broken.slice_spacing = 3.9e-07
+    assert series_mod.rank([broken, bad])[0] is bad
+
+
+def test_select_by_dotted_ident(tmp_path):
+    d = str(tmp_path)
+    uid = generate_uid()
+    _write_slice(os.path.join(d, "aaa_odd"), 0, series_uid=uid, series_number=1021,
+                 orientation=SAGITTAL)
+    for i in range(20):
+        _write_slice(os.path.join(d, "zzz_%02d" % i), i * 2.0, series_uid=uid,
+                     series_number=1021, orientation=AXIAL)
+    found = series_mod.discover(d)
+
+    assert series_mod.select(found, "1021.1").n_slices == 20
+    assert series_mod.select(found, "1021.2").n_slices == 1
+    # the bare number resolves because only one group is usable
+    assert series_mod.select(found, "1021").n_slices == 20
+    # ... and so does the UID
+    assert series_mod.select(found, uid).n_slices == 20
+
+
+def test_ambiguous_uid_lists_the_idents(tmp_path):
+    d = str(tmp_path)
+    uid = generate_uid()
+    for i in range(8):
+        _write_slice(os.path.join(d, "ax%02d" % i), i * 2.0, series_uid=uid,
+                     series_number=7, orientation=AXIAL)
+    for i in range(8):
+        _write_slice(os.path.join(d, "sg%02d" % i), i * 2.0, series_uid=uid,
+                     series_number=7, orientation=SAGITTAL)
+    found = series_mod.discover(d)
+    assert len(found) == 2 and all(s.usable for s in found)
+    with pytest.raises(ValueError, match=r"7\.1, 7\.2"):
+        series_mod.select(found, "7")
+
+
+def test_orientation_jitter_does_not_split_a_series(tmp_path):
+    """Oblique reformats carry float noise in ImageOrientationPatient; a series
+    must not shatter into one group per slice."""
+    d = str(tmp_path)
+    uid = generate_uid()
+    for i in range(10):
+        eps = 1e-4 * (i - 5)
+        _write_slice(os.path.join(d, "s%02d" % i), i * 1.0, series_uid=uid,
+                     orientation=[1, eps, 0, -eps, 1, 0])
+    found = series_mod.discover(d)
+    assert len(found) == 1
+    assert found[0].n_slices == 10
+    assert found[0].n_parts == 1
+
+
 def test_select_rejects_ambiguous_description(tmp_path):
     d = str(tmp_path)
     bone, soft = generate_uid(), generate_uid()
@@ -186,7 +345,7 @@ def test_select_rejects_ambiguous_description(tmp_path):
                      description="axial soft", series_number=2)
     found = series_mod.discover(d)
     assert len(found) == 2
-    with pytest.raises(ValueError, match="matches 2 series"):
+    with pytest.raises(ValueError, match="is ambiguous"):
         series_mod.select(found, "axial")
 
 
