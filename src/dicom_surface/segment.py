@@ -178,6 +178,34 @@ def dilate(image: sitk.Image, mm: float, log=None) -> sitk.Image:
     )
 
 
+def realised_feature_mm(image: sitk.Image, min_feature_mm: float) -> list[float]:
+    """The feature size the grid can actually test for, per axis.
+
+    The probe is a ball of radius ``min_feature_mm / 2`` rounded *up* to whole
+    voxels, so on a coarse grid it is larger than asked. A 1.2 mm feature on 3 mm
+    voxels becomes a 3 mm-radius ball, which tests for 6 mm of material. The
+    number the caller asked for is then not the number being measured, and saying
+    so is the difference between a diagnostic and a fiction.
+    """
+    if min_feature_mm <= 0:
+        return [0.0 for _ in image.GetSpacing()]
+    radii = dilation_radius_voxels(min_feature_mm / 2.0, image.GetSpacing())
+    return [2.0 * r * s for r, s in zip(radii, image.GetSpacing())]
+
+
+def feature_is_resolvable(image: sitk.Image, min_feature_mm: float,
+                          tolerance: float = 2.0) -> bool:
+    """Whether the grid can test for ``min_feature_mm`` without gross overshoot.
+
+    Rounding the probe up costs at most one voxel of radius per axis, so a little
+    overshoot is unavoidable and not worth mentioning. Twice the requested size is
+    where the number stops meaning what it says: 0.6 mm asked for, 1.6 mm measured.
+    """
+    if min_feature_mm <= 0:
+        return True
+    return max(realised_feature_mm(image, min_feature_mm)) <= tolerance * min_feature_mm
+
+
 def thin_mask(image: sitk.Image, min_feature_mm: float) -> sitk.Image:
     """The material a ball of ``min_feature_mm`` diameter cannot reach.
 
@@ -185,6 +213,9 @@ def thin_mask(image: sitk.Image, min_feature_mm: float) -> sitk.Image:
     survives, so the thin material is what the mask keeps and the opening throws
     away. No distance transform, no local-thickness estimator: an opening *is*
     the definition.
+
+    The ball is rounded up to whole voxels, so on a coarse grid this measures a
+    larger feature than requested; see :func:`realised_feature_mm`.
     """
     if min_feature_mm <= 0:
         empty = sitk.Image(image.GetSize(), sitk.sitkUInt8)
@@ -283,10 +314,14 @@ def thicken(image: sitk.Image, thicken_mm: float, min_feature_mm: float = 0.0,
     spacing = image.GetSpacing()
     radii = dilation_radius_voxels(thicken_mm, spacing)
     if log:
+        realised = realised_feature_mm(binary, feature)
+        probe = ("%.2f mm" % feature if feature_is_resolvable(binary, feature)
+                 else "%s mm (%.2f requested; the grid is too coarse)"
+                      % (_fmt(realised), feature))
         log("thicken %-11s -> %s voxels = grows %s mm, applied to the %.1f%% of "
-            "material out of reach of bone thicker than %.2f mm"
+            "material out of reach of bone thicker than %s"
             % ("%.2f mm" % thicken_mm, radii, _fmt(dilation_extent_mm(radii, spacing)),
-               100.0 * thin_voxels / max(total, 1), feature))
+               100.0 * thin_voxels / max(total, 1), probe))
 
     return sitk.Or(binary, dilate(thin, thicken_mm))
 

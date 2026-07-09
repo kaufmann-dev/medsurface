@@ -92,6 +92,15 @@ def thin_material_warning(mask: sitk.Image, profile: PrintProfile) -> list[str]:
     """
     if profile.min_feature_mm <= 0:
         return []
+
+    if not segment.feature_is_resolvable(mask, profile.min_feature_mm):
+        realised = segment.realised_feature_mm(mask, profile.min_feature_mm)
+        return ["cannot assess a %.1f mm minimum feature size on a %s mm voxel grid: "
+                "the probe rounds up to %s mm, so no thin-material figure is reported"
+                % (profile.min_feature_mm,
+                   " x ".join("%.2f" % s for s in mask.GetSpacing()),
+                   " x ".join("%.2f" % r for r in realised))]
+
     thin = segment.thin_fraction(mask, profile.min_feature_mm)
     if thin <= 0.05:
         return []

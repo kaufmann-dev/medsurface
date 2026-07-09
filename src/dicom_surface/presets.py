@@ -153,6 +153,11 @@ ANATOMICAL = PrintProfile(
     description="No printability changes. Geometry faithful to the scan.",
 )
 
+# The numbers below are engineering judgement, not measurement. Closing and
+# thickening were tuned on one head CT; the minimum feature sizes are typical
+# machine limits (a 0.4 mm FDM nozzle needs ~1 mm of wall to be sound; resin
+# holds finer detail) and were not measured against a printer. Treat them as
+# defaults to override, which is why every one is exposed on the command line.
 PRINT_PROFILES: dict[str, PrintProfile] = {
     "anatomical": ANATOMICAL,
     "resin": PrintProfile(
