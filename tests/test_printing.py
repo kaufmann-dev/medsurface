@@ -268,6 +268,14 @@ def test_the_voxel_budget_coarsens_the_grid_rather_than_exhausting_memory():
     assert stingy > generous
 
 
+def test_an_unmeetable_budget_terminates_instead_of_coarsening_forever():
+    """`_grid_voxels` never drops below 27 -- a border of background on each face --
+    so a budget below that used to spin the coarsening loop forever."""
+    image = _box(spacing=(0.5, 0.5, 0.5))
+    mm = segment.printability_grid_mm(image, 1.2, budget=1)
+    assert mm >= max(n * s for n, s in zip(image.GetSize(), image.GetSpacing()))
+
+
 def test_a_coarse_slice_pitch_no_longer_inflates_the_model_along_z():
     """The bug this grid exists for.
 

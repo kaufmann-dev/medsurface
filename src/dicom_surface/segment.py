@@ -232,8 +232,11 @@ def printability_grid_mm(image: sitk.Image, min_feature_mm: float,
         r -= 1
         mm = radius_mm / r
     # At r == 1 the ball is one voxel across and cannot shrink further; the only
-    # way under the budget is a grid coarser than the feature demands.
-    while _grid_voxels(image, mm) > budget:
+    # way under the budget is a grid coarser than the feature demands. Bound the
+    # search by the volume itself: `_grid_voxels` never drops below 27 (a border
+    # of background on each face), so a budget under that would coarsen forever.
+    extent = max(n * s for n, s in zip(image.GetSize(), image.GetSpacing()))
+    while mm < extent and _grid_voxels(image, mm) > budget:
         mm *= 1.25
 
     if all(abs(s - mm) <= 1e-6 for s in spacing):
