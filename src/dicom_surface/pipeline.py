@@ -35,7 +35,25 @@ class ModalityMismatch(ValueError):
     pass
 
 
-def _resolve_threshold(
+def build_mask(image: sitk.Image, preset: Preset, threshold: float,
+               log: Callable[[str], None] | None = None) -> sitk.Image:
+    """Threshold and clean a volume into a binary bone mask.
+
+    Shared by ``convert`` and ``merge`` so the two can never drift apart: a fused
+    surface must be built from exactly the mask a single-scan conversion would
+    have produced.
+    """
+    binary = segment.binarize(image, threshold, preset.threshold_max)
+    binary = segment.islands(binary, preset.keep_largest_island, preset.min_island_mm3, log)
+    binary = segment.median(binary, preset.median_mm, log)
+    if preset.opening_mm > 0:
+        binary = segment.opening(binary, preset.opening_mm, log)
+    binary = segment.closing(binary, preset.closing_mm, log)
+    binary = segment.islands(binary, preset.keep_largest_island, preset.min_island_mm3, log)
+    return binary
+
+
+def resolve_threshold(
     image: sitk.Image, series: Series, preset: Preset, override: float | None
 ) -> tuple[float, str]:
     if override is not None:
@@ -81,7 +99,7 @@ def convert(
         % ("x".join(str(v) for v in vol.size),
            " x ".join("%.3f" % s for s in vol.spacing), lo, hi))
 
-    value, source = _resolve_threshold(vol.image, series, preset, threshold)
+    value, source = resolve_threshold(vol.image, series, preset, threshold)
     unit = "HU" if volume_mod.has_calibrated_hu(series) else "intensity"
     say("threshold %.1f %s (%s)" % (value, unit, source))
     if value > hi:
@@ -90,21 +108,7 @@ def convert(
             "segmented" % (value, hi)
         )
 
-    upper = preset.threshold_max
-    binary = step("threshold", lambda: segment.binarize(vol.image, value, upper))
-
-    binary = step(
-        "islands (pre)",
-        lambda: segment.islands(binary, preset.keep_largest_island, preset.min_island_mm3, say),
-    )
-    binary = step("median", lambda: segment.median(binary, preset.median_mm, say))
-    if preset.opening_mm > 0:
-        binary = step("opening", lambda: segment.opening(binary, preset.opening_mm, say))
-    binary = step("closing", lambda: segment.closing(binary, preset.closing_mm, say))
-    binary = step(
-        "islands (post)",
-        lambda: segment.islands(binary, preset.keep_largest_island, preset.min_island_mm3, say),
-    )
+    binary = step("segment", lambda: build_mask(vol.image, preset, value, say))
 
     label_stats = sitk.LabelShapeStatisticsImageFilter()
     label_stats.Execute(sitk.ConnectedComponent(binary))

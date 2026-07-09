@@ -53,6 +53,7 @@ apt install libgl1 libopengl0
 dicom-surface list    DICOM_DIR                    # what's in this folder?
 dicom-surface presets                              # what can I ask for?
 dicom-surface convert DICOM_DIR -o out.stl         # do the thing
+dicom-surface merge   DIR_A DIR_B -o out.stl       # fuse two scans of one body
 dicom-surface validate mesh.stl                    # is this mesh sound?
 dicom-surface repair   mesh.stl -o fixed.stl       # make it watertight
 ```
@@ -167,6 +168,67 @@ choice is a signed distance field -- but ITK's Maurer transform quantises distan
 to voxel centres, putting its zero level half a voxel inside the true boundary: a
 6% volume loss on a 20 mm sphere. Smoothed fractional occupancy, thresholded at
 0.5, keeps the error under 0.5%.
+
+## Merging two scans
+
+Two studies of one body often cover more together than either does alone: a
+facial CT that stops mid-vault, a sinus CT that stops at the maxilla. `merge`
+registers one onto the other and fuses them.
+
+```sh
+dicom-surface merge facial-ct/ sinus-ct/ --series-a 6 --series-b 2 -o skull.stl
+```
+
+The two scans sit in different patient coordinate frames -- the frame is anchored
+to the scanner table, not the body -- so in one real case the meshes were 847 mm
+apart with a 10.6° difference in head tilt. Registration is global first
+(exhaustive translation search by FFT cross-correlation, no initial guess to get
+wrong) then local (point-to-plane ICP, which converged to 0.12 mm where
+point-to-point was still descending at 0.93 mm after 60 iterations).
+Correspondences are trimmed, because the scans overlap only partially.
+
+The union is taken on the **masks**, not the meshes. Boolean-unioning two shells
+leaves a seam ridge wherever they disagree by a fraction of a millimetre; fusing
+the solids and running marching cubes once gives a single continuous surface. The
+fused grid is **isotropic**: merging a 0.3 mm sinus CT onto a 0.8 mm facial CT's
+grid made the vault inherit the coarser scan's slice terracing.
+
+### It refuses input it should refuse
+
+Registration cannot fail on its own. FFT always has a peak, ICP always converges
+somewhere. Point two unrelated scans at it and you get a confident transform and a
+mesh made of two bodies stuck together. So the answer is checked, not trusted.
+
+`merge` refuses when the demographics conflict, and when the geometry does not
+agree. `PatientID` equality is *not* the identity test: medical record numbers are
+scoped to the issuing institution — which is why DICOM has `IssuerOfPatientID` —
+and two real studies of one skull differed in both `PatientID` (7 vs 15
+characters) and `PatientName` formatting while agreeing exactly on birth date and
+sex. Conflicting demographics prove different people; a matching ID, or a matching
+name plus birth date, proves the same one. Identifiers are compared, never logged,
+raised, or written to the provenance record.
+
+The geometric gates are calibrated against four true pairs and one deliberate
+impostor — a metal bar phantom, handed the skull's own patient identity:
+
+| pair | min overlap | dice | rms |
+|---|---|---|---|
+| 2024 × 2023, cross-study, cross-kernel | 0.922 | 0.855 | 0.123 mm |
+| 2024 × 2023 soft kernel | 0.935 | 0.835 | 0.205 mm |
+| 2024 × 2024, 3 mm reconstruction | 0.969 | 0.852 | 0.187 mm |
+| 2024 × 2024, sagittal reformat | 0.991 | 0.932 | 0.090 mm |
+| **bar phantom, unrelated anatomy** | **0.270** | **0.323** | 0.432 mm |
+| gate | 0.60 | 0.55 | 1.0 mm |
+
+Two lessons are baked into that table. **The residual does not discriminate**: the
+impostor's 0.43 mm sits comfortably inside any sane bound, because ICP drives
+*some* residual down no matter what it is fitting. And **surface overlap must be
+symmetric**: measured only moving→fixed, the bar scored 96.4%, since a small dense
+object buried in a large one finds a neighbouring surface almost everywhere.
+Measured the other way it collapses to 26.6%. The gate uses the weaker direction,
+each restricted to the other scan's field of view.
+
+`--force` overrides every gate, and says so in the provenance.
 
 ## Smoothing
 
