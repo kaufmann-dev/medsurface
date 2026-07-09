@@ -58,7 +58,7 @@ def test_regression_round_would_overshoot_in_z():
     assert radii == [1, 1, 0]
 
     naive_round = [max(0, int(round((1.0 / 2.0) / s))) for s in HEAD_CT]
-    assert naive_round == [2, 2, 1]  # what the buggy version produced
+    assert naive_round == [2, 2, 1]  # what rounding the radius produces
     assert radii != naive_round
 
     extents = kernel_extent_mm(radii, HEAD_CT)

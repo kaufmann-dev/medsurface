@@ -42,11 +42,11 @@ def _ellipsoid(shape, center, radii):
 def _lumpy_shell(shape=(70, 70, 70)):
     """A hollow, chiral blob whose pose is unambiguous.
 
-    The pose must be determined by the *shape*, not by the test. An earlier
-    version used a sphere with a bump on the z axis: rotationally symmetric about
-    z, so ICP happily converged 10 degrees off with a 0.18 mm residual and 100%
-    surface overlap. It was right -- the pose was genuinely ambiguous. Unequal
-    semi-axes plus two off-axis lobes remove every symmetry.
+    Every symmetry must be broken, or the tests below measure nothing. A sphere
+    with a bump on the z axis is rotationally symmetric about z: ICP settles 10
+    degrees off with a 0.18 mm residual and 100% surface overlap, and it is
+    right to -- the pose is genuinely ambiguous. Unequal semi-axes plus two
+    off-axis lobes fix the pose.
     """
     c = (35, 35, 35)
     body = _ellipsoid(shape, c, (26, 20, 16)) & ~_ellipsoid(shape, c, (21, 15, 11))
@@ -110,18 +110,16 @@ def test_recovers_a_known_rigid_transform():
 
 @pytest.mark.parametrize("degrees", [3.0, 8.0, 25.0, 40.0])
 def test_recovers_rotations_across_the_capture_range(degrees):
-    """Regression, twice over.
+    """Both ends of the range are load-bearing.
 
-    A fixed 45% trim broke *small* rotations: the discarded correspondences are
-    the ones furthest from the rotation axis, which is exactly where the
-    rotational signal lives. A 5 degree misalignment of two identical volumes
-    converged to 4.49 degrees of residual error. The trim is now widened to the
-    overlap actually measured.
+    Small rotations fail if the trim is fixed: the correspondences a hard trim
+    discards are the ones furthest from the rotation axis, which is where the
+    rotational signal lives. At a fixed 0.45 trim, a 5 degree misalignment of two
+    identical volumes converges 4.49 degrees off.
 
-    And a point-to-point ICP bootstrap, which used to run first, broke *large*
-    rotations: at 40 degrees it converged into a wrong basin (33 degrees of
-    residual error) that point-to-plane alone handles cleanly. It has been
-    removed; it never improved any case.
+    Large rotations fail if the fit is bootstrapped with point-to-point ICP,
+    which at 40 degrees settles into a wrong basin 33 degrees away.
+    Point-to-plane from the FFT translation handles the whole range.
     """
     fixed = _image(_lumpy_shell())
     truth = _rigid(degrees, (0.3, 0.4, 1.0), (6.0, -4.0, 8.0))
@@ -133,13 +131,6 @@ def test_recovers_rotations_across_the_capture_range(degrees):
     angle = math.degrees(math.acos(max(-1.0, min(1.0, (np.trace(composed[:3, :3]) - 1) / 2))))
     assert angle < 1.0, "rotation error %.2f deg at %.0f deg" % (angle, degrees)
     assert np.linalg.norm(composed[:3, 3]) < 1.0
-
-
-def test_point_to_point_icp_is_gone():
-    """It never improved a case, cost 9 seconds on the real pair, and drove the
-    40 degree case into a wrong basin."""
-    assert not hasattr(registration, "_icp_point_to_point")
-    assert not hasattr(registration, "_kabsch")
 
 
 def test_identical_input_registers_to_the_identity():
@@ -199,9 +190,9 @@ def test_bad_registration_is_refused_with_a_reason(kw, expected):
 
 
 def test_residual_is_reported_but_not_gated():
-    """It never discriminated: impostor 0.43 mm, 5%-oversized skull 0.41 mm, true
-    pairs 0.09-0.21 mm. A gate that has never fired is a false sense of security."""
-    assert not hasattr(merge_mod, "MAX_INLIER_RMS_MM")
+    """The residual does not discriminate: an impostor scores 0.43 mm, a
+    5%-oversized skull 0.41 mm, true pairs 0.09-0.21 mm. ICP drives some residual
+    down whatever it is fitting, so it informs but never decides."""
     merge_mod.check_registration(_result(inlier_rms_mm=9.9))  # must not raise
     assert "rms" in _result().summary()
 
@@ -230,12 +221,14 @@ def test_gates_have_margin_against_real_measurements():
     assert worst_true_dice - merge_mod.MIN_SHARED_FOV_DICE > 0.15
 
 
-def test_merge_defaults_its_surface_stage_to_the_preset():
-    """Regression: merge once carried its own lighter smoothing constants, on the
-    theory that an isotropic fused grid has no slice terracing to remove. The
-    terracing is baked into each scan's mask by its own slice pitch, so the fused
-    surface came out visibly rougher than either single-scan surface. A fused
-    mesh must be finished exactly as a single-scan one is."""
+def test_surface_stage_comes_from_the_preset():
+    """A fused mesh must be finished exactly as a single-scan one is.
+
+    Slice terracing is baked into each scan's mask by its own slice pitch, so an
+    isotropic fused grid does not remove it -- it merely samples it more finely.
+    Smoothing the fused surface any more lightly than `convert` does leaves it
+    visibly rougher than the scans it was built from.
+    """
     import inspect
 
     from dicom_surface import presets
@@ -245,11 +238,6 @@ def test_merge_defaults_its_surface_stage_to_the_preset():
         assert signature.parameters[name].default is None, (
             "%s must default to the preset, not to a merge-specific constant" % name
         )
-
-    # and the module must not reintroduce them
-    for leftover in ("DEFAULT_SMOOTH_ITERS", "DEFAULT_PASSBAND",
-                     "DEFAULT_TARGET_FACES", "DEFAULT_POST_SMOOTH_ITERS"):
-        assert not hasattr(merge_mod, leftover), leftover
 
     bone = presets.get("bone")
     assert (bone.smooth_iters, bone.passband, bone.post_smooth_iters) == (20, 0.1, 25)

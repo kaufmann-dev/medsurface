@@ -310,10 +310,10 @@ def _as_float(v):
 def _significant(x: float, digits: int = 3) -> float:
     """Round to ``digits`` significant figures.
 
-    Used to bucket voxel volumes before comparing them. Reformats of one
-    acquisition differ in measured slice spacing by rounding noise (0.80000 mm
-    vs 0.79977 mm in a real study), and comparing raw floats lets that noise
-    decide which series a user gets.
+    Buckets voxel volumes before they are compared. Reformats of one acquisition
+    differ in measured slice spacing by rounding noise (0.80000 mm vs 0.79977 mm
+    in a real study), and comparing raw floats lets that noise decide which
+    series a user gets.
     """
     if x == 0 or not math.isfinite(x):
         return 0.0

@@ -47,13 +47,13 @@ Logger = Callable[[str], None]
 #: enough that a whole head fits in memory: a head at 0.4 mm is ~170M voxels.
 DEFAULT_GRID_MM = 0.4
 
-#: The surface stage is the preset's, unchanged. An earlier version smoothed the
-#: fused grid far more lightly, on the theory that an isotropic grid has no slice
-#: terracing to remove. It does: the terracing is baked into each scan's *mask*
-#: by its own slice pitch, long before anything is resampled. Resampling a 0.8 mm
-#: staircase onto a 0.4 mm grid samples the staircase more finely; it does not
-#: flatten it. A fused surface must be smoothed exactly as a single-scan one is,
-#: or it looks visibly rougher than the scans it was built from.
+#: The surface stage is the preset's, unchanged. It is tempting to smooth a fused
+#: grid more lightly, on the theory that an isotropic grid has no slice terracing
+#: to remove. It has: the terracing is baked into each scan's *mask* by its own
+#: slice pitch, long before anything is resampled. Resampling a 0.8 mm staircase
+#: onto a 0.4 mm grid samples the staircase more finely; it does not flatten it.
+#: A fused surface must be smoothed exactly as a single-scan one is, or it looks
+#: visibly rougher than the scans it was built from.
 
 # --- acceptance gates -------------------------------------------------------
 # Calibrated against four true pairs and one deliberate impostor (a metal bar

@@ -204,8 +204,8 @@ An isotropic grid does not, however, *remove* terracing. Each scan's staircase i
 baked into its own mask by its own slice pitch, and resampling a 0.8 mm staircase
 onto a 0.4 mm grid merely samples it more finely. So the fused surface is smoothed
 with the preset's settings, exactly as a single-scan surface is — 20 iterations,
-then 25 more after decimation. An earlier version used its own lighter constants
-and came out visibly rougher than either scan it was built from.
+then 25 more after decimation. Smooth it any more lightly and it comes out
+visibly rougher than either scan it was built from.
 
 ### It refuses input it should refuse
 

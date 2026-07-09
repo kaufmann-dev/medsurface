@@ -258,7 +258,7 @@ def test_geometry_guards_reject_degenerate_stacks(tmp_path):
     s = series_mod.discover(d)[0]
     assert s.usable and s.unusable_reason is None
 
-    s.slice_spacing = 3.9e-07  # what the wrong-normal bug produced
+    s.slice_spacing = 3.9e-07  # only a mis-derived slice normal yields this
     assert not s.usable
     assert "implausible slice spacing" in s.unusable_reason
 
