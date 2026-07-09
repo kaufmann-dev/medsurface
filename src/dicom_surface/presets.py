@@ -131,12 +131,75 @@ PRESETS: dict[str, Preset] = {
 }
 
 
+@dataclass(frozen=True)
+class PrintProfile:
+    """What a printer needs, as distinct from what the anatomy is.
+
+    A :class:`Preset` says which tissue to extract and how finely. A profile says
+    how to make that tissue survive a printer: seal the pores that would print as
+    fragile holes, thicken the walls that are thinner than the machine can lay
+    down, and drop the fragments too small to handle.
+
+    Every field is a no-op at zero, so ``ANATOMICAL`` -- all zeros -- is a true
+    identity. There is no "printing disabled" branch to drift out of sync with
+    the enabled one.
+    """
+
+    name: str
+    description: str
+    #: Kernel extent (diameter) the closing is raised to, if the preset's is smaller.
+    closing_mm: float = 0.0
+    #: Outward growth of every surface, a radius. Inflates outer dimensions too.
+    thicken_mm: float = 0.0
+    #: Floor on the island filter: fragments below this are unprintable anyway.
+    min_island_mm3: float = 0.0
+    #: The printer's minimum feature size. Diagnostic only -- never enforced.
+    min_feature_mm: float = 0.0
+
+
+#: The identity profile: geometry stays faithful to the scan.
+ANATOMICAL = PrintProfile(
+    name="anatomical",
+    description="No printability changes. Geometry faithful to the scan.",
+)
+
+PRINT_PROFILES: dict[str, PrintProfile] = {
+    "anatomical": ANATOMICAL,
+    "resin": PrintProfile(
+        name="resin",
+        description="Seals pores and thickens walls a little. Keeps fine detail.",
+        closing_mm=3.2,
+        thicken_mm=0.4,
+        min_island_mm3=100.0,
+        min_feature_mm=0.6,
+    ),
+    "fdm": PrintProfile(
+        name="fdm",
+        description="Seals hard and thickens for a nozzle. Sacrifices fine detail.",
+        closing_mm=4.8,
+        thicken_mm=1.2,
+        min_island_mm3=200.0,
+        min_feature_mm=1.2,
+    ),
+}
+
+
 def get(name: str) -> Preset:
     try:
         return PRESETS[name]
     except KeyError:
         raise KeyError(
             "unknown preset %r; available: %s" % (name, ", ".join(sorted(PRESETS)))
+        ) from None
+
+
+def get_print_profile(name: str) -> PrintProfile:
+    try:
+        return PRINT_PROFILES[name]
+    except KeyError:
+        raise KeyError(
+            "unknown print profile %r; available: %s"
+            % (name, ", ".join(sorted(PRINT_PROFILES)))
         ) from None
 
 

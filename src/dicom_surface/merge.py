@@ -29,7 +29,7 @@ all (de-identified data) warn and proceed.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
 import numpy as np
@@ -37,7 +37,7 @@ import pydicom
 import SimpleITK as sitk
 
 from . import pipeline, registration, segment, surface, volume as volume_mod
-from .presets import Preset
+from .presets import ANATOMICAL, Preset, PrintProfile
 from .registration import RegistrationResult
 from .series import Series
 
@@ -298,6 +298,7 @@ def merge(
     passband: float | None = None,
     target_faces: int | None = None,
     post_smooth_iters: int | None = None,
+    print_profile: PrintProfile = ANATOMICAL,
     force: bool = False,
     log: Logger | None = None,
 ) -> MergeResult:
@@ -335,6 +336,9 @@ def merge(
     value_b, source_b = pipeline.resolve_threshold(vol_b.image, series_b, preset, threshold)
     say("threshold: fixed %.1f (%s), moving %.1f (%s)" % (value_a, source_a, value_b, source_b))
 
+    # Register on anatomy, always. Thickening both scans would inflate Dice and
+    # surface overlap -- the very numbers the impostor gates are calibrated on --
+    # so a print profile would quietly make `merge` easier to fool.
     mask_a = step("segment fixed", lambda: pipeline.build_mask(vol_a.image, preset, value_a))
     mask_b = step("segment moving", lambda: pipeline.build_mask(vol_b.image, preset, value_b))
 
@@ -343,6 +347,23 @@ def merge(
     for line in reg.summary().splitlines():
         say("  " + line.strip() if line.startswith(" ") else "  " + line)
     check_registration(reg, force=force)
+
+    if print_profile != ANATOMICAL:
+        say("print profile %s: %s" % (print_profile.name, print_profile.description))
+        # Dilation distributes over union -- dilate(A | B) == dilate(A) | dilate(B) --
+        # so thickening each scan before fusing is exactly thickening the fused
+        # solid, and it leaves each scan's fractional occupancy field intact.
+        mask_a = step("re-segment fixed for printing",
+                      lambda: pipeline.build_mask(vol_a.image, preset, value_a,
+                                                  print_profile, say))
+        mask_b = step("re-segment moving for printing",
+                      lambda: pipeline.build_mask(vol_b.image, preset, value_b,
+                                                  print_profile, say))
+        # Per scan: the two rarely share a voxel grid, and the realised growth
+        # follows the grid rather than the request.
+        for label, mask in (("fixed", mask_a), ("moving", mask_b)):
+            for message in pipeline.thickening_warning(mask, print_profile):
+                warnings.append("%s scan %s" % (label, message))
 
     finest = min(min(vol_a.spacing), min(vol_b.spacing))
     if grid_mm > finest:
@@ -382,6 +403,11 @@ def merge(
     say("bone: fixed %.0f cm3 | moving %.0f cm3 | fused %.0f cm3"
         % (vol_a_mm3 / 1000, vol_b_mm3 / 1000, vol_u_mm3 / 1000))
 
+    if print_profile.min_feature_mm > 0:
+        solid = sitk.BinaryThreshold(fused, segment.ISO_OCCUPANCY, 1e9, 1, 0)
+        warnings.extend(step("thin-material check",
+                             lambda: pipeline.thin_material_warning(solid, print_profile)))
+
     fused = segment.pad(fused, 1)
 
     affine = surface.index_to_physical(fused)
@@ -415,6 +441,7 @@ def merge(
                    "description": series_b.description, "slices": series_b.n_slices,
                    "spacing_mm": list(vol_b.spacing), "threshold": value_b},
         "grid_mm": grid_mm,
+        "print_profile": asdict(print_profile),
         "transform_moving_to_fixed": reg.transform.tolist(),
         "rotation_deg": reg.rotation_deg,
         "registration": {

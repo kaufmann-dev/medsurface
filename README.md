@@ -257,6 +257,88 @@ refused, and that message names de-identification as the likely cause.
 
 `--force` overrides every gate, and says so in the provenance.
 
+## Printing
+
+A watertight mesh is not the same as a printable one. Bone is full of pores that
+print as fragile holes, orbital walls are thinner than a nozzle, and specks of
+bone smaller than a grain of rice cannot be handled. `--print-profile` fixes those,
+on both `convert` and `merge`:
+
+```sh
+dicom-surface convert scans/ -o skull.stl --print-profile fdm
+dicom-surface merge   a/ b/  -o skull.stl --print-profile resin
+```
+
+| profile | closing | thicken | islands | min feature |
+|---|---|---|---|---|
+| `anatomical` (default) | — | — | — | — |
+| `resin` | ≥ 3.2 mm | 0.4 mm | ≥ 100 mm³ | 0.6 mm |
+| `fdm` | ≥ 4.8 mm | 1.2 mm | ≥ 200 mm³ | 1.2 mm |
+
+`anatomical` is the identity: every field is zero and every zero is a no-op, so
+the default output is unchanged, byte for byte. There is no "printing disabled"
+branch that could drift out of sync with the enabled one.
+
+Profiles compose with any preset using `max()`, never assignment — a profile can
+only *add* printability, never relax a preset that already closes harder than the
+printer needs (`skin` closes 3.2 mm). `bone-print` is orthogonal: it is a triangle
+budget and a smoothing level, not printability morphology.
+
+### It happens on the mask, not on the mesh
+
+This is the reason it lives here rather than in a tool that post-processes an STL.
+Feeding a finished mesh back through voxelisation costs fidelity before any
+printability work happens at all. Measured on a 600k-triangle skull, with the
+morphology **switched off entirely**:
+
+| | triangles | volume | mean dihedral | RMS dev | max dev |
+|---|---|---|---|---|---|
+| `convert --preset bone` | 600,000 | 385,798 mm³ | 11.90° | — | — |
+| → STL round trip, no morphology | 600,000 | 388,458 mm³ | 10.22° | 0.064 mm | 0.40 mm |
+
+The round trip re-rasterises onto a hard binary grid — discarding the fractional
+occupancy this tool already holds — then runs marching cubes, windowed-sinc
+smoothing and quadric decimation a *second* time. Doing the closing and the
+dilation on the mask skips all of it.
+
+### `--thicken-mm` is a radius, not a kernel
+
+Every other millimetre parameter here is a kernel *extent*, floored so the realised
+kernel never exceeds the request; overshooting a filter erases anatomy.
+`--thicken-mm` is the distance the surface moves, and *undershooting* it leaves a
+wall too thin to print — so it ceils, and never rounds a positive request down to
+nothing. On 0.8 mm slices a 0.4 mm request realises as 0.8 mm, and the tool says so.
+
+Thickening inflates the model's outer dimensions by the same amount, on every axis.
+There is no way to fatten the walls of a shell without moving its outside, and the
+tool warns rather than pretending otherwise.
+
+### The thin-feature check
+
+Reported, never enforced. Thin material is exactly the material a ball of the
+minimum feature size cannot reach — a morphological opening, no local-thickness
+estimator required:
+
+```
+thin_fraction = |mask \ opening(mask, radius = min_feature / 2)| / |mask|
+```
+
+Above 5%, `convert` warns. A printer's minimum feature size is a property of the
+printer, not of the anatomy, and the right answer to a thin orbital floor is a
+decision, not an automatic edit.
+
+### Merging for print
+
+`merge` always registers on **unmodified anatomy**, then re-segments with the
+profile for the union. Thickening both scans before registration would inflate
+Dice and surface overlap — the very numbers the impostor gates are calibrated on —
+so a print profile would quietly make `merge` easier to fool.
+
+Thickening is safe to apply per scan because dilation distributes over union:
+`dilate(A ∪ B) == dilate(A) ∪ dilate(B)`. Closing does not, but closing each scan
+separately keeps each one's fractional occupancy field intact, which is worth more
+than sealing across the seam.
+
 ## Smoothing
 
 Smoothing is the one knob you will feel, and it is a real trade: every iteration

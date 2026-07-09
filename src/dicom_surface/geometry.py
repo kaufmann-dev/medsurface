@@ -51,6 +51,36 @@ def kernel_extent_mm(radii: Sequence[int], spacing: Sequence[float]) -> list[flo
     return [(2 * r + 1) * s for r, s in zip(radii, spacing)]
 
 
+def dilation_radius_voxels(mm: float, spacing: Sequence[float]) -> list[int]:
+    """Per-axis radius, in voxels, that grows a surface outward by at least ``mm``.
+
+    Deliberately the opposite rounding to :func:`kernel_radius_voxels`, and the
+    difference is the whole point.
+
+    A filter kernel is specified by its *extent*, and overshooting it erases
+    anatomy, so that function floors. A dilation is specified by how far the
+    surface must move, and *undershooting* it leaves a wall too thin to print. So
+    this one ceils, and never returns 0 for a positive request: a thickening that
+    silently does nothing is the failure mode worth designing against.
+
+    Growth is therefore >= ``mm`` on every axis, and on anisotropic voxels it
+    exceeds it by up to one voxel. Callers should report the realised growth.
+    """
+    if mm <= 0:
+        return [0 for _ in spacing]
+    radii = []
+    for s in spacing:
+        if s <= 0:
+            raise ValueError("non-positive spacing: %r" % (spacing,))
+        radii.append(max(1, int(math.ceil(mm / s - _EPS))))
+    return radii
+
+
+def dilation_extent_mm(radii: Sequence[int], spacing: Sequence[float]) -> list[float]:
+    """How far a dilation with these radii actually grows the surface, per axis."""
+    return [r * s for r, s in zip(radii, spacing)]
+
+
 def voxel_volume_mm3(spacing: Sequence[float]) -> float:
     v = 1.0
     for s in spacing:
