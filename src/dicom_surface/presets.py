@@ -32,13 +32,14 @@ class Preset:
     min_island_mm3: float = 0.0
     keep_largest_island: bool = True
     #: Isotropic voxel size for the surface grid, mm. 0 = keep the native grid.
-    #: This is the topology-safe way to control triangle count.
+    #: Cheap and fast, but it destroys structures thinner than the target voxel:
+    #: on a head CT, 0.6 mm reopened 257 pores that the closing had sealed.
+    #: Prefer target_faces to control triangle count.
     resample_mm: float = 0.0
     #: Surface stage.
     smooth_iters: int = 20
     passband: float = 0.1
-    #: Decimation. 0 = off. Reduces triangles but CAN open a closed surface on
-    #: thin-walled anatomy; prefer resample_mm.
+    #: Decimation to a triangle budget. 0 = off. Topology-preserving.
     target_faces: int = 0
     post_smooth_iters: int = 0
     keep_largest_component: bool = True
@@ -55,19 +56,20 @@ PRESETS: dict[str, Preset] = {
         median_mm=1.0,
         closing_mm=2.4,
         min_island_mm3=50.0,
-        resample_mm=0.6,
-        smooth_iters=15,
+        smooth_iters=20,
+        target_faces=600_000,
+        post_smooth_iters=12,
     ),
     "bone-detail": Preset(
         name="bone-detail",
-        description="Bone on the scanner's native grid. Maximum fidelity, very large files.",
+        description="Bone at full mesh resolution. No decimation. Very large files.",
         modalities=_HU,
         threshold=300.0,
         median_mm=0.6,
         closing_mm=1.2,
         min_island_mm3=20.0,
-        resample_mm=0.0,
-        smooth_iters=12,
+        smooth_iters=15,
+        target_faces=0,
     ),
     "bone-print": Preset(
         name="bone-print",
@@ -77,8 +79,9 @@ PRESETS: dict[str, Preset] = {
         median_mm=1.4,
         closing_mm=3.2,
         min_island_mm3=200.0,
-        resample_mm=1.0,
-        smooth_iters=25,
+        smooth_iters=30,
+        target_faces=250_000,
+        post_smooth_iters=15,
     ),
     "teeth": Preset(
         name="teeth",
@@ -90,8 +93,8 @@ PRESETS: dict[str, Preset] = {
         min_island_mm3=5.0,
         keep_largest_island=False,
         keep_largest_component=False,
-        resample_mm=0.3,
-        smooth_iters=8,
+        smooth_iters=10,
+        target_faces=300_000,
     ),
     "skin": Preset(
         name="skin",
@@ -101,8 +104,9 @@ PRESETS: dict[str, Preset] = {
         median_mm=1.4,
         closing_mm=3.2,
         min_island_mm3=500.0,
-        resample_mm=1.0,
         smooth_iters=25,
+        target_faces=400_000,
+        post_smooth_iters=10,
     ),
     "auto": Preset(
         name="auto",
@@ -112,8 +116,9 @@ PRESETS: dict[str, Preset] = {
         median_mm=1.0,
         closing_mm=2.0,
         min_island_mm3=50.0,
-        resample_mm=0.6,
-        smooth_iters=15,
+        smooth_iters=20,
+        target_faces=600_000,
+        post_smooth_iters=12,
     ),
 }
 

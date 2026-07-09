@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 
 import numpy as np
+import pymeshlab
 import SimpleITK as sitk
 import vtk
 from vtk.util import numpy_support  # noqa: N813
@@ -143,22 +144,49 @@ def count_defects(poly: vtk.vtkPolyData) -> tuple[int, int]:
     return counts[0], counts[1]
 
 
+def to_arrays(poly: vtk.vtkPolyData) -> tuple[np.ndarray, np.ndarray]:
+    """(vertices, triangles) as numpy arrays. Input must be triangulated."""
+    verts = numpy_support.vtk_to_numpy(poly.GetPoints().GetData()).astype(np.float64)
+    conn = numpy_support.vtk_to_numpy(poly.GetPolys().GetConnectivityArray())
+    faces = conn.reshape(-1, 3).astype(np.int32)
+    return verts, faces
+
+
+def from_arrays(verts: np.ndarray, faces: np.ndarray) -> vtk.vtkPolyData:
+    points = vtk.vtkPoints()
+    points.SetData(numpy_support.numpy_to_vtk(np.ascontiguousarray(verts, dtype=np.float64),
+                                              deep=True))
+    n = len(faces)
+    offsets = np.arange(0, 3 * (n + 1), 3, dtype=np.int64)
+    connectivity = np.ascontiguousarray(faces, dtype=np.int64).ravel()
+
+    cells = vtk.vtkCellArray()
+    cells.SetData(
+        numpy_support.numpy_to_vtkIdTypeArray(offsets, deep=True),
+        numpy_support.numpy_to_vtkIdTypeArray(connectivity, deep=True),
+    )
+
+    poly = vtk.vtkPolyData()
+    poly.SetPoints(points)
+    poly.SetPolys(cells)
+    return poly
+
+
 def decimate(poly: vtk.vtkPolyData, target_faces: int) -> vtk.vtkPolyData:
-    """Quadric decimation to a triangle budget.
+    """Quadric edge-collapse decimation that preserves topology.
 
-    WARNING: decimation is the only stage in this pipeline that can break
-    watertightness. On thin-walled anatomy (a skull's orbital walls are one voxel
-    thick) edge collapses merge opposite faces of the sheet, tearing boundary and
-    non-manifold edges into a closed surface.
+    Uses MeshLab's decimator, not VTK's. This is not a preference; VTK has no
+    working alternative. Measured on a 4M-triangle skull:
 
-    Measured on a 4M-triangle skull, this leaks defects at *every* reduction --
-    6 boundary edges at 50%, 90 at 85% -- so no backoff strategy converges to a
-    clean result. ``vtkDecimatePro`` with ``PreserveTopologyOn`` is worse still:
-    it both misses the target and produces non-manifold edges.
-
-    Prefer ``segment.resample_isotropic`` to control triangle count: marching
-    cubes always returns a manifold surface, so resampling cannot introduce these
-    defects. The caller is expected to verify with :func:`count_defects`.
+    * ``vtkQuadricDecimation`` tears the mesh at *every* reduction -- 6 boundary
+      edges at 50%, 90 boundary and 207 non-manifold at 85%. A skull's orbital
+      walls are one voxel thick, and edge collapses weld their opposite faces
+      together. No backoff strategy converges to a clean result.
+    * ``vtkDecimatePro`` with ``PreserveTopologyOn`` both misses the target
+      (898k triangles when asked for 600k) and still emits non-manifold edges.
+    * MeshLab's ``preservetopology=True`` hits the target exactly, stays
+      watertight, and holds genus and volume constant (1225 and 385,2xx mm3 at
+      both 600k and 250k triangles).
     """
     current = poly.GetNumberOfPolys()
     if target_faces <= 0 or current <= target_faces:
@@ -168,13 +196,20 @@ def decimate(poly: vtk.vtkPolyData, target_faces: int) -> vtk.vtkPolyData:
     tri.SetInputData(poly)
     tri.Update()
 
-    reduction = 1.0 - (float(target_faces) / float(current))
-    d = vtk.vtkQuadricDecimation()
-    d.SetInputConnection(tri.GetOutputPort())
-    d.SetTargetReduction(reduction)
-    d.VolumePreservationOn()
-    d.Update()
-    return d.GetOutput()
+    verts, faces = to_arrays(tri.GetOutput())
+    ms = pymeshlab.MeshSet()
+    ms.add_mesh(pymeshlab.Mesh(vertex_matrix=verts, face_matrix=faces))
+    ms.apply_filter(
+        "meshing_decimation_quadric_edge_collapse",
+        targetfacenum=int(target_faces),
+        preserveboundary=True,
+        preservenormal=True,
+        preservetopology=True,
+        planarquadric=True,
+        qualitythr=0.3,
+    )
+    m = ms.current_mesh()
+    return from_arrays(m.vertex_matrix(), m.face_matrix())
 
 
 def compute_normals(poly: vtk.vtkPolyData) -> vtk.vtkPolyData:

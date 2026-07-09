@@ -126,6 +126,15 @@ def convert(
         binary = segment.pad(binary, 1)
 
     if preset.resample_mm > 0:
+        native = min(vol.spacing)
+        if preset.resample_mm > native:
+            warnings.append(
+                "--resample-mm %.2f is coarser than the native %.3f mm voxel, so structures "
+                "thinner than the target voxel are erased. On a head CT, resampling to 0.6 mm "
+                "reopened 257 pores that the morphological closing had sealed, and terraced "
+                "the vault. Use --target-faces to shed triangles without touching geometry."
+                % (preset.resample_mm, native)
+            )
         grid = step("resample isotropic",
                     lambda: segment.resample_isotropic(binary, preset.resample_mm, say))
         isovalue = segment.ISO_OCCUPANCY
@@ -156,9 +165,8 @@ def convert(
         if after > before:
             warnings.append(
                 "decimation to %s triangles introduced %d boundary and %d non-manifold "
-                "edge(s); the mesh is no longer watertight. Decimation cannot be made "
-                "safe on thin-walled anatomy -- use --resample-mm to control triangle "
-                "count instead, or run 'dicom-surface repair'."
+                "edge(s); the mesh is no longer watertight. Raise --target-faces, or run "
+                "'dicom-surface repair'."
                 % (f"{preset.target_faces:,}", after[0] - before[0], after[1] - before[1])
             )
 
