@@ -137,13 +137,13 @@ class PrintProfile:
     description: str
     #: Kernel extent (diameter) the closing is raised to, if the preset's is smaller.
     closing_mm: float = 0.0
-    #: Radius by which material thinner than ``min_feature_mm`` is grown. Bone that
-    #: is already thick enough keeps its dimensions.
-    thicken_mm: float = 0.0
     #: Floor on the island filter: fragments below this are unprintable anyway.
     min_island_mm3: float = 0.0
-    #: The printer's minimum feature size. Selects what counts as thin, and is
-    #: reported as a diagnostic. Never enforced.
+    #: The printer's minimum feature size, and the whole of the thickening
+    #: contract: *no wall thinner than this*. One number, because the probe that
+    #: finds thin material and the growth that fixes it are the same ball of
+    #: radius ``min_feature_mm / 2``. A separate "thickening distance" could only
+    #: disagree with it about what was being promised.
     min_feature_mm: float = 0.0
 
 
@@ -153,26 +153,24 @@ ANATOMICAL = PrintProfile(
     description="No printability changes. Geometry faithful to the scan.",
 )
 
-# The numbers below are engineering judgement, not measurement. Closing and
-# thickening were tuned on one head CT; the minimum feature sizes are typical
-# machine limits (a 0.4 mm FDM nozzle needs ~1 mm of wall to be sound; resin
-# holds finer detail) and were not measured against a printer. Treat them as
-# defaults to override, which is why every one is exposed on the command line.
+# The numbers below are engineering judgement, not measurement. The closings were
+# tuned on one head CT; the minimum feature sizes are typical machine limits (a
+# 0.4 mm FDM nozzle needs ~1 mm of wall to be sound; resin holds finer detail) and
+# were not measured against a printer. Treat them as defaults to override, which is
+# why both are exposed on the command line.
 PRINT_PROFILES: dict[str, PrintProfile] = {
     "anatomical": ANATOMICAL,
     "resin": PrintProfile(
         name="resin",
-        description="Seals pores and thickens walls a little. Keeps fine detail.",
+        description="Seals pores and brings every wall up to 0.6 mm. Keeps fine detail.",
         closing_mm=3.2,
-        thicken_mm=0.4,
         min_island_mm3=100.0,
         min_feature_mm=0.6,
     ),
     "fdm": PrintProfile(
         name="fdm",
-        description="Seals hard and thickens for a nozzle. Sacrifices fine detail.",
+        description="Seals hard and brings every wall up to 1.2 mm for a nozzle. Sacrifices fine detail.",
         closing_mm=4.8,
-        thicken_mm=1.2,
         min_island_mm3=200.0,
         min_feature_mm=1.2,
     ),

@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 import SimpleITK as sitk
 
-from . import geometry, segment, surface, volume as volume_mod
+from . import segment, surface, volume as volume_mod
 from .presets import ANATOMICAL, Preset, PrintProfile, accepts_modality
 from .series import Series
 
@@ -59,29 +59,61 @@ def build_mask(image: sitk.Image, preset: Preset, threshold: float,
     if preset.opening_mm > 0:
         binary = segment.opening(binary, preset.opening_mm, log)
     binary = segment.closing(binary, closing_mm, log)
+
     # Thicken after sealing: growing first would widen every pore's rim before the
     # closing had a chance to bridge it, and would count the rim as thin material.
-    binary = segment.thicken(binary, profile.thicken_mm, profile.min_feature_mm, log)
+    #
+    # The thickening ball is the one kernel here whose radius is rounded *up*, so
+    # it is the one kernel an anisotropic grid can turn into an ellipsoid -- a
+    # 5 mm slice pitch would grow the skull 5 mm along z to guarantee 1.2 mm walls.
+    # Move to a grid that can hold the ball first. The floored kernels above do not
+    # need this: rounding down only ever makes them gentler than requested.
+    if profile.min_feature_mm > 0:
+        grid_mm = segment.printability_grid_mm(binary, profile.min_feature_mm)
+        if grid_mm is not None:
+            binary = segment.to_printability_grid(binary, grid_mm, log)
+        binary = segment.thicken(binary, profile.min_feature_mm, log)
+
     binary = segment.islands(binary, preset.keep_largest_island, min_island_mm3, log)
     return binary
 
 
-def thickening_warning(mask: sitk.Image, profile: PrintProfile) -> list[str]:
-    """State how far the surface actually moved. Cheap: no image is touched.
+def grid_warnings(mask: sitk.Image, profile: PrintProfile,
+                  native_spacing: tuple[float, ...]) -> list[str]:
+    """What the printability grid could and could not deliver. Touches no image.
 
-    Reported per scan, because two scans of one body rarely share a voxel grid and
-    the realised growth follows the grid, not the request.
+    Reported per scan, because two scans of one body rarely share a voxel grid.
     """
-    if profile.thicken_mm <= 0:
+    if profile.min_feature_mm <= 0:
         return []
-    radii = geometry.dilation_radius_voxels(profile.thicken_mm, mask.GetSpacing())
-    grown = geometry.dilation_extent_mm(radii, mask.GetSpacing())
-    if max(grown) > 1.25 * profile.thicken_mm:
-        return ["thickening by %.2f mm realised as %s mm on this voxel grid; only "
-                "material thinner than the minimum feature size is grown, so outer "
-                "dimensions move only where thin bone reaches the surface"
-                % (profile.thicken_mm, " x ".join("%.2f" % g for g in grown))]
-    return []
+
+    feature = profile.min_feature_mm
+    out = []
+
+    realised = max(segment.realised_feature_mm(mask, feature))
+    if realised > 1.02 * feature:
+        out.append(
+            "walls were brought up to %.2f mm rather than the requested %.2f mm: the "
+            "%.3f mm printability grid cannot express that radius exactly"
+            % (realised, feature, min(mask.GetSpacing()))
+        )
+
+    working, finest = min(mask.GetSpacing()), min(native_spacing)
+    if working > finest + 1e-6:
+        out.append(
+            "the printability grid (%.3f mm) is coarser than the native voxel (%.3f mm) "
+            "because a finer one would not fit the voxel budget; structures thinner than "
+            "the grid are lost" % (working, finest)
+        )
+
+    coarsest = max(native_spacing)
+    if feature < coarsest:
+        out.append(
+            "the scan's coarsest voxel is %.2f mm, so bone thinner than that never appears "
+            "in the data. The %.2f mm minimum feature size is a property of the printed "
+            "model, not a measurement of the anatomy." % (coarsest, feature)
+        )
+    return out
 
 
 def thin_material_warning(mask: sitk.Image, profile: PrintProfile) -> list[str]:
@@ -104,14 +136,18 @@ def thin_material_warning(mask: sitk.Image, profile: PrintProfile) -> list[str]:
     thin = segment.thin_fraction(mask, profile.min_feature_mm)
     if thin <= 0.05:
         return []
-    return ["%.1f%% of the material is thinner than the %.1f mm minimum feature size "
-            "of the '%s' profile and may not print; raise --thicken-mm"
+    # Thickening should have left none. If any survives, the guarantee did not hold
+    # -- typically because the grid could not express the requested radius.
+    return ["%.1f%% of the material is still thinner than the %.1f mm minimum feature "
+            "size of the '%s' profile and may not print"
             % (100 * thin, profile.min_feature_mm, profile.name)]
 
 
-def printability_warnings(mask: sitk.Image, profile: PrintProfile) -> list[str]:
+def printability_warnings(mask: sitk.Image, profile: PrintProfile,
+                          native_spacing: tuple[float, ...]) -> list[str]:
     """Report, never enforce. Empty for ``ANATOMICAL``."""
-    return thickening_warning(mask, profile) + thin_material_warning(mask, profile)
+    return (grid_warnings(mask, profile, native_spacing)
+            + thin_material_warning(mask, profile))
 
 
 def resolve_threshold(
@@ -170,12 +206,12 @@ def convert(
             "segmented" % (value, hi)
         )
 
-    # Value equality, not identity: --thicken-mm rebuilds the profile via replace().
+    # Value equality, not identity: an explicit flag rebuilds the profile via replace().
     if print_profile != ANATOMICAL:
         say("print profile %s: %s" % (print_profile.name, print_profile.description))
     binary = step("segment",
                   lambda: build_mask(vol.image, preset, value, print_profile, say))
-    warnings.extend(printability_warnings(binary, print_profile))
+    warnings.extend(printability_warnings(binary, print_profile, vol.spacing))
 
     label_stats = sitk.LabelShapeStatisticsImageFilter()
     label_stats.Execute(sitk.ConnectedComponent(binary))

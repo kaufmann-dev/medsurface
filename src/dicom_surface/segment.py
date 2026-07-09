@@ -17,6 +17,10 @@ from .geometry import (
 
 FOREGROUND = 1
 
+#: Guards ``ceil`` against a division that lands a hair above an integer, which
+#: would buy a whole extra voxel of radius. 2.4/0.8 is 2.9999999999999996.
+_EPS = 1e-9
+
 
 def otsu_threshold(values: np.ndarray, nbins: int = 512) -> float:
     """Otsu's threshold over a 1-D sample of intensities.
@@ -178,6 +182,77 @@ def dilate(image: sitk.Image, mm: float, log=None) -> sitk.Image:
     )
 
 
+#: Ceiling on the printability grid, in voxels. Measured end to end on a head CT:
+#: 234 M voxels peaked at 6.0 GB of resident memory, so budget ~26 bytes per voxel
+#: -- the float32 occupancy field during the resample, then marching cubes over the
+#: whole grid. Exceeding the budget coarsens the grid rather than exhausting memory,
+#: and the caller is told by how much.
+PRINTABILITY_VOXEL_BUDGET = 300_000_000
+
+
+def _grid_voxels(image: sitk.Image, mm: float) -> int:
+    n = 1
+    for size, spacing in zip(image.GetSize(), image.GetSpacing()):
+        n *= int(math.ceil(size * spacing / mm)) + 2
+    return n
+
+
+def printability_grid_mm(image: sitk.Image, min_feature_mm: float,
+                         budget: int = PRINTABILITY_VOXEL_BUDGET) -> float | None:
+    """Isotropic spacing on which a ball of radius ``min_feature_mm / 2`` exists.
+
+    Every kernel in this module is specified in millimetres and built from whole
+    voxels. For the *floored* kernels that is harmless -- they simply come out a
+    little smaller than asked. For the ceiled dilation radius it is not: on a
+    0.9 x 0.9 x 5.0 mm survey CT, a 0.6 mm radius rounds to one voxel per axis and
+    the "ball" acquires a 5 mm semi-axis. Thickening a skull to guarantee 1.2 mm
+    walls would then move its outer surface 5 mm along z. The scanner's slice
+    pitch must not become the printer's tolerance.
+
+    So pick the grid from the feature size instead of inheriting it from the scan.
+    Taking ``mm = (T/2) / r`` for integer ``r`` makes the voxel radius exactly
+    ``r`` and the realised feature size exactly ``T``. Choose the smallest ``r``
+    whose grid is no coarser than the data -- upsampling invents no detail but
+    costs voxels, downsampling destroys thin bone (0.6 mm once reopened 257 pores
+    that the closing had sealed).
+
+    Returns ``None`` when the native grid already satisfies this, so the common
+    isotropic case pays nothing.
+    """
+    if min_feature_mm <= 0:
+        return None
+
+    spacing = image.GetSpacing()
+    radius_mm = min_feature_mm / 2.0
+    finest = min(spacing)
+
+    r = max(1, int(math.ceil(radius_mm / finest - _EPS)))
+    mm = radius_mm / r
+    while r > 1 and _grid_voxels(image, mm) > budget:
+        r -= 1
+        mm = radius_mm / r
+    # At r == 1 the ball is one voxel across and cannot shrink further; the only
+    # way under the budget is a grid coarser than the feature demands.
+    while _grid_voxels(image, mm) > budget:
+        mm *= 1.25
+
+    if all(abs(s - mm) <= 1e-6 for s in spacing):
+        return None
+    return mm
+
+
+def to_printability_grid(binary: sitk.Image, mm: float, log=None) -> sitk.Image:
+    """Resample a mask onto an isotropic grid, staying binary.
+
+    Occupancy is interpolated and re-thresholded at the same level marching cubes
+    would use, so the 0.5 isosurface lands where it did before -- this moves the
+    boundary by well under a voxel rather than snapping it to the new lattice.
+    """
+    field = resample_isotropic(binary, mm, log, pad_border=False)
+    return sitk.BinaryThreshold(field, ISO_OCCUPANCY, 1e30,
+                                insideValue=FOREGROUND, outsideValue=0)
+
+
 def realised_feature_mm(image: sitk.Image, min_feature_mm: float) -> list[float]:
     """The feature size the grid can actually test for, per axis.
 
@@ -266,9 +341,15 @@ def _thick_core(image: sitk.Image, min_feature_mm: float) -> sitk.Image:
     )
 
 
-def thicken(image: sitk.Image, thicken_mm: float, min_feature_mm: float = 0.0,
-            log=None) -> sitk.Image:
-    """Grow only the material that is too thin to print, and leave the rest alone.
+def thicken(image: sitk.Image, min_feature_mm: float, log=None) -> sitk.Image:
+    """Bring every wall up to ``min_feature_mm`` thick, and leave the rest alone.
+
+    One number, because there is only one thing to say: *no wall thinner than T*.
+    The probe that finds thin material and the growth that fixes it are the same
+    ball of radius ``T/2`` -- material a ball of diameter T cannot reach is grown
+    by ``T/2`` until it can. Two independent numbers (a "minimum feature size" and
+    a separate "thickening distance") can only ever disagree about what is being
+    promised.
 
     Dilating everything is simpler, and it is what a naive print-prep step does,
     but it is dimensionally wrong. A cranial vault is 5 mm of solid bone and needs
@@ -284,46 +365,45 @@ def thicken(image: sitk.Image, thicken_mm: float, min_feature_mm: float = 0.0,
 
     So thin material is material that no sufficiently thick region can reach::
 
-        core = opening(mask, feature / 2)          # everything thick enough
-        thin = mask \\ dilate(core, thicken_mm)     # beyond the core's reach
-        out  = mask | dilate(thin, thicken_mm)
+        r    = T / 2
+        core = opening(mask, r)        # everything already thick enough
+        thin = mask \\ dilate(core, r)  # beyond the thick material's reach
+        out  = mask | dilate(thin, r)
 
     A solid block is entirely within its own core's reach and does not move. A
-    one-voxel sheet has no core at all and is grown everywhere.
+    one-voxel sheet has no core at all and is grown everywhere, to thickness T.
 
-    With no minimum feature size, material thinner than twice the thickening
-    radius is treated as thin -- what asking to "thicken by 1 mm" implies.
+    The ball must be a *ball*. On an anisotropic grid the voxel radii round
+    independently and the structuring element becomes an ellipsoid -- on a 5 mm
+    slice pitch, one 10 mm tall. Call this on a grid from
+    :func:`printability_grid_mm`, which guarantees a representable ball.
     """
-    if thicken_mm <= 0:
+    if min_feature_mm <= 0:
         return image
 
-    feature = min_feature_mm if min_feature_mm > 0 else 2.0 * thicken_mm
+    radius_mm = min_feature_mm / 2.0
     binary = sitk.Cast(image, sitk.sitkUInt8)
 
-    reachable = dilate(_thick_core(binary, feature), thicken_mm)
+    reachable = dilate(_thick_core(binary, min_feature_mm), radius_mm)
     thin = sitk.And(binary, sitk.Not(reachable))
 
     thin_voxels = count_foreground(thin)
     if thin_voxels == 0:
         if log:
-            log("thicken %.2f mm: nothing thinner than %.2f mm, nothing to do"
-                % (thicken_mm, feature))
+            log("thicken: nothing thinner than %.2f mm, nothing to do" % min_feature_mm)
         return image
 
     total = count_foreground(binary)
     spacing = image.GetSpacing()
-    radii = dilation_radius_voxels(thicken_mm, spacing)
+    radii = dilation_radius_voxels(radius_mm, spacing)
     if log:
-        realised = realised_feature_mm(binary, feature)
-        probe = ("%.2f mm" % feature if feature_is_resolvable(binary, feature)
-                 else "%s mm (%.2f requested; the grid is too coarse)"
-                      % (_fmt(realised), feature))
-        log("thicken %-11s -> %s voxels = grows %s mm, applied to the %.1f%% of "
-            "material out of reach of bone thicker than %s"
-            % ("%.2f mm" % thicken_mm, radii, _fmt(dilation_extent_mm(radii, spacing)),
-               100.0 * thin_voxels / max(total, 1), probe))
+        realised = realised_feature_mm(binary, min_feature_mm)
+        log("thicken %-11s -> %s voxels = %s mm walls, applied to the %.1f%% of "
+            "material a %.2f mm ball cannot reach"
+            % ("%.2f mm" % min_feature_mm, radii, _fmt(realised),
+               100.0 * thin_voxels / max(total, 1), min_feature_mm))
 
-    return sitk.Or(binary, dilate(thin, thicken_mm))
+    return sitk.Or(binary, dilate(thin, radius_mm))
 
 
 def islands(
@@ -399,7 +479,8 @@ def antialias_for_grid(image: sitk.Image, grid_mm: float) -> sitk.Image:
     return out
 
 
-def resample_isotropic(binary: sitk.Image, mm: float, log=None) -> sitk.Image:
+def resample_isotropic(binary: sitk.Image, mm: float, log=None,
+                       pad_border: bool = True) -> sitk.Image:
     """Resample the mask onto an isotropic grid as a fractional-occupancy field.
 
     This is the topology-safe way to control triangle count. Decimating the mesh
@@ -429,8 +510,12 @@ def resample_isotropic(binary: sitk.Image, mm: float, log=None) -> sitk.Image:
     out = r.Execute(field)
 
     # The coarser grid may clip the object at its outer face; a border of
-    # background keeps the isosurface closed.
-    out = sitk.ConstantPad(out, [1, 1, 1], [1, 1, 1], 0.0)
+    # background keeps the isosurface closed. Callers that go on to mesh the
+    # result want this. Callers that go on to run more morphology do not: the
+    # border would make the mask stop touching the volume edge, and the
+    # field-of-view truncation warning would silently never fire.
+    if pad_border:
+        out = sitk.ConstantPad(out, [1, 1, 1], [1, 1, 1], 0.0)
 
     if log:
         log("resample %.2f mm isotropic -> %s voxels"
