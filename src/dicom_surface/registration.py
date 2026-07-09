@@ -1,17 +1,20 @@
 """Rigid registration of two scans of the same anatomy.
 
-Two studies of one patient sit in different patient coordinate frames, because
-the frame is anchored to the scanner table, not to the body. Meshes from a 2023
-and a 2024 head CT of the same skull can be 850 mm apart in z.
+Two studies of one patient rarely share a usable frame of reference. DICOM patient
+coordinates are patient-oriented (LPS), but origin, pose and head tilt are set by
+the acquisition, so meshes from a 2023 and a 2024 head CT of the same skull can be
+850 mm apart in z and 10 degrees apart in tilt.
 
-The search is deliberately global-then-local:
+The search is global-then-local:
 
 1. **Exhaustive translation** by FFT cross-correlation of the two bone masks on a
-   coarse lattice. There is no initial guess to get wrong and no local minimum to
-   fall into -- every integer translation is scored at once.
-2. **Point-to-plane ICP** on the surfaces to recover rotation and refine.
-   Point-to-point ICP slides far too slowly on smooth bone; on a real skull pair
-   it was still descending after 60 iterations at 0.93 mm RMS, where
+   coarse lattice. Every integer translation is scored at once, so the translation
+   needs no initial guess. Rotation is *not* searched here.
+2. **Point-to-plane ICP** on the surfaces to recover rotation and refine. Rotation
+   therefore still depends on ICP's basin of attraction: measured on a synthetic
+   phantom, it recovers 3 to 40 degrees to under 1 degree and fails beyond about
+   60. Point-to-point ICP slides far too slowly on smooth bone; on a real skull
+   pair it was still descending after 60 iterations at 0.93 mm RMS, where
    point-to-plane converged to 0.176 mm in 40.
 
 Correspondences are *trimmed*. The scans overlap only partially -- one holds the

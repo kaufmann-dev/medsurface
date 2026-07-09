@@ -59,9 +59,9 @@ def build_mask(image: sitk.Image, preset: Preset, threshold: float,
     if preset.opening_mm > 0:
         binary = segment.opening(binary, preset.opening_mm, log)
     binary = segment.closing(binary, closing_mm, log)
-    # Thicken after sealing: dilating first would widen every pore's rim before
-    # the closing had a chance to bridge it.
-    binary = segment.dilate(binary, profile.thicken_mm, log)
+    # Thicken after sealing: growing first would widen every pore's rim before the
+    # closing had a chance to bridge it, and would count the rim as thin material.
+    binary = segment.thicken(binary, profile.thicken_mm, profile.min_feature_mm, log)
     binary = segment.islands(binary, preset.keep_largest_island, min_island_mm3, log)
     return binary
 
@@ -77,11 +77,11 @@ def thickening_warning(mask: sitk.Image, profile: PrintProfile) -> list[str]:
     radii = geometry.dilation_radius_voxels(profile.thicken_mm, mask.GetSpacing())
     grown = geometry.dilation_extent_mm(radii, mask.GetSpacing())
     if max(grown) > 1.25 * profile.thicken_mm:
-        return ["thickening by %.2f mm realised as %s mm on this voxel grid; outer "
-                "dimensions grow by twice that on each axis"
+        return ["thickening by %.2f mm realised as %s mm on this voxel grid; only "
+                "material thinner than the minimum feature size is grown, so outer "
+                "dimensions move only where thin bone reaches the surface"
                 % (profile.thicken_mm, " x ".join("%.2f" % g for g in grown))]
-    return ["thickened by %.2f mm, so outer dimensions are %.2f mm larger on every "
-            "axis than the scan" % (profile.thicken_mm, 2 * profile.thicken_mm)]
+    return []
 
 
 def thin_material_warning(mask: sitk.Image, profile: PrintProfile) -> list[str]:
