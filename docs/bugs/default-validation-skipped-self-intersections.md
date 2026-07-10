@@ -22,9 +22,9 @@ degenerate geometry, and intersections were already measured or available.
 
 All CLI validation uses one complete contract. It always measures
 self-intersections and reports `valid` plus concrete `problems`. Every validating
-command uses that result for its exit status, while `convert --no-validate` and
-`merge --no-validate` remain the explicit way to skip the whole check. Multiple
-independently closed shells remain valid.
+command uses that result for its exit status. Conversion and merge subsequently
+removed their validation bypass and atomically publish only validated output.
+Multiple independently closed shells remain valid.
 
 In the development environment, complete validation of a 589,824-face
 procedural torus took approximately 9.3 seconds. The cost depends on mesh size

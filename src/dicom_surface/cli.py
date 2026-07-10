@@ -431,12 +431,12 @@ def presets() -> None:
         preset = PRESETS[name]
         modality = ", ".join(preset.modalities) if preset.modalities else "any"
         threshold = preset.threshold if isinstance(preset.threshold, str) else "%g" % preset.threshold
-        triangles = f"{preset.target_faces:,}" if preset.target_faces else "all"
-        processing = "median %.1f mm; closing %.1f mm; smooth %d; triangles %s" % (
+        simplify = "off" if preset.simplify_error_mm == 0 else "%.2f mm" % preset.simplify_error_mm
+        processing = "median %.1f mm; closing %.1f mm; smooth %d; simplify %s" % (
             preset.median_mm,
             preset.closing_mm,
             preset.smooth_iters,
-            triangles,
+            simplify,
         )
         tissue.add_row(
             _plain(name),
@@ -510,10 +510,13 @@ def convert(
     ),
     smooth_iters: int | None = typer.Option(None, "--smooth-iters", help="Windowed-sinc iterations."),
     passband: float | None = typer.Option(None, "--passband", help="Windowed-sinc passband."),
-    target_faces: int | None = typer.Option(None, "--target-faces", help="Triangle target (0 = off)."),
-    post_smooth_iters: int | None = typer.Option(None, "--post-smooth-iters", help="Smoothing after decimation."),
+    simplify_error_mm: float | None = typer.Option(
+        None,
+        "--simplify-error-mm",
+        help="MeshLib estimated surface-deviation/QEM limit in model mm, not a certified Hausdorff bound (0 = off).",
+    ),
+    post_smooth_iters: int | None = typer.Option(None, "--post-smooth-iters", help="Smoothing after simplification."),
     no_cap: bool = typer.Option(False, "--no-cap", help="Do not close anatomy at the field-of-view boundary."),
-    no_validate: bool = typer.Option(False, "--no-validate", help="Skip mesh-quality validation."),
     json_file: Path | None = typer.Option(None, "--json", help="Write results and provenance to this JSON file."),
     quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
 ) -> None:
@@ -545,7 +548,7 @@ def convert(
             resample_mm=resample_mm,
             smooth_iters=smooth_iters,
             passband=passband,
-            target_faces=target_faces,
+            simplify_error_mm=simplify_error_mm,
             post_smooth_iters=post_smooth_iters,
             keep_largest_island=False if all_islands else None,
             keep_largest_component=False if all_components else None,
@@ -578,12 +581,7 @@ def convert(
             _error(exc)
             raise typer.Exit(1) from None
 
-        report = None
-        if not no_validate:
-            progress.update("Validating output mesh ...")
-            from . import validate as validate_mod
-
-            report = validate_mod.validate(result.output_path)
+        report = result.quality
 
         if json_file is not None:
             payload = {
@@ -613,13 +611,11 @@ def convert(
             "triangles %s   vertices %s   %.1fs"
             % (f"{result.triangles:,}", f"{result.vertices:,}", result.seconds)
         )
-        if report is not None:
-            _print_quality(report)
+        _print_quality(report)
         if json_file is not None:
             _success("wrote %s" % json_file)
 
-    if report is not None:
-        _warn_if_invalid(report, "output")
+    _warn_if_invalid(report, "output")
 
     _exit_for_quality(report)
 
@@ -675,14 +671,17 @@ def merge(
     ),
     smooth_iters: int | None = typer.Option(None, "--smooth-iters", help="Default: from the preset."),
     passband: float | None = typer.Option(None, "--passband", help="Default: from the preset."),
-    target_faces: int | None = typer.Option(None, "--target-faces", help="Default: from the preset."),
+    simplify_error_mm: float | None = typer.Option(
+        None,
+        "--simplify-error-mm",
+        help="MeshLib estimated surface-deviation/QEM limit in model mm, not a certified Hausdorff bound (0 = off).",
+    ),
     post_smooth_iters: int | None = typer.Option(None, "--post-smooth-iters", help="Default: from the preset."),
     force: bool = typer.Option(
         False,
         "--force",
         help="Override patient, modality, and registration gates.",
     ),
-    no_validate: bool = typer.Option(False, "--no-validate", help="Skip mesh-quality validation."),
     json_file: Path | None = typer.Option(None, "--json", help="Write results and provenance to this JSON file."),
     quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
 ) -> None:
@@ -733,7 +732,7 @@ def merge(
                 grid_mm=grid_mm,
                 smooth_iters=smooth_iters,
                 passband=passband,
-                target_faces=target_faces,
+                simplify_error_mm=simplify_error_mm,
                 post_smooth_iters=post_smooth_iters,
                 print_profile=_resolve_print_profile(
                     print_profile,
@@ -751,12 +750,7 @@ def merge(
             _error(exc)
             raise typer.Exit(2) from None
 
-        report = None
-        if not no_validate:
-            progress.update("Validating fused mesh ...")
-            from . import validate as validate_mod
-
-            report = validate_mod.validate(result.output_path)
+        report = result.quality
 
         if json_file is not None:
             payload = {
@@ -788,13 +782,11 @@ def merge(
             "triangles %s   vertices %s   %.1fs"
             % (f"{result.triangles:,}", f"{result.vertices:,}", result.seconds)
         )
-        if report is not None:
-            _print_quality(report)
+        _print_quality(report)
         if json_file is not None:
             _success("wrote %s" % json_file)
 
-    if report is not None:
-        _warn_if_invalid(report, "fused output")
+    _warn_if_invalid(report, "fused output")
 
     _exit_for_quality(report)
 

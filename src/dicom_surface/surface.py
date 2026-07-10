@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass
 
 import meshlib.mrmeshnumpy as mrmeshnumpy
 import meshlib.mrmeshpy as mrmeshpy
 import numpy as np
-import pymeshlab
 import SimpleITK as sitk
 import vtk
 from vtk.util import numpy_support  # noqa: N813
@@ -32,11 +32,12 @@ class SmoothingSafeguard:
 
 @dataclass(frozen=True)
 class DecimationSafeguard:
-    requested_faces: int
+    simplify_error_mm: float
     input_faces: int
     actual_faces: int
     attempted: bool
     accepted: bool
+    error_introduced_mm: float
     initial_self_intersecting_faces: int
     remaining_self_intersecting_faces: int
     repair_attempts: int
@@ -138,12 +139,15 @@ def smooth(poly: vtk.vtkPolyData, iterations: int, passband: float) -> vtk.vtkPo
 
 
 def selected_self_intersecting_faces(poly: vtk.vtkPolyData) -> np.ndarray:
-    """Boolean face selection using the same MeshLab predicate as validation."""
+    """Mark both faces in each MeshLib self-collision pair."""
     verts, faces = to_arrays(poly)
-    ms = pymeshlab.MeshSet()
-    ms.add_mesh(pymeshlab.Mesh(vertex_matrix=verts, face_matrix=faces))
-    ms.apply_filter("compute_selection_by_self_intersections_per_face")
-    return np.asarray(ms.current_mesh().face_selection_array(), dtype=bool)
+    mesh = mrmeshnumpy.meshFromFacesVerts(faces, verts)
+    pairs = mrmeshpy.findSelfCollidingTriangles(mrmeshpy.MeshPart(mesh))
+    selected = np.zeros(len(faces), dtype=bool)
+    for pair in pairs:
+        selected[int(pair.aFace)] = True
+        selected[int(pair.bFace)] = True
+    return selected
 
 
 def protect_smoothed_surface(
@@ -296,9 +300,9 @@ def _meshlib_topology_signature(mesh: mrmeshpy.Mesh) -> tuple[int, int, int]:
 
 def _decimate_candidate(
     poly: vtk.vtkPolyData,
-    target_faces: int,
+    simplify_error_mm: float,
     protected_faces: mrmeshpy.FaceBitSet | None = None,
-) -> tuple[vtk.vtkPolyData, tuple[int, int, int], tuple[int, int, int]]:
+) -> tuple[vtk.vtkPolyData, tuple[int, int, int], tuple[int, int, int], float]:
     tri = vtk.vtkTriangleFilter()
     tri.SetInputData(poly)
     tri.Update()
@@ -308,8 +312,10 @@ def _decimate_candidate(
     before = _meshlib_topology_signature(mesh)
 
     settings = mrmeshpy.DecimateSettings()
-    settings.maxDeletedFaces = int(len(faces) - target_faces)
-    settings.maxError = float("inf")
+    settings.strategy = mrmeshpy.DecimateStrategy.MinimizeError
+    settings.maxDeletedFaces = 2**31 - 1
+    settings.maxDeletedVertices = 2**31 - 1
+    settings.maxError = float(simplify_error_mm)
     # Partitioned decimation trades quality for speed and can make the result
     # depend on CPU count. One part is already much faster than the old backend.
     settings.subdivideParts = 1
@@ -319,24 +325,17 @@ def _decimate_candidate(
         region = mesh.topology.getValidFaces()
         region.subtract(protected_faces, 0)
         settings.region = region
-    mrmeshpy.decimateMesh(mesh, settings)
+    result = mrmeshpy.decimateMesh(mesh, settings)
 
     after = _meshlib_topology_signature(mesh)
     out_verts = mrmeshnumpy.getNumpyVerts(mesh)
     out_faces = mrmeshnumpy.getNumpyFaces(mesh.topology)
-    return from_arrays(out_verts, out_faces), before, after
+    return from_arrays(out_verts, out_faces), before, after, float(result.errorIntroduced)
 
 
 def _meshlib_self_intersecting_face_ids(poly: vtk.vtkPolyData) -> np.ndarray:
-    """Return colliding face ids quickly for iterative decimation repair."""
-    verts, faces = to_arrays(poly)
-    mesh = mrmeshnumpy.meshFromFacesVerts(faces, verts)
-    selected = mrmeshpy.localFindSelfIntersections(mesh)
-    return np.fromiter(
-        (int(selected.nthSetBit(i)) for i in range(selected.count())),
-        dtype=np.int64,
-        count=selected.count(),
-    )
+    """Return every face participating in a MeshLib collision pair."""
+    return np.flatnonzero(selected_self_intersecting_faces(poly))
 
 
 def _protect_decimation_collision_neighborhood(
@@ -369,17 +368,18 @@ def _protect_decimation_collision_neighborhood(
 
 def decimate_safely(
     poly: vtk.vtkPolyData,
-    target_faces: int,
+    simplify_error_mm: float,
 ) -> tuple[vtk.vtkPolyData, DecimationSafeguard]:
     """Simplify without accepting changed topology or intersecting faces."""
     current = poly.GetNumberOfPolys()
-    if target_faces <= 0 or current <= target_faces:
+    if simplify_error_mm <= 0:
         return poly, DecimationSafeguard(
-            requested_faces=int(target_faces),
+            simplify_error_mm=float(simplify_error_mm),
             input_faces=int(current),
             actual_faces=int(current),
             attempted=False,
             accepted=True,
+            error_introduced_mm=0.0,
             initial_self_intersecting_faces=0,
             remaining_self_intersecting_faces=0,
             repair_attempts=0,
@@ -395,13 +395,14 @@ def decimate_safely(
     initial_intersections = 0
     remaining_intersections = 0
     repair_attempts = 0
+    error_introduced_mm = 0.0
     reasons: list[str] = []
     candidate = poly
 
     for attempt in range(_MAX_DECIMATION_REPAIR_ATTEMPTS + 1):
-        candidate, topology_before, topology_after = _decimate_candidate(
+        candidate, topology_before, topology_after, error_introduced_mm = _decimate_candidate(
             poly,
-            target_faces,
+            simplify_error_mm,
             protected_faces,
         )
         after_defects = count_defects(candidate)
@@ -416,19 +417,10 @@ def decimate_safely(
                 "boundary/non-manifold defects changed from %s to %s"
                 % (before_defects, after_defects)
             )
-        if candidate.GetNumberOfPolys() > target_faces + 2:
-            reasons.append(
-                "could only reduce to %d face(s)" % candidate.GetNumberOfPolys()
-            )
         if reasons:
             break
 
         colliding_ids = _meshlib_self_intersecting_face_ids(candidate)
-        # MeshLab is the independent final authority. Usually the fast MeshLib
-        # detector finds the same faces; only pay for both once MeshLib is clean.
-        if not len(colliding_ids):
-            mesh_lab_selection = selected_self_intersecting_faces(candidate)
-            colliding_ids = np.flatnonzero(mesh_lab_selection)
         remaining_intersections = int(len(colliding_ids))
         if attempt == 0:
             initial_intersections = remaining_intersections
@@ -460,11 +452,12 @@ def decimate_safely(
     result = candidate if accepted else poly
     protected_count = int(protected_faces.count())
     return result, DecimationSafeguard(
-        requested_faces=int(target_faces),
+        simplify_error_mm=float(simplify_error_mm),
         input_faces=int(current),
         actual_faces=int(result.GetNumberOfPolys()),
         attempted=True,
         accepted=accepted,
+        error_introduced_mm=error_introduced_mm if accepted else 0.0,
         initial_self_intersecting_faces=initial_intersections,
         remaining_self_intersecting_faces=remaining_intersections,
         repair_attempts=repair_attempts,
@@ -474,9 +467,9 @@ def decimate_safely(
     )
 
 
-def decimate(poly: vtk.vtkPolyData, target_faces: int) -> vtk.vtkPolyData:
+def decimate(poly: vtk.vtkPolyData, simplify_error_mm: float) -> vtk.vtkPolyData:
     """Return the safely decimated mesh, or the valid input if safeguards fail."""
-    return decimate_safely(poly, target_faces)[0]
+    return decimate_safely(poly, simplify_error_mm)[0]
 
 
 def compute_normals(poly: vtk.vtkPolyData) -> vtk.vtkPolyData:
@@ -509,6 +502,34 @@ def write(poly: vtk.vtkPolyData, path: str) -> None:
         w.SetFileTypeToBinary()
     if not w.Write():
         raise IOError("failed to write %s" % path)
+
+
+def write_validated(poly: vtk.vtkPolyData, path: str) -> dict:
+    """Validate memory and serialized output before atomically publishing it."""
+    from . import validate
+
+    verts, faces = to_arrays(poly)
+    in_memory = validate.validate_arrays(verts, faces)
+    if not in_memory["valid"]:
+        raise ValueError("in-memory output mesh is invalid: %s" % "; ".join(in_memory["problems"]))
+
+    destination = os.path.abspath(path)
+    parent = os.path.dirname(destination)
+    os.makedirs(parent, exist_ok=True)
+    ext = os.path.splitext(destination)[1]
+    fd, temporary = tempfile.mkstemp(prefix=".%s." % os.path.basename(destination), suffix=ext, dir=parent)
+    os.close(fd)
+    try:
+        write(poly, temporary)
+        report = validate.validate(temporary)
+        if not report["valid"]:
+            raise ValueError("serialized output mesh is invalid: %s" % "; ".join(report["problems"]))
+        os.replace(temporary, destination)
+        report["file"] = os.path.basename(destination)
+        return report
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def bounds_mm(poly: vtk.vtkPolyData) -> tuple[float, ...]:

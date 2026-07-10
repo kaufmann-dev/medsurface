@@ -30,6 +30,7 @@ class Result:
     seconds: float
     warnings: list[str]
     provenance: dict[str, Any]
+    quality: dict[str, Any]
 
 
 @dataclass
@@ -49,7 +50,7 @@ def finish_surface(
     *,
     smooth_iters: int,
     passband: float,
-    target_faces: int,
+    simplify_error_mm: float,
     post_smooth_iters: int,
     keep_largest_component: bool,
     step: StepRunner,
@@ -82,32 +83,45 @@ def finish_surface(
         )
         log("  surface shells: %d (kept 1)" % surface_components)
 
-    if target_faces > 0 and poly.GetNumberOfPolys() > target_faces:
+    if simplify_error_mm > 0:
         poly, decimation = step(
-            "decimate",
-            lambda: surface.decimate_safely(poly, target_faces),
+            "simplify",
+            lambda: surface.decimate_safely(poly, simplify_error_mm),
         )
     else:
-        poly, decimation = surface.decimate_safely(poly, target_faces)
+        poly, decimation = surface.decimate_safely(poly, simplify_error_mm)
+    log(
+        "  simplify error %.3f mm; MeshLib estimate %.4f mm; triangles %s; "
+        "repair attempts %d; protected source faces %s"
+        % (
+            decimation.simplify_error_mm,
+            decimation.error_introduced_mm,
+            f"{decimation.actual_faces:,}",
+            decimation.repair_attempts,
+            f"{decimation.protected_input_faces:,}",
+        )
+    )
     if decimation.attempted and not decimation.accepted:
         warnings.append(
-            "decimation to %s triangles was discarded because %s; kept the valid "
+            "simplification at %.3f mm was discarded because %s; kept the valid "
             "%s-triangle surface"
             % (
-                f"{decimation.requested_faces:,}",
+                decimation.simplify_error_mm,
                 decimation.rejection_reason,
                 f"{decimation.actual_faces:,}",
             )
         )
     elif decimation.repair_attempts:
         warnings.append(
-            "decimation protected %s source faces (%.2f%%) from collapse to prevent "
-            "%s self-intersecting candidate faces; the collision-free result contains "
-            "%s triangles"
+            "simplification at %.3f mm protected %s source faces (%.2f%%) from collapse "
+            "to prevent %s self-intersecting candidate faces; MeshLib estimates %.4f mm "
+            "introduced error and the collision-free result contains %s triangles"
             % (
+                decimation.simplify_error_mm,
                 f"{decimation.protected_input_faces:,}",
                 100.0 * decimation.protected_input_face_fraction,
                 f"{decimation.initial_self_intersecting_faces:,}",
+                decimation.error_introduced_mm,
                 f"{decimation.actual_faces:,}",
             )
         )
@@ -355,7 +369,7 @@ def convert(
                 "--resample-mm %.2f is coarser than the native %.3f mm voxel, so structures "
                 "thinner than the target voxel are erased. On a head CT, resampling to 0.6 mm "
                 "reopened 257 pores that the morphological closing had sealed, and terraced "
-                "the vault. Use --target-faces to shed triangles without touching geometry."
+                "the vault. Use --simplify-error-mm to shed triangles without touching the grid."
                 % (preset.resample_mm, native)
             )
         grid = step("resample isotropic",
@@ -377,7 +391,7 @@ def convert(
         poly,
         smooth_iters=preset.smooth_iters,
         passband=preset.passband,
-        target_faces=preset.target_faces,
+        simplify_error_mm=preset.simplify_error_mm,
         post_smooth_iters=preset.post_smooth_iters,
         keep_largest_component=preset.keep_largest_component,
         step=step,
@@ -389,7 +403,7 @@ def convert(
     poly = step("index -> patient space (LPS)", lambda: surface.transform(poly, affine))
     poly = step("normals", lambda: surface.compute_normals(poly))
 
-    step("write mesh", lambda: surface.write(poly, output_path))
+    quality = step("validate and publish mesh", lambda: surface.write_validated(poly, output_path))
 
     provenance = {
         "series_uid": series.uid,
@@ -422,4 +436,5 @@ def convert(
         seconds=time.time() - t0,
         warnings=warnings,
         provenance=provenance,
+        quality=quality,
     )

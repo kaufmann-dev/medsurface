@@ -1,54 +1,42 @@
 # Surface finishing created self-intersections
 
-Fixed: 2026-07-10 17:45:53 CEST (+0200)
+Fixed: 2026-07-11 01:15:44 CEST (+0200)
 
-Baseline commit: `e63a97caad415f3eeb06d11f4aa3e5f65a48887b`
+Baseline commit: `248e35f084d5ee5e96a08f1f5ccf3f6a081de79e`
 
 ## Symptom
 
-Converting the 2024 skull CT with the default bone preset wrote a watertight,
-consistently wound 600,000-triangle STL that failed validation with 79
-self-intersecting faces. Reducing global smoothing avoided some collisions but
-made anatomical surface quality depend on relaxing the preset. Merge used a
-separate finishing sequence and had the same class of risk.
+The default bone conversion of the 2024 skull CT could be watertight and
+consistently wound yet contain self-intersecting faces after surface finishing.
+The former finishing path also required PyMeshLab as an independent final
+authority, despite its selection disagreeing with MeshLib on real candidates.
 
-Stage-by-stage measurement found no intersections after marching cubes, two
-after initial smoothing, four after the old decimator, and 79 after final
-smoothing. The individual stages could therefore turn a valid input surface
-into an invalid output even though boundary and non-manifold edge checks passed.
+## Confirmed cause
 
-## Cause
-
-Windowed-sinc smoothing and aggressive quadric decimation preserve connectivity
-but do not guarantee an embedding without triangle intersections. The pipeline
-applied both operations without checking their in-memory result. Its decimation
-guard initially rejected an invalid candidate wholesale, which guaranteed a
-valid file but retained millions of source triangles instead of meeting the
-requested face budget. Conversion and merge also duplicated their finishing
-logic, so a safeguard added to one path could drift from the other.
+Windowed-sinc smoothing and quadric simplification can preserve connectivity
+while causing non-adjacent triangles to collide. The protection architecture in
+`248e35f0` correctly repaired these local patches, but final acceptance used
+two different predicates. PyMeshLab's selection was a false-positive source for
+the MeshLib-validated candidates, and it added an OpenGL runtime dependency.
 
 ## Fix
 
-Conversion and merge now share one intersection-safe finishing function.
-Smoothing still runs every requested iteration. If it introduces collisions,
-only vertices in the affected patches return to their pre-smooth positions; the
-protected set expands by topological rings until the result is collision-free.
+The restored `248e35f0` smoothing and source-neighborhood protection flow is
+retained. MeshLib `findSelfCollidingTriangles` is now the sole collision
+predicate in smoothing, simplification, file validation, and VTP's in-memory
+path; both faces of every colliding pair are counted.
 
-Decimation now uses MeshLib and validates the component/hole/Euler signature,
-face budget, boundary edges, non-manifold edges, and self-intersections. When a
-candidate intersects itself, its collision triangles are projected onto the
-valid source mesh. Four-ring source neighborhoods are excluded from collapse
-and decimation restarts, allowing simplification elsewhere to retain the exact
-target. MeshLib performs fast per-pass detection and PyMeshLab independently
-checks a candidate before acceptance. The valid source is retained only if the
-topology checks fail or eight local-protection passes cannot produce a clean
-candidate. Safeguard statistics are included in JSON provenance and human
-warnings.
+MeshLib simplification now uses `MinimizeError` with an estimated QEM
+surface-deviation limit in millimetres rather than an exact face budget. It
+preserves topology and defect checks, retries collision protection up to eight
+times, and keeps the valid pre-simplification mesh if no candidate succeeds.
+The configured limit, introduced-error estimate, resulting face count, retry
+count, and protected source faces are recorded in provenance and warnings.
 
-Regression tests cover unchanged clean smoothing, local smoothing protection,
-unsafe decimation rejection, and successful source-patch protection. The two
-supplied real CT conversions and their merge all completed with exit status 0,
-600,000 triangles, zero self-intersections, zero boundary edges, and zero
-non-manifold edges. The formerly failing 29-face standalone candidate protected
-2,355 of 5,459,072 source faces; the merged candidate protected 3,967 of
-6,006,220 source faces.
+Conversion and merge validate the in-memory mesh, serialize to a temporary file
+in the destination directory, validate the file, then atomically replace the
+requested destination. An invalid result cannot overwrite an existing output.
+
+Regression coverage verifies collision-pair counting, clean and VTP validation,
+error-limited simplification, zero-error no-op behavior, protection retries,
+and atomic failure handling.

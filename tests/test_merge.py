@@ -234,7 +234,7 @@ def test_surface_stage_comes_from_the_preset():
     from dicom_surface import presets
 
     signature = inspect.signature(merge_mod.merge)
-    for name in ("smooth_iters", "passband", "target_faces", "post_smooth_iters"):
+    for name in ("smooth_iters", "passband", "simplify_error_mm", "post_smooth_iters"):
         assert signature.parameters[name].default is None, (
             "%s must default to the preset, not to a merge-specific constant" % name
         )

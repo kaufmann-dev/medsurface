@@ -14,6 +14,8 @@ from typing import Any
 import numpy as np
 import trimesh
 import vtk
+import meshlib.mrmeshnumpy as mrmeshnumpy
+import meshlib.mrmeshpy as mrmeshpy
 from vtk.util import numpy_support
 
 
@@ -42,27 +44,18 @@ def _load_mesh(path: str) -> trimesh.Trimesh:
     return trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
 
 
-def _self_intersections(path: str, mesh: trimesh.Trimesh | None = None) -> int | str:
+def _self_intersections(_path: str | None, mesh: trimesh.Trimesh) -> int | str:
+    """Count unique faces in MeshLib self-collision pairs."""
     try:
-        import pymeshlab
-    except ImportError:  # pragma: no cover - pymeshlab is a hard dependency
-        return "not measured (pymeshlab unavailable)"
-    try:
-        ms = pymeshlab.MeshSet()
-        if os.path.splitext(path)[1].lower() == ".vtp":
-            if mesh is None:
-                mesh = _load_mesh(path)
-            ms.add_mesh(
-                pymeshlab.Mesh(
-                    vertex_matrix=np.asarray(mesh.vertices),
-                    face_matrix=np.asarray(mesh.faces),
-                )
-            )
-        else:
-            ms.load_new_mesh(path)
-        ms.apply_filter("meshing_remove_duplicate_vertices")
-        ms.apply_filter("compute_selection_by_self_intersections_per_face")
-        return int(ms.current_mesh().selected_face_number())
+        vertices = np.ascontiguousarray(mesh.vertices, dtype=np.float64)
+        faces = np.ascontiguousarray(mesh.faces, dtype=np.int32)
+        mr_mesh = mrmeshnumpy.meshFromFacesVerts(faces, vertices)
+        pairs = mrmeshpy.findSelfCollidingTriangles(mrmeshpy.MeshPart(mr_mesh))
+        selected = set()
+        for pair in pairs:
+            selected.add(int(pair.aFace))
+            selected.add(int(pair.bFace))
+        return len(selected)
     except Exception as exc:  # noqa: BLE001
         return "error: %s" % type(exc).__name__
 
@@ -113,9 +106,8 @@ def _problems(report: dict[str, Any]) -> list[str]:
     return problems
 
 
-def validate(path: str) -> dict[str, Any]:
-    """Full quality report and a single validity result for a mesh file."""
-    mesh = _load_mesh(path)
+def _validate_mesh(mesh: trimesh.Trimesh, *, file: str, bytes: int) -> dict[str, Any]:
+    """Full quality report and a single validity result for one triangle mesh."""
 
     edges = np.sort(mesh.edges_sorted, axis=1)
     _uniq, inverse, counts = np.unique(edges, axis=0, return_inverse=True, return_counts=True)
@@ -125,8 +117,8 @@ def validate(path: str) -> dict[str, Any]:
     watertight = bool(mesh.is_watertight)
 
     report: dict[str, Any] = {
-        "file": os.path.basename(path),
-        "bytes": os.path.getsize(path),
+        "file": file,
+        "bytes": bytes,
         "triangles": int(len(mesh.faces)),
         "vertices": int(len(mesh.vertices)),
         "components": _component_count(mesh),
@@ -148,11 +140,26 @@ def validate(path: str) -> dict[str, Any]:
         # genus = (2 - euler) / 2 for a closed orientable surface
         report["genus"] = int((2 - report["euler_number"]) // 2)
 
-    report["self_intersecting_faces"] = _self_intersections(path, mesh)
+    report["self_intersecting_faces"] = _self_intersections(None, mesh)
     report["problems"] = _problems(report)
     report["valid"] = not report["problems"]
 
     return report
+
+
+def validate_arrays(vertices: np.ndarray, faces: np.ndarray) -> dict[str, Any]:
+    """Apply the complete validation contract before serialization."""
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
+    return _validate_mesh(mesh, file="<in-memory>", bytes=0)
+
+
+def validate(path: str) -> dict[str, Any]:
+    """Full quality report and a single validity result for a mesh file."""
+    return _validate_mesh(
+        _load_mesh(path),
+        file=os.path.basename(path),
+        bytes=os.path.getsize(path),
+    )
 
 
 def summarise(report: dict[str, Any]) -> str:

@@ -65,13 +65,13 @@ reusing an older ID. In `list --json`, the selector is the integer `id`; `uid`,
 A preset supplies the segmentation and mesh-finishing defaults. List the
 installed values at any time with `dicom-surface presets`.
 
-| preset        | use it for                                                | threshold | median | closing | island floor | smoothing iterations (initial + final) | triangle target |
-| ------------- | --------------------------------------------------------- | --------: | -----: | ------: | -----------: | -------------------------------------: | --------------: |
-| `bone`        | General CT bone models                                    |    300 HU | 1.0 mm |  2.4 mm |       50 mm³ |                                20 + 25 |         600,000 |
-| `bone-detail` | Maximum detail and measurement; produces very large files |    300 HU | 0.6 mm |  1.2 mm |       20 mm³ |                                  8 + 0 |             off |
-| `teeth`       | Enamel and dense dentin; keeps separate teeth             |  1,200 HU | 0.6 mm |  0.6 mm |        5 mm³ |                                 10 + 0 |         300,000 |
-| `skin`        | Outer skin surface from CT                                |   −300 HU | 1.4 mm |  3.2 mm |      500 mm³ |                                25 + 10 |         400,000 |
-| `auto`        | MR, CBCT, ultrasound, or other uncalibrated intensities   |      Otsu | 1.0 mm |  2.0 mm |       50 mm³ |                                20 + 25 |         600,000 |
+| preset        | use it for                                                | threshold | median | closing | island floor | smoothing iterations (initial + final) | simplify error |
+| ------------- | --------------------------------------------------------- | --------: | -----: | ------: | -----------: | -------------------------------------: | -------------: |
+| `bone`        | General CT bone models                                    |    300 HU | 1.0 mm |  2.4 mm |       50 mm³ |                                20 + 25 |        0.25 mm |
+| `bone-detail` | Maximum detail and measurement; produces very large files |    300 HU | 0.6 mm |  1.2 mm |       20 mm³ |                                  8 + 0 |            off |
+| `teeth`       | Enamel and dense dentin; keeps separate teeth             |  1,200 HU | 0.6 mm |  0.6 mm |        5 mm³ |                                 10 + 0 |        0.12 mm |
+| `skin`        | Outer skin surface from CT                                |   −300 HU | 1.4 mm |  3.2 mm |      500 mm³ |                                25 + 10 |        0.35 mm |
+| `auto`        | MR, CBCT, ultrasound, or other uncalibrated intensities   |      Otsu | 1.0 mm |  2.0 mm |       50 mm³ |                                20 + 25 |        0.25 mm |
 
 Numeric thresholds are inclusive lower bounds. `auto` calculates an Otsu
 threshold from the scan instead of assuming calibrated Hounsfield units. CT
@@ -79,13 +79,13 @@ presets with HU thresholds are refused on non-CT data unless you supply an
 explicit `--threshold`.
 
 `teeth` keeps every mask island and surface component that survives its size
-floor. The other presets keep only the largest component. Triangle targets are
-requested face-count budgets; constrained meshes may finish above them, and
-meshes already below the target are not enlarged. Decimation protects small
+floor. The other presets keep only the largest component. `--simplify-error-mm`
+sets MeshLib's estimated surface-deviation/QEM limit in model millimetres; it is
+not a certified Hausdorff bound. `0` disables simplification. The resulting
+triangle count is an outcome, not a target. Simplification protects small
 source-surface neighborhoods when collapsing them would create
-self-intersections. It keeps the target count by simplifying elsewhere; if no
-candidate can preserve topology and mesh validity, the valid higher-resolution
-surface is retained with a warning.
+self-intersections. If no candidate can preserve topology and mesh validity,
+the valid higher-resolution surface is retained with a warning.
 
 ```sh
 dicom-surface convert scans/ --preset teeth -o teeth.stl
@@ -118,7 +118,7 @@ dicom-surface convert scans/ --print-profile fdm -o fdm-skull.stl
 
 Profile values are mask-processing targets, not guarantees about final mesh or
 manufactured wall thickness. Scan sampling, interpolation, surface extraction,
-smoothing, decimation, and the printer can all change the realized result.
+smoothing, simplification, and the printer can all change the realized result.
 Inspect the final mesh in a slicer. Short thin features close to thick anatomy
 may not be selected for thickening; the [technical
 reference](technical-reference.md#print-profile-behavior) describes this known
@@ -166,8 +166,10 @@ JSON.
 
 ## Understanding validation
 
-Conversion, merging, and repair validate the file they write. `validate` runs
-the same checks without changing its input.
+Conversion and merging validate the in-memory surface, write a temporary file
+in the destination directory, validate that serialized file, and atomically
+publish it only when both checks pass. `repair` validates the file it writes;
+`validate` runs the same checks without changing its input.
 
 A report is valid only when the mesh is watertight, consistently wound, an
 enclosed volume, and has no boundary edges, non-manifold edge uses, degenerate
@@ -176,7 +178,7 @@ failed or unavailable self-intersection measurement makes the result incomplete
 and therefore invalid.
 
 Before writing, conversion and merging also guard both smoothing stages and
-decimation against self-intersections. Smoothing still runs every requested
+simplification against self-intersections. Smoothing still runs every requested
 iteration; only vertices in collision neighborhoods retain their pre-smooth
 positions. These safeguards are reported as warnings and recorded in JSON
 provenance when they are used.

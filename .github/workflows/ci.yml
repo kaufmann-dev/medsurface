@@ -20,15 +20,6 @@ jobs:
           python-version: ${{ matrix.python-version }}
           version: "0.11.28"
           enable-cache: true
-      - name: Install system libraries
-        # pymeshlab's plugins link against libOpenGL.so.0, which the runner image
-        # does not ship (it has libGL.so.1 only). A plugin that fails to dlopen is
-        # skipped silently, so the loss surfaces much later as an unrelated-looking
-        # "Filter does not exists" from apply_filter. Without libopengl0,
-        # libfilter_meshing never loads and decimation is missing.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgl1 libopengl0
       - name: Install
         run: uv sync --locked
       - name: Test

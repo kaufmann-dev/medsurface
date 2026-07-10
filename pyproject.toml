@@ -29,8 +29,7 @@ dependencies = [
   # mesh.split() raises "no graph engines available".
   "scipy>=1.10",
   # Topology-constrained decimation and self-intersection counting.
-  "pymeshlab>=2023.12",
-  "meshlib>=3.0",
+  "meshlib==3.1.3.297",
   "rich>=14,<15",
   "typer>=0.21,<0.22",
 ]
