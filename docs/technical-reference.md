@@ -1,8 +1,9 @@
 # Technical reference
 
 This document describes implementation details and limitations that are useful
-for auditing results or contributing to `dicom-surface`. The project
-[README](../README.md) is the user guide.
+for auditing results or contributing to `dicom-surface`. Start with the project
+[README](../README.md) for installation and first use, or the [user
+guide](user-guide.md) for presets, profiles, input limitations, and safety.
 
 ## Processing pipeline
 
