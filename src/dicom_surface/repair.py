@@ -1,10 +1,8 @@
-"""Optional topological repair, for meshes that are not watertight.
+"""Topological repair for meshes that are not watertight.
 
 The extraction pipeline in this package normally produces a closed, manifold
 surface directly. This module exists for meshes from elsewhere, or for the rare
 case where aggressive morphology leaves a defect.
-
-Requires the ``repair`` extra: ``pip install 'dicom-surface[repair]'``.
 
 MeshLib was chosen over the alternatives after a head-to-head comparison on a
 7.5M-triangle CT bone surface: it was the only library that returned a watertight,
@@ -13,25 +11,11 @@ MeshLib was chosen over the alternatives after a head-to-head comparison on a
 
 from __future__ import annotations
 
-
-class RepairUnavailable(RuntimeError):
-    pass
-
-
-def _require():
-    try:
-        import meshlib.mrmeshpy as mm
-    except ImportError as exc:  # pragma: no cover - exercised only without the extra
-        raise RepairUnavailable(
-            "mesh repair needs MeshLib: pip install 'dicom-surface[repair]'"
-        ) from exc
-    return mm
+import meshlib.mrmeshpy as mm
 
 
 def repair(in_path: str, out_path: str, log=None) -> dict:
     """Weld, fix multiple edges, collapse degeneracies, fill every hole."""
-    mm = _require()
-
     def say(msg):
         if log:
             log(msg)

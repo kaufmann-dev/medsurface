@@ -65,7 +65,7 @@ def build_mask(image: sitk.Image, preset: Preset, threshold: float,
     #
     # The thickening ball is the one kernel here whose radius is rounded *up*, so
     # it is the one kernel an anisotropic grid can turn into an ellipsoid -- a
-    # 5 mm slice pitch would grow the skull 5 mm along z to guarantee 1.2 mm walls.
+    # 5 mm slice pitch would grow the skull 5 mm along z while targeting 1.2 mm features.
     # Move to a grid that can hold the ball first. The floored kernels above do not
     # need this: rounding down only ever makes them gentler than requested.
     if profile.min_feature_mm > 0:
@@ -109,9 +109,9 @@ def grid_warnings(mask: sitk.Image, profile: PrintProfile,
     coarsest = max(native_spacing)
     if feature < coarsest:
         out.append(
-            "the scan's coarsest voxel is %.2f mm, so bone thinner than that never appears "
-            "in the data. The %.2f mm minimum feature size is a property of the printed "
-            "model, not a measurement of the anatomy." % (coarsest, feature)
+            "the scan's coarsest voxel is %.2f mm, so anatomy below that pitch is not "
+            "reliably resolved along every direction. The %.2f mm feature target changes "
+            "the mask; it is not an anatomical thickness measurement." % (coarsest, feature)
         )
     return out
 
@@ -136,8 +136,7 @@ def thin_material_warning(mask: sitk.Image, profile: PrintProfile) -> list[str]:
     thin = segment.thin_fraction(mask, profile.min_feature_mm)
     if thin <= 0.05:
         return []
-    # Thickening should have left none. If any survives, the guarantee did not hold
-    # -- typically because the grid could not express the requested radius.
+    # Residual thin material means the mask-space target was not fully reached.
     return ["%.1f%% of the material is still thinner than the %.1f mm minimum feature "
             "size of the '%s' profile and may not print"
             % (100 * thin, profile.min_feature_mm, profile.name)]

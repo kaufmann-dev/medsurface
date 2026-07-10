@@ -205,7 +205,7 @@ def printability_grid_mm(image: sitk.Image, min_feature_mm: float,
     voxels. For the *floored* kernels that is harmless -- they simply come out a
     little smaller than asked. For the ceiled dilation radius it is not: on a
     0.9 x 0.9 x 5.0 mm survey CT, a 0.6 mm radius rounds to one voxel per axis and
-    the "ball" acquires a 5 mm semi-axis. Thickening a skull to guarantee 1.2 mm
+    the "ball" acquires a 5 mm semi-axis. Thickening a skull toward 1.2 mm
     walls would then move its outer surface 5 mm along z. The scanner's slice
     pitch must not become the printer's tolerance.
 
@@ -345,14 +345,11 @@ def _thick_core(image: sitk.Image, min_feature_mm: float) -> sitk.Image:
 
 
 def thicken(image: sitk.Image, min_feature_mm: float, log=None) -> sitk.Image:
-    """Bring every wall up to ``min_feature_mm`` thick, and leave the rest alone.
+    """Selectively grow material toward a mask-space feature target.
 
-    One number, because there is only one thing to say: *no wall thinner than T*.
-    The probe that finds thin material and the growth that fixes it are the same
-    ball of radius ``T/2`` -- material a ball of diameter T cannot reach is grown
-    by ``T/2`` until it can. Two independent numbers (a "minimum feature size" and
-    a separate "thickening distance") can only ever disagree about what is being
-    promised.
+    The probe and growth primitive use the same ball of radius ``T/2``. This is
+    not a final-mesh guarantee: discrete support, surface finishing, and a known
+    core-reach blind spot can leave or move localized thin features.
 
     Dilating everything is simpler, and it is what a naive print-prep step does,
     but it is dimensionally wrong. A cranial vault is 5 mm of solid bone and needs
@@ -374,12 +371,13 @@ def thicken(image: sitk.Image, min_feature_mm: float, log=None) -> sitk.Image:
         out  = mask | dilate(thin, r)
 
     A solid block is entirely within its own core's reach and does not move. A
-    one-voxel sheet has no core at all and is grown everywhere, to thickness T.
+    separated one-voxel sheet has no core and is grown. A short fin or bridge
+    within the thick core's dilation reach can be excluded from ``thin``.
 
     The ball must be a *ball*. On an anisotropic grid the voxel radii round
     independently and the structuring element becomes an ellipsoid -- on a 5 mm
     slice pitch, one 10 mm tall. Call this on a grid from
-    :func:`printability_grid_mm`, which guarantees a representable ball.
+    :func:`printability_grid_mm`, which chooses a more suitable isotropic grid.
     """
     if min_feature_mm <= 0:
         return image
@@ -486,11 +484,9 @@ def resample_isotropic(binary: sitk.Image, mm: float, log=None,
                        pad_border: bool = True) -> sitk.Image:
     """Resample the mask onto an isotropic grid as a fractional-occupancy field.
 
-    This is the topology-safe way to control triangle count. Decimating the mesh
-    afterwards tears thin structures -- a skull's orbital walls are one voxel
-    thick, and edge collapses weld their opposite faces together, silently
-    opening a closed surface. Resampling cannot do that, because marching cubes
-    always returns a manifold surface.
+    Resampling can reduce triangle count but can erase thin structures and change
+    components, cavities, tunnels, or genus. Padding usually enables a closed
+    isosurface, but output validity is measured rather than assumed.
 
     A signed distance field would be the textbook choice here, but ITK's Maurer
     transform quantises distance to voxel centres, placing its zero level half a

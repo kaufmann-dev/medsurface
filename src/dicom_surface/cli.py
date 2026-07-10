@@ -352,11 +352,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 def cmd_repair(args: argparse.Namespace) -> int:
     from . import repair as repair_mod
 
-    try:
-        stats = repair_mod.repair(args.mesh, args.output, log=_log if not args.quiet else None)
-    except repair_mod.RepairUnavailable as exc:
-        print("error: %s" % exc, file=sys.stderr)
-        return 2
+    stats = repair_mod.repair(args.mesh, args.output, log=_log if not args.quiet else None)
 
     print("wrote %s" % args.output)
     report = validate_mod.validate(args.output, self_intersections=args.self_intersections)
@@ -394,7 +390,7 @@ def cmd_presets(_args: argparse.Namespace) -> int:
         if p == presets_mod.ANATOMICAL:
             print("    (the default: no geometric changes at all)")
         else:
-            print("    closing>=%.1fmm  islands>=%.0fmm3  no wall thinner than %.1fmm"
+            print("    closing>=%.1fmm  islands>=%.0fmm3  mask feature target=%.1fmm"
                   % (p.closing_mm, p.min_island_mm3, p.min_feature_mm))
         print()
     return 0
@@ -429,9 +425,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="prepare the mesh for a printer (default: %(default)s, which "
                          "makes no printability changes)")
     pc.add_argument("--min-feature-mm", type=float,
-                    help="the printer's minimum feature size: no wall thinner than this. "
-                         "Only material below it is grown, so bone that is already thick "
-                         "enough keeps its dimensions.")
+                    help="mask-space feature target for selective growth; this is not a "
+                         "final-mesh thickness guarantee")
     pc.add_argument("--all-islands", action="store_true",
                     help="keep every labelmap island, not just the largest")
     pc.add_argument("--all-components", action="store_true",
@@ -476,7 +471,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="prepare the fused mesh for a printer (default: %(default)s). "
                          "Registration always runs on unmodified anatomy.")
     pm.add_argument("--min-feature-mm", type=float,
-                    help="the printer's minimum feature size: no wall thinner than this")
+                    help="mask-space feature target for selective growth")
     pm.add_argument("--grid-mm", type=float, default=DEFAULT_GRID_MM,
                     help="isotropic voxel size of the fused grid (default %(default)s). "
                          "Finer keeps thinner bone, at cubic memory cost.")
@@ -499,7 +494,7 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--self-intersections", action="store_true")
     pv.set_defaults(func=cmd_validate)
 
-    pr = sub.add_parser("repair", help="make a non-watertight mesh watertight (needs 'repair' extra)")
+    pr = sub.add_parser("repair", help="make a non-watertight mesh watertight")
     pr.add_argument("mesh")
     pr.add_argument("-o", "--output", required=True)
     pr.add_argument("--json", action="store_true")
