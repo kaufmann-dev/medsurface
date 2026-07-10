@@ -46,6 +46,13 @@ data. The loader is for classic image series, not arbitrary DICOM objects.
 `FrameOfReferenceUID` is not read. `merge` always registers the moving scan and
 does not assume cross-series coordinates already align.
 
+When `ConvolutionKernel` is present, a case-insensitive warning heuristic uses
+the literal pattern
+`(?:^|[^0-9])(?:[BHUY]r?|BONE|EDGE|LUNG)\s*_?([6-9]\d)`. It recognizes names
+such as `Hr68` and `B70f`; vendor naming outside that pattern can be missed or
+misclassified. A match only produces a sharp-kernel warning. It does not change
+series ranking, thresholds, or processing.
+
 ## Morphology and physical units
 
 Median, opening, and closing parameters are kernel extents in millimetres. Each
@@ -133,8 +140,10 @@ After registration passes, the current print merge profiles each scan before
 resampling fractional occupancies and taking their maximum. Only dilation
 distributes over union; the whole profile does not. Controlled offset-plate
 cases showed over-thickening, while fusion-first closing could incorrectly seal
-an inter-scan gap. The production order remains unchanged pending a separate
-geometry task.
+an inter-scan gap. Fusion-first morphology could also operate on a fused grid of
+up to 800 million voxels instead of separate printability grids capped at 300
+million voxels each, increasing peak memory. The production order remains
+unchanged.
 
 ## Patient comparison
 
