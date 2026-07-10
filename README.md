@@ -49,14 +49,14 @@ dicom-surface convert ~/scans/head-ct --series 6 -o skull.stl
 
 ## Commands
 
-| command | purpose |
-|---|---|
-| `dicom-surface list DICOM_DIR` | Show every image series and the recommended default |
-| `dicom-surface presets` | Show tissue presets and print profiles |
-| `dicom-surface convert DICOM_DIR -o MODEL.stl` | Convert one series to a surface mesh |
-| `dicom-surface merge DIR_A DIR_B -o MODEL.stl` | Register and combine two scans of the same person |
-| `dicom-surface validate MODEL.stl` | Report mesh quality without changing the file |
-| `dicom-surface repair MODEL.stl -o FIXED.stl` | Repair an open or non-manifold mesh |
+| command                                        | purpose                                             |
+| ---------------------------------------------- | --------------------------------------------------- |
+| `dicom-surface list DICOM_DIR`                 | Show every image series and the recommended default |
+| `dicom-surface presets`                        | Show tissue presets and print profiles              |
+| `dicom-surface convert DICOM_DIR -o MODEL.stl` | Convert one series to a surface mesh                |
+| `dicom-surface merge DIR_A DIR_B -o MODEL.stl` | Register and combine two scans of the same person   |
+| `dicom-surface validate MODEL.stl`             | Report mesh quality without changing the file       |
+| `dicom-surface repair MODEL.stl -o FIXED.stl`  | Repair an open or non-manifold mesh                 |
 
 Run `dicom-surface COMMAND --help` for every option.
 
@@ -66,15 +66,18 @@ coordinate-system label.
 
 ## Choose what to extract
 
-The default `bone` preset extracts cortical bone from CT at 300 HU.
+| preset        | use it for                                                | threshold | median | closing | island floor | smoothing iterations (initial + final) | triangle target |
+| ------------- | --------------------------------------------------------- | --------: | -----: | ------: | -----------: | -------------------------------------: | --------------: |
+| `bone`        | General CT bone models                                    |    300 HU | 1.0 mm |  2.4 mm |       50 mm³ |                                20 + 25 |         600,000 |
+| `bone-detail` | Maximum detail and measurement; produces very large files |    300 HU | 0.6 mm |  1.2 mm |       20 mm³ |                                  8 + 0 |             off |
+| `teeth`       | Enamel and dense dentin; keeps separate teeth             |  1,200 HU | 0.6 mm |  0.6 mm |        5 mm³ |                                 10 + 0 |         300,000 |
+| `skin`        | Outer skin surface from CT                                |   −300 HU | 1.4 mm |  3.2 mm |      500 mm³ |                                25 + 10 |         400,000 |
+| `auto`        | MR, CBCT, ultrasound, or other uncalibrated intensities   |      Otsu | 1.0 mm |  2.0 mm |       50 mm³ |                                20 + 25 |         600,000 |
 
-| preset | use it for |
-|---|---|
-| `bone` | General CT bone models |
-| `bone-detail` | Maximum detail and measurement workflows; produces large files |
-| `teeth` | Enamel and dense dentin |
-| `skin` | Outer skin surface from CT |
-| `auto` | MR, CBCT, or other data without calibrated CT intensities |
+Numeric thresholds are inclusive lower bounds; `auto` calculates an Otsu
+threshold from the scan. The triangle target is a requested face-count budget,
+not a guaranteed exact count. `teeth` keeps every surviving mask island and
+surface component; the other presets keep only the largest.
 
 Examples:
 
@@ -96,11 +99,14 @@ dicom-surface convert scans/ --print-profile resin -o resin-skull.stl
 dicom-surface convert scans/ --print-profile fdm -o fdm-skull.stl
 ```
 
-| profile | intended use | feature target |
-|---|---|---:|
-| `anatomical` | No print-profile changes; default | none |
-| `resin` | Fine-detail resin printing | 0.6 mm |
-| `fdm` | FDM/nozzle printing | 1.2 mm |
+| profile      | intended use                      | closing floor | island floor | feature target |
+| ------------ | --------------------------------- | ------------: | -----------: | -------------: |
+| `anatomical` | No print-profile changes; default |     unchanged |    unchanged |           none |
+| `resin`      | Fine-detail resin printing        |        3.2 mm |      100 mm³ |         0.6 mm |
+| `fdm`        | FDM/nozzle printing               |        4.8 mm |      200 mm³ |         1.2 mm |
+
+Closing and island floors raise the preset values only when the profile value
+is larger.
 
 These are mask-processing targets, not guarantees about final STL thickness or
 the manufactured part. Inspect the result in your slicer. Short thin structures
