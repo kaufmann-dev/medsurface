@@ -89,9 +89,6 @@ not trigger the global 5% thin-material warning. No final-mesh thickness
 measurement exists, so profile values are targets rather than exact STL or
 manufacturing guarantees.
 
-The complete investigation and possible future approaches are in the
-[print-profile report](reports/print-profile-investigation.md).
-
 ## Surface extraction and finishing
 
 The isosurface implementation is `vtkFlyingEdges3D` at 0.5. Padding normally
@@ -99,8 +96,8 @@ closes the volume boundary, but Flying Edges can emit degenerate triangles and
 mesh validity is measured rather than assumed.
 
 Smoothing uses `vtkWindowedSincPolyDataFilter`. The preset controls initial
-iterations, passband, and post-decimation iterations. Smoothing moves surfaces;
-historical development measurements are not general error bounds.
+iterations, passband, and post-decimation iterations. Smoothing moves surfaces,
+and the project does not provide a general deviation bound.
 
 Decimation uses PyMeshLab's
 `meshing_decimation_quadric_edge_collapse` with boundary, normal, and topology
@@ -171,11 +168,11 @@ faces are not removed and inconsistent winding is reported rather than repaired.
 STL, PLY, and OBJ are loaded by Trimesh. VTP is loaded and triangulated with VTK,
 then passed through the same Trimesh metric pipeline. VTP self-intersection checks
 pass the in-memory triangle mesh to PyMeshLab because PyMeshLab cannot load VTP
-directly. See the [VTP bug record](bugs/vtp-validation.md).
+directly.
 
-`repair` is always installed and uses MeshLib to unite vertices within 1e-6,
-fix multiple edges, decimate degeneracies, and fill holes. It writes a new file;
-validation never mutates the input it measures.
+`repair` uses MeshLib to unite vertices within 1e-6, fix multiple edges,
+decimate degeneracies, and fill holes. It writes a new file; validation never
+mutates the input it measures.
 
 ## Dependencies and development
 
@@ -188,20 +185,13 @@ uv sync --locked
 uv run pytest -q
 ```
 
-Hatchling remains the PEP 517 build backend. uv orchestrates the workflow; a
-build-backend migration is unnecessary.
+Hatchling is the PEP 517 build backend, and uv orchestrates the workflow.
 
 On Ubuntu, PyMeshLab requires `libgl1` to import and `libopengl0` for the meshing
 plugin used by decimation. CI installs both before `uv sync --locked`.
 
-## Evidence
+## Verification
 
 Synthetic regression tests cover series grouping, geometry, segmentation,
 surface extraction, registration, validation, VTP, repair, and print-profile
-primitives. Patient-development measurements preserved in comments and reports
-are scoped observations because the source scans and original benchmark scripts
-are not distributed.
-
-See [reports/print-profile-investigation.md](reports/print-profile-investigation.md)
-for the 2026 documentation audit, test environment, claim matrix, and focused
-print-profile experiments.
+primitives. Run them with `uv run pytest -q`.

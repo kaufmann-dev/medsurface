@@ -28,12 +28,8 @@ dependencies = [
   # trimesh needs a graph backend for connected-component splitting; without it
   # mesh.split() raises "no graph engines available".
   "scipy>=1.10",
-  # The only decimator that preserves topology on thin-walled anatomy. Both of
-  # VTK's tear a closed skull surface open. Also provides self-intersection
-  # counting for `validate`.
+  # Topology-constrained decimation and self-intersection counting.
   "pymeshlab>=2023.12",
-  # `repair` is a first-class command, so its implementation must always be
-  # present in a normal installation.
   "meshlib>=3.0",
 ]
 

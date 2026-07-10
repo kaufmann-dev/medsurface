@@ -270,19 +270,18 @@ def test_the_voxel_budget_coarsens_the_grid_rather_than_exhausting_memory():
 
 def test_an_unmeetable_budget_terminates_instead_of_coarsening_forever():
     """`_grid_voxels` never drops below 27 -- a border of background on each face --
-    so a budget below that used to spin the coarsening loop forever."""
+    so a smaller budget must terminate at a finite grid size."""
     image = _box(spacing=(0.5, 0.5, 0.5))
     mm = segment.printability_grid_mm(image, 1.2, budget=1)
     assert mm >= max(n * s for n, s in zip(image.GetSize(), image.GetSpacing()))
 
 
-def test_a_coarse_slice_pitch_no_longer_inflates_the_model_along_z():
-    """The bug this grid exists for.
+def test_printability_grid_bounds_growth_along_a_coarse_slice_axis():
+    """The printability grid bounds growth along a coarse slice axis.
 
     On a 0.9 x 0.9 x 5.0 mm survey CT, `dilation_radius_voxels(0.6)` rounds to one
-    voxel per axis, so the thickening "ball" acquires a 5 mm semi-axis. Guaranteeing
-    1.2 mm walls used to move the model's surface 5 mm along z. The scanner's slice
-    pitch must not become the printer's tolerance.
+    voxel per axis, so native-grid thickening gives the structuring element a 5 mm
+    semi-axis. The scanner's slice pitch must not become the printer's tolerance.
     """
     survey = (0.9, 0.9, 5.0)
     arr = np.zeros((14, 60, 60), dtype=np.uint8)
@@ -349,9 +348,8 @@ def test_fdm_is_coarser_than_resin():
     assert fdm.min_feature_mm > resin.min_feature_mm
 
 
-def test_a_flag_bent_profile_stops_claiming_to_be_the_original():
-    """`--min-feature-mm 1.0` with the default profile used to log "anatomical: No
-    printability changes" while thickening by 1 mm."""
+def test_explicit_feature_target_has_a_distinct_profile_description():
+    """An explicit feature target must not be described as an anatomical no-op."""
     import argparse
 
     from dicom_surface.cli import _resolve_print_profile

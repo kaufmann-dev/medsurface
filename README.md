@@ -7,9 +7,6 @@
 Turn a DICOM image series into an STL, PLY, OBJ, or VTP surface mesh from the
 command line.
 
-> `dicom-surface` is not a medical device. Do not use its output for diagnosis,
-> surgical planning, or any clinical decision.
-
 ## Install
 
 Python 3.10 or newer and [uv](https://docs.astral.sh/uv/) are required.
@@ -17,8 +14,6 @@ Python 3.10 or newer and [uv](https://docs.astral.sh/uv/) are required.
 ```sh
 uv tool install dicom-surface
 ```
-
-The `repair` command and MeshLib are included in the normal installation.
 
 On Debian or Ubuntu, PyMeshLab also needs these system libraries:
 
@@ -176,9 +171,3 @@ uv run pytest -q
 
 The project pins uv 0.11.28, uses Python 3.12 for local development, and tests
 Python 3.10–3.13 in CI.
-
-## More documentation
-
-- [Technical reference](docs/technical-reference.md)
-- [Documentation index](docs/README.md)
-- [Print-profile investigation](docs/reports/print-profile-investigation.md)

@@ -1,4 +1,4 @@
-"""The repair command is part of every installation."""
+"""Mesh-repair behavior."""
 
 import trimesh
 
