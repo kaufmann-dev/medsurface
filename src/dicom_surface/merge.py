@@ -37,15 +37,12 @@ import pydicom
 import SimpleITK as sitk
 
 from . import pipeline, registration, segment, surface, volume as volume_mod
+from .defaults import DEFAULT_MERGE_GRID_MM
 from .presets import ANATOMICAL, Preset, PrintProfile
 from .registration import RegistrationResult
 from .series import Series
 
 Logger = Callable[[str], None]
-
-#: Voxel size of the fused grid. Fine enough to keep sub-millimetre bone, coarse
-#: enough that a whole head fits in memory: a head at 0.4 mm is ~170M voxels.
-DEFAULT_GRID_MM = 0.4
 
 #: The surface stage is the preset's, unchanged. It is tempting to smooth a fused
 #: grid more lightly, on the theory that an isotropic grid has no slice terracing
@@ -297,7 +294,7 @@ def merge(
     preset: Preset,
     output_path: str,
     threshold: float | None = None,
-    grid_mm: float = DEFAULT_GRID_MM,
+    grid_mm: float = DEFAULT_MERGE_GRID_MM,
     smooth_iters: int | None = None,
     passband: float | None = None,
     target_faces: int | None = None,

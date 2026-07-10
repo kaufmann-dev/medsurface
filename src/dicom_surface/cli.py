@@ -5,12 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-
 from dataclasses import replace
 
-from . import presets as presets_mod
-from .merge import DEFAULT_GRID_MM
-from . import pipeline, series as series_mod, validate as validate_mod
+from . import defaults, presets as presets_mod
 from .presets import PRESETS, PRINT_PROFILES
 
 
@@ -65,6 +62,8 @@ def _resolve_print_profile(args: argparse.Namespace):
 
 # --------------------------------------------------------------------- list
 def cmd_list(args: argparse.Namespace) -> int:
+    from . import series as series_mod
+
     found = series_mod.discover(args.dicom_dir)
     if not found:
         print("no DICOM instances found under %s" % args.dicom_dir, file=sys.stderr)
@@ -141,6 +140,8 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 # ------------------------------------------------------------------ convert
 def cmd_convert(args: argparse.Namespace) -> int:
+    from . import pipeline, series as series_mod, validate as validate_mod
+
     log = _quiet if args.quiet else _log
 
     found = series_mod.discover(args.dicom_dir)
@@ -241,7 +242,8 @@ def cmd_convert(args: argparse.Namespace) -> int:
 
 # -------------------------------------------------------------------- merge
 def cmd_merge(args: argparse.Namespace) -> int:
-    from . import merge as merge_mod
+    from . import merge as merge_mod, pipeline, series as series_mod
+    from . import validate as validate_mod
 
     log = _quiet if args.quiet else _log
 
@@ -344,6 +346,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
 
 # ----------------------------------------------------------------- validate
 def cmd_validate(args: argparse.Namespace) -> int:
+    from . import validate as validate_mod
+
     try:
         report = validate_mod.validate(args.mesh)
     except (OSError, RuntimeError, ValueError) as exc:
@@ -359,7 +363,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 # -------------------------------------------------------------------- repair
 def cmd_repair(args: argparse.Namespace) -> int:
-    from . import repair as repair_mod
+    from . import repair as repair_mod, validate as validate_mod
 
     log = _log if not args.quiet and not args.json else None
     try:
@@ -421,7 +425,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="dicom-surface",
         description="Turn a DICOM series into a watertight 3D surface mesh.",
     )
-    sub = p.add_subparsers(dest="command", required=True)
+    sub = p.add_subparsers(dest="command")
 
     pl = sub.add_parser("list", help="show every series in a DICOM directory")
     pl.add_argument("dicom_dir")
@@ -490,7 +494,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "Registration always runs on unmodified anatomy.")
     pm.add_argument("--min-feature-mm", type=float,
                     help="mask-space feature target for selective growth")
-    pm.add_argument("--grid-mm", type=float, default=DEFAULT_GRID_MM,
+    pm.add_argument("--grid-mm", type=float, default=defaults.DEFAULT_MERGE_GRID_MM,
                     help="isotropic voxel size of the fused grid (default %(default)s). "
                          "Finer keeps thinner bone, at cubic memory cost.")
     pm.add_argument("--smooth-iters", type=int, help="default: from the preset")
@@ -521,7 +525,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not hasattr(args, "func"):
+        parser.print_help()
+        return 0
     return args.func(args)
 
 
