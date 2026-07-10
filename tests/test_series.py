@@ -162,7 +162,7 @@ def test_sharp_kernel_patterns(kernel, sharp):
     assert bool(series_mod.SHARP_KERNEL_RE.search(kernel)) is sharp
 
 
-def test_select_by_number_uid_and_description(tmp_path):
+def test_select_by_row_id_uid_and_description(tmp_path):
     d = str(tmp_path)
     for i in range(6):
         _write_slice(os.path.join(d, "x%d" % i), i, description="GS nativ 1,00 ax")
@@ -170,8 +170,10 @@ def test_select_by_number_uid_and_description(tmp_path):
     uid = found[0].uid
 
     assert series_mod.select(found, uid).uid == uid
-    assert series_mod.select(found, "6").uid == uid
+    assert series_mod.select(found, "1").uid == uid
     assert series_mod.select(found, "nativ").uid == uid
+    with pytest.raises(ValueError, match="no series matches"):
+        series_mod.select(found, "6")
     with pytest.raises(ValueError, match="no series matches"):
         series_mod.select(found, "does-not-exist")
 
@@ -189,14 +191,16 @@ def test_uid_holding_two_orientations_is_split(tmp_path):
                      series_number=1021, orientation=AXIAL)
 
     found = series_mod.discover(d)
-    assert len(found) == 2, [s.ident for s in found]
+    assert len(found) == 2, [(s.id, s.uid, s.part) for s in found]
     assert {s.n_parts for s in found} == {2}
 
     big = [s for s in found if s.n_slices == 20][0]
     small = [s for s in found if s.n_slices == 1][0]
 
-    assert big.ident == "1021.1"     # largest stack is part 1
-    assert small.ident == "1021.2"
+    assert big.id == 1
+    assert small.id == 2
+    assert big.part == 1     # largest stack is orientation part 1
+    assert small.part == 2
     assert big.plane == "axial"
     assert big.slice_spacing == pytest.approx(2.0)
     assert big.usable
@@ -287,7 +291,7 @@ def test_rank_sends_degenerate_voxel_volume_last(tmp_path):
     assert series_mod.rank([broken, bad])[0] is bad
 
 
-def test_select_by_dotted_ident(tmp_path):
+def test_select_each_orientation_split_by_row_id(tmp_path):
     d = str(tmp_path)
     uid = generate_uid()
     _write_slice(os.path.join(d, "aaa_odd"), 0, series_uid=uid, series_number=1021,
@@ -297,15 +301,15 @@ def test_select_by_dotted_ident(tmp_path):
                      series_number=1021, orientation=AXIAL)
     found = series_mod.discover(d)
 
-    assert series_mod.select(found, "1021.1").n_slices == 20
-    assert series_mod.select(found, "1021.2").n_slices == 1
-    # the bare number resolves because only one group is usable
-    assert series_mod.select(found, "1021").n_slices == 20
-    # ... and so does the UID
-    assert series_mod.select(found, uid).n_slices == 20
+    assert series_mod.select(found, "1").n_slices == 20
+    assert series_mod.select(found, "2").n_slices == 1
+    with pytest.raises(ValueError, match="no series matches"):
+        series_mod.select(found, "1021.1")
+    with pytest.raises(ValueError, match=r"ambiguous \(2 rows: 1, 2\)"):
+        series_mod.select(found, uid)
 
 
-def test_ambiguous_uid_lists_the_idents(tmp_path):
+def test_ambiguous_uid_lists_the_row_ids(tmp_path):
     d = str(tmp_path)
     uid = generate_uid()
     for i in range(8):
@@ -316,8 +320,32 @@ def test_ambiguous_uid_lists_the_idents(tmp_path):
                      series_number=7, orientation=SAGITTAL)
     found = series_mod.discover(d)
     assert len(found) == 2 and all(s.usable for s in found)
-    with pytest.raises(ValueError, match=r"7\.1, 7\.2"):
+    with pytest.raises(ValueError, match=r"2 rows: 1, 2"):
+        series_mod.select(found, uid)
+
+
+def test_duplicate_dicom_series_numbers_get_unique_row_ids(tmp_path):
+    d = str(tmp_path)
+    left, right = generate_uid(), generate_uid()
+    for i in range(6):
+        _write_slice(os.path.join(d, "left%d" % i), i, series_uid=left,
+                     description="shared left", series_number=7)
+        _write_slice(os.path.join(d, "right%d" % i), i, series_uid=right,
+                     description="shared right", series_number=7)
+
+    found = series_mod.discover(d)
+
+    assert [series.id for series in found] == [1, 2]
+    assert [series.series_number for series in found] == [7, 7]
+    assert {series_mod.select(found, "1").uid, series_mod.select(found, "2").uid} == {
+        left,
+        right,
+    }
+    with pytest.raises(ValueError, match="no series matches"):
         series_mod.select(found, "7")
+    with pytest.raises(ValueError, match=r"description 'shared' is ambiguous \(2 rows: 1, 2\)"):
+        series_mod.select(found, "shared")
+    assert series_mod.select(found, left).uid == left
 
 
 def test_orientation_jitter_does_not_split_a_series(tmp_path):

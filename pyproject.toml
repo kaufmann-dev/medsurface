@@ -31,13 +31,15 @@ dependencies = [
   # Topology-constrained decimation and self-intersection counting.
   "pymeshlab>=2023.12",
   "meshlib>=3.0",
+  "rich>=14,<15",
+  "typer>=0.21,<0.22",
 ]
 
 [dependency-groups]
 dev = ["pytest>=7.0"]
 
 [project.scripts]
-dicom-surface = "dicom_surface.cli:main"
+dicom-surface = "dicom_surface.cli:app"
 
 [project.urls]
 Homepage = "https://github.com/kaufmann-dev/dicom-surface"

@@ -1,223 +1,538 @@
-"""Command line interface."""
+"""Typer command line interface with Rich human-readable output."""
 
 from __future__ import annotations
 
-import argparse
 import json
-import sys
+import warnings
+from collections import Counter
 from dataclasses import replace
+from enum import Enum
+from pathlib import Path
+from typing import Any, Callable
+
+import typer
+from rich import box
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
 from . import defaults, presets as presets_mod
 from .presets import PRESETS, PRINT_PROFILES
 
 
-def _log(msg: str) -> None:
-    print(msg, flush=True)
+class PresetChoice(str, Enum):
+    """Tissue presets accepted by ``--preset``."""
+
+    AUTO = "auto"
+    BONE = "bone"
+    BONE_DETAIL = "bone-detail"
+    SKIN = "skin"
+    TEETH = "teeth"
 
 
-def _quiet(msg: str) -> None:  # noqa: ARG001
+class PrintProfileChoice(str, Enum):
+    """Print profiles accepted by ``--print-profile``."""
+
+    ANATOMICAL = "anatomical"
+    FDM = "fdm"
+    RESIN = "resin"
+
+
+stdout_console = Console(highlight=False, markup=False)
+stderr_console = Console(stderr=True, highlight=False, markup=False)
+
+app = typer.Typer(
+    add_completion=False,
+    help="Turn a DICOM series into a watertight 3D surface mesh.",
+    invoke_without_command=True,
+    no_args_is_help=False,
+    pretty_exceptions_show_locals=False,
+    rich_markup_mode="rich",
+)
+
+
+@app.callback()
+def root(ctx: typer.Context) -> None:
+    """Turn a DICOM series into a watertight 3D surface mesh."""
+    if ctx.invoked_subcommand is None:
+        stdout_console.print(ctx.get_help())
+
+
+def _styled_message(prefix: str, prefix_style: str, message: object) -> Text:
+    text = Text()
+    text.append(prefix, style=prefix_style)
+    text.append(str(message))
+    return text
+
+
+def _log(message: str) -> None:
+    stdout_console.print(Text(str(message), style="cyan"))
+
+
+def _quiet(message: str) -> None:  # noqa: ARG001
     pass
 
 
-def _warn(msg: str) -> None:
-    print("warning: %s" % msg, file=sys.stderr, flush=True)
+def _success(message: object) -> None:
+    stdout_console.print(_styled_message("Success: ", "bold green", message))
 
 
-def _quality_status(report: dict | None) -> int:
+def _warn(message: object) -> None:
+    stderr_console.print(_styled_message("Warning: ", "bold yellow", message))
+
+
+def _error(message: object) -> None:
+    stderr_console.print(_styled_message("Error: ", "bold red", message))
+
+
+def _quality_status(report: dict[str, Any] | None) -> int:
     """Shared exit status for every command that validates a mesh."""
     return 0 if report is None or report["valid"] else 1
 
 
-def _warn_if_invalid(report: dict, subject: str) -> None:
+def _exit_for_quality(report: dict[str, Any] | None) -> None:
+    status = _quality_status(report)
+    if status:
+        raise typer.Exit(status)
+
+
+def _warn_if_invalid(report: dict[str, Any], subject: str) -> None:
     if not report["valid"]:
         _warn("%s failed validation: %s" % (subject, "; ".join(report["problems"])))
 
 
-def _resolve_print_profile(args: argparse.Namespace):
-    """Compose the print profile, letting explicit flags beat it.
+def _resolve_print_profile(
+    print_profile: PrintProfileChoice,
+    min_feature_mm: float | None,
+    closing_mm: float | None,
+    min_island_mm3: float | None,
+):
+    """Compose a print profile, letting explicit flags beat its values.
 
     ``build_mask`` takes ``max(preset.closing_mm, profile.closing_mm)``, so an
-    explicit ``--closing-mm`` has to be written to *both* sides or the profile
+    explicit ``--closing-mm`` has to be written to both sides or the profile
     would silently win whenever it asks for more.
     """
-    profile = presets_mod.get_print_profile(args.print_profile)
-
+    profile = presets_mod.get_print_profile(print_profile.value)
     changes = {}
-    if getattr(args, "min_feature_mm", None) is not None:
-        changes["min_feature_mm"] = args.min_feature_mm
-    if args.closing_mm is not None:
-        changes["closing_mm"] = args.closing_mm
-    if args.min_island_mm3 is not None:
-        changes["min_island_mm3"] = args.min_island_mm3
+    if min_feature_mm is not None:
+        changes["min_feature_mm"] = min_feature_mm
+    if closing_mm is not None:
+        changes["closing_mm"] = closing_mm
+    if min_island_mm3 is not None:
+        changes["min_island_mm3"] = min_island_mm3
     if not changes:
         return profile
 
-    # Explicit flags produce a derived profile with matching display metadata.
-    # `anatomical` in particular must stop describing itself as "no changes" the
-    # moment --min-feature-mm is given.
-    return replace(profile, name="%s+flags" % profile.name,
-                   description="based on '%s', overridden on the command line" % profile.name,
-                   **changes)
-
-
-# --------------------------------------------------------------------- list
-def cmd_list(args: argparse.Namespace) -> int:
-    from . import series as series_mod
-
-    found = series_mod.discover(args.dicom_dir)
-    if not found:
-        print("no DICOM instances found under %s" % args.dicom_dir, file=sys.stderr)
-        return 1
-
-    if args.json:
-        payload = [
-            {
-                "ident": s.ident,
-                "uid": s.uid,
-                "part": s.part,
-                "n_parts": s.n_parts,
-                "series_number": s.series_number,
-                "modality": s.modality,
-                "description": s.description,
-                "slices": s.n_slices,
-                "rows": s.rows,
-                "columns": s.columns,
-                "pixel_spacing": list(s.pixel_spacing) if s.pixel_spacing else None,
-                "slice_spacing": s.slice_spacing,
-                "plane": s.plane,
-                "kernel": s.kernel,
-                "sharp_kernel": s.sharp_kernel,
-                "spacing_uniform": s.spacing_uniform,
-                "spacing_spread_mm": s.spacing_spread_mm,
-                "localizer": s.is_localizer,
-                "usable": s.usable,
-                "unusable_reason": s.unusable_reason,
-            }
-            for s in found
-        ]
-        print(json.dumps(payload, indent=2))
-        return 0
-
-    best = series_mod.rank([s for s in found if s.usable])
-    recommended = best[0] if best else None
-
-    header = ("#", "MOD", "DESCRIPTION", "SLICES", "VOXEL mm", "PLANE", "NOTES")
-    print("%-6s %-4s %-32s %6s %-22s %-9s %s" % header)
-    print("-" * 114)
-    split_seen = False
-    for s in found:
-        voxel = "-"
-        if s.pixel_spacing and s.slice_spacing:
-            voxel = "%.3f x %.3f x %.3f" % (s.pixel_spacing[0], s.pixel_spacing[1], s.slice_spacing)
-        notes = []
-        if recommended is not None and s is recommended:
-            notes.append("<- default")
-        reason = s.unusable_reason
-        if reason:
-            notes.append(reason)
-        if s.n_parts > 1:
-            split_seen = True
-            notes.append("orientation %d of %d in this UID" % (s.part, s.n_parts))
-        if s.sharp_kernel:
-            notes.append("sharp kernel %s" % s.kernel)
-        print("%-6s %-4s %-32s %6d %-22s %-9s %s" % (
-            s.ident,
-            s.modality,
-            (s.description or "(none)")[:32],
-            s.n_slices,
-            voxel,
-            s.plane if s.usable else "-",
-            ", ".join(notes),
-        ))
-    print()
-    if split_seen:
-        print("Some SeriesInstanceUIDs hold more than one orientation and were split;")
-        print("select those with their dotted ident, e.g. --series 1021.1")
-        print()
-    print("Convert the default with:  dicom-surface convert %s -o out.stl" % args.dicom_dir)
-    return 0
-
-
-# ------------------------------------------------------------------ convert
-def cmd_convert(args: argparse.Namespace) -> int:
-    from . import pipeline, series as series_mod, validate as validate_mod
-
-    log = _quiet if args.quiet else _log
-
-    found = series_mod.discover(args.dicom_dir)
-    if not found:
-        print("no DICOM instances found under %s" % args.dicom_dir, file=sys.stderr)
-        return 1
-
-    try:
-        chosen = series_mod.select(found, args.series)
-    except ValueError as exc:
-        print("error: %s" % exc, file=sys.stderr)
-        return 2
-
-    log("series %s  %s  (%d slices)" % (chosen.ident, chosen.label(), chosen.n_slices))
-
-    preset = presets_mod.get(args.preset)
-    preset = presets_mod.override(
-        preset,
-        median_mm=args.median_mm,
-        closing_mm=args.closing_mm,
-        opening_mm=args.opening_mm,
-        min_island_mm3=args.min_island_mm3,
-        resample_mm=args.resample_mm,
-        smooth_iters=args.smooth_iters,
-        passband=args.passband,
-        target_faces=args.target_faces,
-        post_smooth_iters=args.post_smooth_iters,
-        keep_largest_island=False if args.all_islands else None,
-        keep_largest_component=False if args.all_components else None,
+    return replace(
+        profile,
+        name="%s+flags" % profile.name,
+        description="based on '%s', overridden on the command line" % profile.name,
+        **changes,
     )
 
-    threshold = None
-    if args.threshold is not None:
-        if args.threshold == "auto":
-            preset = presets_mod.override(preset, threshold="auto")
+
+def _parse_threshold(value: str | None) -> tuple[float | None, bool]:
+    """Return an explicit numeric threshold and whether Otsu was requested."""
+    if value is None:
+        return None, False
+    if value == "auto":
+        return None, True
+    try:
+        return float(value), False
+    except ValueError:
+        _error("--threshold must be a number or 'auto'")
+        raise typer.Exit(2) from None
+
+
+def _emit_discovery_warnings(captured: list[warnings.WarningMessage]) -> None:
+    messages = [str(item.message) for item in captured]
+    counts = Counter(messages)
+    emitted: set[str] = set()
+    for message in messages:
+        if message in emitted:
+            continue
+        emitted.add(message)
+        count = counts[message]
+        suffix = " (repeated %d times)" % count if count > 1 else ""
+        _warn(message + suffix)
+
+
+def _discover(root: Path):
+    """Discover series while presenting pydicom warnings as concise CLI warnings."""
+    from . import series as series_mod
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        found = series_mod.discover(str(root))
+    _emit_discovery_warnings(captured)
+    return found
+
+
+def _plain(value: object, style: str | None = None) -> Text:
+    return Text(str(value), style=style)
+
+
+def _series_status(series: Any, recommended: Any | None) -> str:
+    notes: list[str] = []
+    if series is recommended:
+        notes.append("default")
+    if series.unusable_reason:
+        notes.append(series.unusable_reason)
+    else:
+        notes.append("usable")
+    if series.n_parts > 1:
+        notes.append("orientation %d of %d in this UID" % (series.part, series.n_parts))
+    if series.sharp_kernel:
+        notes.append("sharp kernel %s" % series.kernel)
+    return "; ".join(notes)
+
+
+def _series_table(found: list[Any], recommended: Any | None) -> Table:
+    """Build the responsive table used by ``list`` and rendering tests."""
+    table = Table(
+        box=box.SIMPLE_HEAVY,
+        expand=True,
+        padding=(0, 1),
+        row_styles=("", "dim"),
+    )
+    table.add_column("ID", justify="right", no_wrap=True)
+    table.add_column("DICOM #", justify="right", no_wrap=True)
+    table.add_column("Modality", no_wrap=True)
+    table.add_column("Description", ratio=2, overflow="fold")
+    table.add_column("Slices", justify="right", no_wrap=True)
+    table.add_column("Voxel (mm)", no_wrap=True)
+    table.add_column("Plane", no_wrap=True)
+    table.add_column("Status", ratio=3, overflow="fold")
+
+    for series in found:
+        voxel = "-"
+        if series.pixel_spacing and series.slice_spacing:
+            voxel = "%.3g × %.3g × %.3g" % (
+                series.pixel_spacing[0],
+                series.pixel_spacing[1],
+                series.slice_spacing,
+            )
+        row_style = "bold cyan" if series is recommended else None
+        table.add_row(
+            _plain(series.id),
+            _plain(series.series_number if series.series_number is not None else "-"),
+            _plain(series.modality),
+            _plain(series.description or "(none)"),
+            _plain(series.n_slices),
+            _plain(voxel),
+            _plain(series.plane if series.usable else "-"),
+            _plain(_series_status(series, recommended)),
+            style=row_style,
+        )
+    return table
+
+
+def _quality_table(report: dict[str, Any]) -> Table:
+    """Build the shared two-column mesh-quality table."""
+    table = Table(title="Mesh quality", box=box.SIMPLE_HEAVY, show_header=False)
+    table.add_column("Metric", style="bold", no_wrap=True)
+    table.add_column("Value")
+
+    valid = bool(report["valid"])
+    table.add_row(_plain("Status"), _plain("valid" if valid else "invalid", "green" if valid else "red"))
+    table.add_row(_plain("Triangles"), _plain(f"{report['triangles']:,}"))
+    table.add_row(_plain("Vertices"), _plain(f"{report['vertices']:,}"))
+    table.add_row(_plain("Components"), _plain(f"{report['components']:,}"))
+    table.add_row(_plain("Watertight"), _plain("yes" if report["watertight"] else "no"))
+    table.add_row(
+        _plain("Winding consistent"),
+        _plain("yes" if report["winding_consistent"] else "no"),
+    )
+    table.add_row(_plain("Boundary edges"), _plain(f"{report['boundary_edges']:,}"))
+    table.add_row(
+        _plain("Non-manifold edges"),
+        _plain(f"{report['nonmanifold_edge_uses']:,}"),
+    )
+    table.add_row(_plain("Degenerate faces"), _plain(f"{report['degenerate_faces']:,}"))
+    if "genus" in report:
+        table.add_row(_plain("Genus"), _plain(report["genus"]))
+    if report.get("volume_mm3") is None:
+        table.add_row(_plain("Volume"), _plain("undefined (mesh is not closed)"))
+    else:
+        table.add_row(_plain("Volume"), _plain("%.0f mm³" % report["volume_mm3"]))
+    intersections = report.get("self_intersecting_faces")
+    if intersections is not None:
+        value = f"{intersections:,}" if isinstance(intersections, int) else str(intersections)
+        table.add_row(_plain("Self-intersections"), _plain(value))
+    extents = report["bbox_extents_mm"]
+    table.add_row(
+        _plain("Bounding box"),
+        _plain("%.1f × %.1f × %.1f mm" % (extents[0], extents[1], extents[2])),
+    )
+    table.add_row(_plain("Size"), _plain("%.1f MB" % (report["bytes"] / 1048576.0)))
+    return table
+
+
+def _print_quality(report: dict[str, Any], console: Console = stdout_console) -> None:
+    console.print(_quality_table(report))
+    problems = report["problems"]
+    lines = [_plain("• " + problem) for problem in problems] if problems else [_plain("None", "green")]
+    console.print(
+        Panel(
+            Group(*lines),
+            title=_plain("Problems"),
+            border_style="red" if problems else "green",
+        )
+    )
+
+
+def _write_json_file(path: Path, payload: object) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+
+
+@app.command("list")
+def list_series(
+    dicom_dir: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Directory tree containing DICOM instances.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Write one plain JSON array to stdout.",
+    ),
+) -> None:
+    """Show every series in a DICOM directory."""
+    found = _discover(dicom_dir)
+    if not found:
+        _error("no DICOM instances found under %s" % dicom_dir)
+        raise typer.Exit(1)
+
+    if json_output:
+        payload = [
+            {
+                "id": series.id,
+                "uid": series.uid,
+                "part": series.part,
+                "n_parts": series.n_parts,
+                "series_number": series.series_number,
+                "modality": series.modality,
+                "description": series.description,
+                "slices": series.n_slices,
+                "rows": series.rows,
+                "columns": series.columns,
+                "pixel_spacing": list(series.pixel_spacing) if series.pixel_spacing else None,
+                "slice_spacing": series.slice_spacing,
+                "plane": series.plane,
+                "kernel": series.kernel,
+                "sharp_kernel": series.sharp_kernel,
+                "spacing_uniform": series.spacing_uniform,
+                "spacing_spread_mm": series.spacing_spread_mm,
+                "localizer": series.is_localizer,
+                "usable": series.usable,
+                "unusable_reason": series.unusable_reason,
+            }
+            for series in found
+        ]
+        print(json.dumps(payload, indent=2))
+        return
+
+    from . import series as series_mod
+
+    ranked = series_mod.rank([series for series in found if series.usable])
+    recommended = ranked[0] if ranked else None
+    stdout_console.print(_series_table(found, recommended))
+    stdout_console.print(
+        Text(
+            "Row IDs are local to this discovery result; run list again after directory contents change.",
+            style="dim",
+        )
+    )
+    command = Text("Convert the default with:  ")
+    command.append("dicom-surface convert %s -o out.stl" % dicom_dir, style="bold")
+    stdout_console.print(command)
+
+
+@app.command()
+def presets() -> None:
+    """Describe the built-in tissue presets and print profiles."""
+    tissue = Table(title="Tissue presets (--preset)", box=box.SIMPLE_HEAVY, expand=True)
+    tissue.add_column("Preset", no_wrap=True)
+    tissue.add_column("Modality", no_wrap=True)
+    tissue.add_column("Threshold", no_wrap=True)
+    tissue.add_column("Processing", ratio=2, overflow="fold")
+    tissue.add_column("Description", ratio=2, overflow="fold")
+    for name in sorted(PRESETS):
+        preset = PRESETS[name]
+        modality = ", ".join(preset.modalities) if preset.modalities else "any"
+        threshold = preset.threshold if isinstance(preset.threshold, str) else "%g" % preset.threshold
+        triangles = f"{preset.target_faces:,}" if preset.target_faces else "all"
+        processing = "median %.1f mm; closing %.1f mm; smooth %d; triangles %s" % (
+            preset.median_mm,
+            preset.closing_mm,
+            preset.smooth_iters,
+            triangles,
+        )
+        tissue.add_row(
+            _plain(name),
+            _plain(modality),
+            _plain(threshold),
+            _plain(processing),
+            _plain(preset.description),
+        )
+    stdout_console.print(tissue)
+
+    profiles = Table(title="Print profiles (--print-profile)", box=box.SIMPLE_HEAVY, expand=True)
+    profiles.add_column("Profile", no_wrap=True)
+    profiles.add_column("Morphology", ratio=2, overflow="fold")
+    profiles.add_column("Description", ratio=2, overflow="fold")
+    for name in sorted(PRINT_PROFILES):
+        profile = PRINT_PROFILES[name]
+        if profile == presets_mod.ANATOMICAL:
+            morphology = "no geometric changes"
         else:
-            try:
-                threshold = float(args.threshold)
-            except ValueError:
-                print("error: --threshold must be a number or 'auto'", file=sys.stderr)
-                return 2
+            morphology = "closing ≥ %.1f mm; islands ≥ %.0f mm³; feature %.1f mm" % (
+                profile.closing_mm,
+                profile.min_island_mm3,
+                profile.min_feature_mm,
+            )
+        profiles.add_row(_plain(name), _plain(morphology), _plain(profile.description))
+    stdout_console.print(profiles)
+
+
+@app.command()
+def convert(
+    dicom_dir: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Directory tree containing the source DICOM series.",
+    ),
+    output: Path = typer.Option(..., "-o", "--output", help="Output .stl/.ply/.obj/.vtp file."),
+    series: str | None = typer.Option(
+        None,
+        "--series",
+        help="Displayed row ID, complete SeriesInstanceUID, or description substring.",
+    ),
+    preset: PresetChoice = typer.Option(PresetChoice.BONE, "--preset"),
+    threshold: str | None = typer.Option(
+        None,
+        "--threshold",
+        help="Intensity (HU for CT) or 'auto' for Otsu.",
+    ),
+    median_mm: float | None = typer.Option(None, "--median-mm", help="Despeckle kernel extent, mm."),
+    closing_mm: float | None = typer.Option(None, "--closing-mm", help="Pore-sealing kernel extent, mm."),
+    opening_mm: float | None = typer.Option(None, "--opening-mm", help="Bridge-breaking kernel extent, mm."),
+    min_island_mm3: float | None = typer.Option(None, "--min-island-mm3", help="Drop blobs smaller than this."),
+    print_profile: PrintProfileChoice = typer.Option(
+        PrintProfileChoice.ANATOMICAL,
+        "--print-profile",
+        help="Prepare the mesh for a printer; anatomical makes no printability changes.",
+    ),
+    min_feature_mm: float | None = typer.Option(
+        None,
+        "--min-feature-mm",
+        help="Mask-space feature target; not a final-mesh thickness guarantee.",
+    ),
+    all_islands: bool = typer.Option(False, "--all-islands", help="Keep every labelmap island."),
+    all_components: bool = typer.Option(False, "--all-components", help="Keep every surface shell."),
+    resample_mm: float | None = typer.Option(
+        None,
+        "--resample-mm",
+        help="Isotropic surface-grid voxel size in mm (0 = native).",
+    ),
+    smooth_iters: int | None = typer.Option(None, "--smooth-iters", help="Windowed-sinc iterations."),
+    passband: float | None = typer.Option(None, "--passband", help="Windowed-sinc passband."),
+    target_faces: int | None = typer.Option(None, "--target-faces", help="Triangle target (0 = off)."),
+    post_smooth_iters: int | None = typer.Option(None, "--post-smooth-iters", help="Smoothing after decimation."),
+    no_cap: bool = typer.Option(False, "--no-cap", help="Do not close anatomy at the field-of-view boundary."),
+    no_validate: bool = typer.Option(False, "--no-validate", help="Skip mesh-quality validation."),
+    json_file: Path | None = typer.Option(None, "--json", help="Write results and provenance to this JSON file."),
+    quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
+) -> None:
+    """Extract a surface mesh from a DICOM series."""
+    threshold_value, auto_threshold = _parse_threshold(threshold)
+    log: Callable[[str], None] = _quiet if quiet else _log
+
+    found = _discover(dicom_dir)
+    if not found:
+        _error("no DICOM instances found under %s" % dicom_dir)
+        raise typer.Exit(1)
+
+    from . import series as series_mod
+
+    try:
+        chosen = series_mod.select(found, series)
+    except ValueError as exc:
+        _error(exc)
+        raise typer.Exit(2) from None
+
+    log("series ID %d  %s  (%d slices)" % (chosen.id, chosen.label(), chosen.n_slices))
+    resolved_preset = presets_mod.get(preset.value)
+    resolved_preset = presets_mod.override(
+        resolved_preset,
+        median_mm=median_mm,
+        closing_mm=closing_mm,
+        opening_mm=opening_mm,
+        min_island_mm3=min_island_mm3,
+        resample_mm=resample_mm,
+        smooth_iters=smooth_iters,
+        passband=passband,
+        target_faces=target_faces,
+        post_smooth_iters=post_smooth_iters,
+        keep_largest_island=False if all_islands else None,
+        keep_largest_component=False if all_components else None,
+    )
+    if auto_threshold:
+        resolved_preset = presets_mod.override(resolved_preset, threshold="auto")
+
+    from . import pipeline, validate as validate_mod
 
     try:
         result = pipeline.convert(
             series=chosen,
-            preset=preset,
-            output_path=args.output,
-            threshold=threshold,
-            cap_field_of_view=not args.no_cap,
-            print_profile=_resolve_print_profile(args),
+            preset=resolved_preset,
+            output_path=str(output),
+            threshold=threshold_value,
+            cap_field_of_view=not no_cap,
+            print_profile=_resolve_print_profile(
+                print_profile,
+                min_feature_mm,
+                closing_mm,
+                min_island_mm3,
+            ),
             log=log,
         )
     except pipeline.ModalityMismatch as exc:
-        print("error: %s" % exc, file=sys.stderr)
-        return 2
+        _error(exc)
+        raise typer.Exit(2) from None
     except ValueError as exc:
-        print("error: %s" % exc, file=sys.stderr)
-        return 1
+        _error(exc)
+        raise typer.Exit(1) from None
 
-    for w in result.warnings:
-        _warn(w)
+    for message in result.warnings:
+        _warn(message)
 
-    log("")
-    log("wrote %s" % result.output_path)
-    log("  triangles %s   vertices %s   %.1fs"
-        % (f"{result.triangles:,}", f"{result.vertices:,}", result.seconds))
+    if not quiet:
+        _success("wrote %s" % result.output_path)
+        _log(
+            "triangles %s   vertices %s   %.1fs"
+            % (f"{result.triangles:,}", f"{result.vertices:,}", result.seconds)
+        )
 
     report = None
-    if not args.no_validate:
+    if not no_validate:
         report = validate_mod.validate(result.output_path)
-        log("")
-        log("quality:")
-        log(validate_mod.summarise(report))
+        if not quiet:
+            _print_quality(report)
         _warn_if_invalid(report, "output")
 
-    if args.json:
+    if json_file is not None:
         payload = {
             "result": {
                 "output": result.output_path,
@@ -233,93 +548,153 @@ def cmd_convert(args: argparse.Namespace) -> int:
             "provenance": result.provenance,
             "quality": report,
         }
-        with open(args.json, "w") as fh:
-            json.dump(payload, fh, indent=2)
-        log("wrote %s" % args.json)
+        _write_json_file(json_file, payload)
+        if not quiet:
+            _success("wrote %s" % json_file)
 
-    return _quality_status(report)
+    _exit_for_quality(report)
 
 
-# -------------------------------------------------------------------- merge
-def cmd_merge(args: argparse.Namespace) -> int:
-    from . import merge as merge_mod, pipeline, series as series_mod
-    from . import validate as validate_mod
+@app.command()
+def merge(
+    dicom_dir_a: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Fixed scan; defines the output coordinate frame.",
+    ),
+    output: Path = typer.Option(..., "-o", "--output", help="Output .stl/.ply/.obj/.vtp file."),
+    dicom_dir_b: Path | None = typer.Argument(
+        None,
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="Moving scan; omit to choose two series from the first directory.",
+    ),
+    series_a: str | None = typer.Option(
+        None,
+        "--series-a",
+        help="Fixed scan row ID, complete UID, or description substring.",
+    ),
+    series_b: str | None = typer.Option(
+        None,
+        "--series-b",
+        help="Moving scan row ID, complete UID, or description substring.",
+    ),
+    preset: PresetChoice = typer.Option(PresetChoice.BONE, "--preset"),
+    threshold: str | None = typer.Option(
+        None,
+        "--threshold",
+        help="Intensity (HU for CT) or 'auto'; applies to both scans.",
+    ),
+    median_mm: float | None = typer.Option(None, "--median-mm"),
+    closing_mm: float | None = typer.Option(None, "--closing-mm"),
+    min_island_mm3: float | None = typer.Option(None, "--min-island-mm3"),
+    print_profile: PrintProfileChoice = typer.Option(
+        PrintProfileChoice.ANATOMICAL,
+        "--print-profile",
+        help="Prepare the fused mesh for a printer; registration uses unmodified anatomy.",
+    ),
+    min_feature_mm: float | None = typer.Option(None, "--min-feature-mm"),
+    grid_mm: float = typer.Option(
+        defaults.DEFAULT_MERGE_GRID_MM,
+        "--grid-mm",
+        help="Isotropic fused-grid voxel size in mm.",
+    ),
+    smooth_iters: int | None = typer.Option(None, "--smooth-iters", help="Default: from the preset."),
+    passband: float | None = typer.Option(None, "--passband", help="Default: from the preset."),
+    target_faces: int | None = typer.Option(None, "--target-faces", help="Default: from the preset."),
+    post_smooth_iters: int | None = typer.Option(None, "--post-smooth-iters", help="Default: from the preset."),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Override patient, modality, and registration gates.",
+    ),
+    no_validate: bool = typer.Option(False, "--no-validate", help="Skip mesh-quality validation."),
+    json_file: Path | None = typer.Option(None, "--json", help="Write results and provenance to this JSON file."),
+    quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
+) -> None:
+    """Register two scans of the same anatomy and fuse their surfaces."""
+    threshold_value, auto_threshold = _parse_threshold(threshold)
+    log: Callable[[str], None] = _quiet if quiet else _log
+    directory_b = dicom_dir_b or dicom_dir_a
 
-    log = _quiet if args.quiet else _log
-
-    dir_b = args.dicom_dir_b or args.dicom_dir_a
-    found_a = series_mod.discover(args.dicom_dir_a)
-    found_b = found_a if dir_b == args.dicom_dir_a else series_mod.discover(dir_b)
+    found_a = _discover(dicom_dir_a)
+    found_b = found_a if directory_b == dicom_dir_a else _discover(directory_b)
     if not found_a or not found_b:
-        print("no DICOM instances found", file=sys.stderr)
-        return 1
+        _error("no DICOM instances found")
+        raise typer.Exit(1)
+
+    from . import series as series_mod
 
     try:
-        chosen_a = series_mod.select(found_a, args.series_a)
-        chosen_b = series_mod.select(found_b, args.series_b)
+        chosen_a = series_mod.select(found_a, series_a)
+        chosen_b = series_mod.select(found_b, series_b)
     except ValueError as exc:
-        print("error: %s" % exc, file=sys.stderr)
-        return 2
+        _error(exc)
+        raise typer.Exit(2) from None
 
-    preset = presets_mod.get(args.preset)
-    preset = presets_mod.override(
-        preset,
-        median_mm=args.median_mm,
-        closing_mm=args.closing_mm,
-        min_island_mm3=args.min_island_mm3,
+    resolved_preset = presets_mod.get(preset.value)
+    resolved_preset = presets_mod.override(
+        resolved_preset,
+        median_mm=median_mm,
+        closing_mm=closing_mm,
+        min_island_mm3=min_island_mm3,
     )
+    if auto_threshold:
+        resolved_preset = presets_mod.override(resolved_preset, threshold="auto")
 
-    threshold = None
-    if args.threshold is not None:
-        if args.threshold == "auto":
-            preset = presets_mod.override(preset, threshold="auto")
-        else:
-            try:
-                threshold = float(args.threshold)
-            except ValueError:
-                print("error: --threshold must be a number or 'auto'", file=sys.stderr)
-                return 2
+    from . import merge as merge_mod, pipeline, validate as validate_mod
 
     try:
         result = merge_mod.merge(
             series_a=chosen_a,
             series_b=chosen_b,
-            preset=preset,
-            output_path=args.output,
-            threshold=threshold,
-            grid_mm=args.grid_mm,
-            smooth_iters=args.smooth_iters,
-            passband=args.passband,
-            target_faces=args.target_faces,
-            post_smooth_iters=args.post_smooth_iters,
-            print_profile=_resolve_print_profile(args),
-            force=args.force,
+            preset=resolved_preset,
+            output_path=str(output),
+            threshold=threshold_value,
+            grid_mm=grid_mm,
+            smooth_iters=smooth_iters,
+            passband=passband,
+            target_faces=target_faces,
+            post_smooth_iters=post_smooth_iters,
+            print_profile=_resolve_print_profile(
+                print_profile,
+                min_feature_mm,
+                closing_mm,
+                min_island_mm3,
+            ),
+            force=force,
             log=log,
         )
     except merge_mod.MergeError as exc:
-        print("error: %s" % exc, file=sys.stderr)
-        return 3
+        _error(exc)
+        raise typer.Exit(3) from None
     except (pipeline.ModalityMismatch, ValueError) as exc:
-        print("error: %s" % exc, file=sys.stderr)
-        return 2
+        _error(exc)
+        raise typer.Exit(2) from None
 
-    for w in result.warnings:
-        _warn(w)
+    for message in result.warnings:
+        _warn(message)
 
-    log("")
-    log("wrote %s" % result.output_path)
-    log("  triangles %s   vertices %s   %.1fs"
-        % (f"{result.triangles:,}", f"{result.vertices:,}", result.seconds))
+    if not quiet:
+        _success("wrote %s" % result.output_path)
+        _log(
+            "triangles %s   vertices %s   %.1fs"
+            % (f"{result.triangles:,}", f"{result.vertices:,}", result.seconds)
+        )
 
     report = None
-    if not args.no_validate:
+    if not no_validate:
         report = validate_mod.validate(result.output_path)
-        log("")
-        log("quality:")
-        log(validate_mod.summarise(report))
+        if not quiet:
+            _print_quality(report)
         _warn_if_invalid(report, "fused output")
 
-    if args.json:
+    if json_file is not None:
         payload = {
             "result": {
                 "output": result.output_path,
@@ -337,201 +712,75 @@ def cmd_merge(args: argparse.Namespace) -> int:
             "provenance": result.provenance,
             "quality": report,
         }
-        with open(args.json, "w") as fh:
-            json.dump(payload, fh, indent=2)
-        log("wrote %s" % args.json)
+        _write_json_file(json_file, payload)
+        if not quiet:
+            _success("wrote %s" % json_file)
 
-    return _quality_status(report)
+    _exit_for_quality(report)
 
 
-# ----------------------------------------------------------------- validate
-def cmd_validate(args: argparse.Namespace) -> int:
+@app.command()
+def validate(
+    mesh: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Mesh file to inspect.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Write one plain JSON object to stdout."),
+) -> None:
+    """Report mesh quality without changing the file."""
     from . import validate as validate_mod
 
     try:
-        report = validate_mod.validate(args.mesh)
+        report = validate_mod.validate(str(mesh))
     except (OSError, RuntimeError, ValueError) as exc:
-        print("error: cannot validate %s: %s" % (args.mesh, exc), file=sys.stderr)
-        return 1
-    if args.json:
+        _error("cannot validate %s: %s" % (mesh, exc))
+        raise typer.Exit(1) from None
+    if json_output:
         print(json.dumps(report, indent=2))
     else:
-        print(args.mesh)
-        print(validate_mod.summarise(report))
-    return _quality_status(report)
+        stdout_console.print(_plain(mesh, "bold"))
+        _print_quality(report)
+    _exit_for_quality(report)
 
 
-# -------------------------------------------------------------------- repair
-def cmd_repair(args: argparse.Namespace) -> int:
+@app.command()
+def repair(
+    mesh: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Mesh file to repair.",
+    ),
+    output: Path = typer.Option(..., "-o", "--output", help="New repaired mesh file."),
+    json_output: bool = typer.Option(False, "--json", help="Write one plain JSON object to stdout."),
+    quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
+) -> None:
+    """Make a non-watertight mesh watertight."""
     from . import repair as repair_mod, validate as validate_mod
 
-    log = _log if not args.quiet and not args.json else None
+    log = _log if not quiet and not json_output else None
     try:
-        stats = repair_mod.repair(args.mesh, args.output, log=log)
+        stats = repair_mod.repair(str(mesh), str(output), log=log)
     except (OSError, RuntimeError, ValueError) as exc:
-        print("error: cannot repair %s: %s" % (args.mesh, exc), file=sys.stderr)
-        return 1
+        _error("cannot repair %s: %s" % (mesh, exc))
+        raise typer.Exit(1) from None
 
     try:
-        report = validate_mod.validate(args.output)
+        report = validate_mod.validate(str(output))
     except (OSError, RuntimeError, ValueError) as exc:
-        print("error: repaired mesh could not be validated: %s" % exc, file=sys.stderr)
-        return 1
+        _error("repaired mesh could not be validated: %s" % exc)
+        raise typer.Exit(1) from None
 
-    if args.json:
-        print(json.dumps({"output": args.output, "repair": stats, "quality": report}, indent=2))
-    else:
-        print("wrote %s" % args.output)
-        print(validate_mod.summarise(report))
-    return _quality_status(report)
-
-
-# ---------------------------------------------------------------- presets
-def cmd_presets(_args: argparse.Namespace) -> int:
-    print("PRESETS  --  what tissue to extract, and how finely  (--preset)")
-    print()
-    for name in sorted(PRESETS):
-        p = PRESETS[name]
-        modality = ", ".join(p.modalities) if p.modalities else "any"
-        thr = p.threshold if isinstance(p.threshold, str) else "%g" % p.threshold
-        print("  %-12s  [%s]" % (name, modality))
-        print("    %s" % p.description)
-        triangles = f"{p.target_faces:,}" if p.target_faces else "all"
-        print("    threshold=%s  median=%.1fmm  closing=%.1fmm  smooth=%d  triangles=%s"
-              % (thr, p.median_mm, p.closing_mm, p.smooth_iters, triangles))
-        print()
-
-    print("PRINT PROFILES  --  what a printer needs  (--print-profile)")
-    print()
-    print("  Composes with any preset: raises its closing and island filter, and")
-    print("  brings thin walls up to the printer's minimum feature size. Triangle")
-    print("  budget stays with --preset / --target-faces.")
-    print()
-    for name in sorted(PRINT_PROFILES):
-        p = PRINT_PROFILES[name]
-        print("  %-12s" % name)
-        print("    %s" % p.description)
-        if p == presets_mod.ANATOMICAL:
-            print("    (the default: no geometric changes at all)")
-        else:
-            print("    closing>=%.1fmm  islands>=%.0fmm3  mask feature target=%.1fmm"
-                  % (p.closing_mm, p.min_island_mm3, p.min_feature_mm))
-        print()
-    return 0
-
-
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        prog="dicom-surface",
-        description="Turn a DICOM series into a watertight 3D surface mesh.",
-    )
-    sub = p.add_subparsers(dest="command")
-
-    pl = sub.add_parser("list", help="show every series in a DICOM directory")
-    pl.add_argument("dicom_dir")
-    pl.add_argument("--json", action="store_true", help="machine-readable output")
-    pl.set_defaults(func=cmd_list)
-
-    pp = sub.add_parser("presets", help="describe the built-in presets")
-    pp.set_defaults(func=cmd_presets)
-
-    pc = sub.add_parser("convert", help="extract a surface mesh from a DICOM series")
-    pc.add_argument("dicom_dir")
-    pc.add_argument("-o", "--output", required=True, help="output .stl/.ply/.obj/.vtp")
-    pc.add_argument("--series", help="series number, UID, or description substring")
-    pc.add_argument("--preset", default="bone", choices=sorted(PRESETS))
-    pc.add_argument("--threshold", help="intensity (HU for CT) or 'auto' for Otsu")
-    pc.add_argument("--median-mm", type=float, help="despeckle kernel extent, mm")
-    pc.add_argument("--closing-mm", type=float, help="pore-sealing kernel extent, mm")
-    pc.add_argument("--opening-mm", type=float, help="bridge-breaking kernel extent, mm")
-    pc.add_argument("--min-island-mm3", type=float, help="drop blobs smaller than this")
-    pc.add_argument("--print-profile", default="anatomical", choices=sorted(PRINT_PROFILES),
-                    help="prepare the mesh for a printer (default: %(default)s, which "
-                         "makes no printability changes)")
-    pc.add_argument("--min-feature-mm", type=float,
-                    help="mask-space feature target for selective growth; this is not a "
-                         "final-mesh thickness guarantee")
-    pc.add_argument("--all-islands", action="store_true",
-                    help="keep every labelmap island, not just the largest")
-    pc.add_argument("--all-components", action="store_true",
-                    help="keep every surface shell, including internal cavities")
-    pc.add_argument("--resample-mm", type=float,
-                    help="isotropic voxel size for the surface grid, mm (0 = native). "
-                         "Fast and low-memory, but ERASES structures thinner than the "
-                         "target voxel; prefer --target-faces")
-    pc.add_argument("--smooth-iters", type=int, help="windowed-sinc iterations")
-    pc.add_argument("--passband", type=float, help="windowed-sinc passband (lower = smoother)")
-    pc.add_argument("--target-faces", type=int,
-                    help="decimate to this many triangles, preserving topology (0 = off)")
-    pc.add_argument("--post-smooth-iters", type=int, help="smoothing after decimation")
-    pc.add_argument("--no-cap", action="store_true",
-                    help="do not close the surface where anatomy leaves the field of view")
-    pc.add_argument("--no-validate", action="store_true")
-    pc.add_argument("--json", help="write results and provenance to this JSON file")
-    pc.add_argument("-q", "--quiet", action="store_true")
-    pc.set_defaults(func=cmd_convert)
-
-    pm = sub.add_parser(
-        "merge",
-        help="fuse two scans of the same anatomy into one surface",
-        description="Rigidly register two DICOM series of the same anatomy and fuse "
-                    "them into a single watertight surface. Refuses pairs that do "
-                    "not pass registration quality gates.",
-    )
-    pm.add_argument("dicom_dir_a", help="fixed scan (defines the output coordinate frame)")
-    pm.add_argument("dicom_dir_b", nargs="?",
-                    help="moving scan; omit to fuse two series from the first directory")
-    pm.add_argument("-o", "--output", required=True)
-    pm.add_argument("--series-a", help="series ident in the fixed scan")
-    pm.add_argument("--series-b", help="series ident in the moving scan")
-    pm.add_argument("--preset", default="bone", choices=sorted(PRESETS))
-    pm.add_argument("--threshold", help="intensity (HU for CT) or 'auto'; applies to both")
-    pm.add_argument("--median-mm", type=float)
-    pm.add_argument("--closing-mm", type=float)
-    pm.add_argument("--min-island-mm3", type=float)
-    pm.add_argument("--print-profile", default="anatomical", choices=sorted(PRINT_PROFILES),
-                    help="prepare the fused mesh for a printer (default: %(default)s). "
-                         "Registration always runs on unmodified anatomy.")
-    pm.add_argument("--min-feature-mm", type=float,
-                    help="mask-space feature target for selective growth")
-    pm.add_argument("--grid-mm", type=float, default=defaults.DEFAULT_MERGE_GRID_MM,
-                    help="isotropic voxel size of the fused grid (default %(default)s). "
-                         "Finer keeps thinner bone, at cubic memory cost.")
-    pm.add_argument("--smooth-iters", type=int, help="default: from the preset")
-    pm.add_argument("--passband", type=float, help="default: from the preset")
-    pm.add_argument("--target-faces", type=int, help="default: from the preset")
-    pm.add_argument("--post-smooth-iters", type=int, help="default: from the preset")
-    pm.add_argument("--force", action="store_true",
-                    help="fuse even if the scans look like different patients or the "
-                         "registration fails its quality gates")
-    pm.add_argument("--no-validate", action="store_true")
-    pm.add_argument("--json", help="write results and provenance to this JSON file")
-    pm.add_argument("-q", "--quiet", action="store_true")
-    pm.set_defaults(func=cmd_merge)
-
-    pv = sub.add_parser("validate", help="report mesh quality")
-    pv.add_argument("mesh")
-    pv.add_argument("--json", action="store_true", help="write one JSON object to stdout")
-    pv.set_defaults(func=cmd_validate)
-
-    pr = sub.add_parser("repair", help="make a non-watertight mesh watertight")
-    pr.add_argument("mesh")
-    pr.add_argument("-o", "--output", required=True)
-    pr.add_argument("--json", action="store_true", help="write one JSON object to stdout")
-    pr.add_argument("-q", "--quiet", action="store_true")
-    pr.set_defaults(func=cmd_repair)
-
-    return p
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if not hasattr(args, "func"):
-        parser.print_help()
-        return 0
-    return args.func(args)
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    if json_output:
+        print(json.dumps({"output": str(output), "repair": stats, "quality": report}, indent=2))
+    elif not quiet:
+        _success("wrote %s" % output)
+        _print_quality(report)
+    _warn_if_invalid(report, "repaired output")
+    _exit_for_quality(report)

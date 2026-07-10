@@ -350,17 +350,15 @@ def test_fdm_is_coarser_than_resin():
 
 def test_explicit_feature_target_has_a_distinct_profile_description():
     """An explicit feature target must not be described as an anatomical no-op."""
-    import argparse
+    from dicom_surface.cli import PrintProfileChoice, _resolve_print_profile
 
-    from dicom_surface.cli import _resolve_print_profile
+    assert _resolve_print_profile(
+        PrintProfileChoice.ANATOMICAL, None, None, None
+    ) == ANATOMICAL
 
-    plain = argparse.Namespace(print_profile="anatomical", min_feature_mm=None,
-                               closing_mm=None, min_island_mm3=None)
-    assert _resolve_print_profile(plain) == ANATOMICAL
-
-    bent = argparse.Namespace(print_profile="anatomical", min_feature_mm=1.0,
-                              closing_mm=None, min_island_mm3=None)
-    profile = _resolve_print_profile(bent)
+    profile = _resolve_print_profile(
+        PrintProfileChoice.ANATOMICAL, 1.0, None, None
+    )
     assert profile != ANATOMICAL
     assert profile.min_feature_mm == 1.0
     assert "No printability changes" not in profile.description

@@ -1,6 +1,7 @@
 # User guide
 
-[Project README](../README.md) · [Choosing a preset](#choosing-a-preset) ·
+[Project README](../README.md) · [Choosing a series](#choosing-a-series) ·
+[Choosing a preset](#choosing-a-preset) ·
 [Print profiles](#print-profiles) · [Input limitations](#input-requirements-and-limitations) ·
 [Safety and privacy](#safety-and-privacy) · [Technical reference](technical-reference.md)
 
@@ -26,6 +27,37 @@ surface.
   identifying even when demographic fields have been removed.
 - Treat source data, logs, provenance, and output meshes according to the same
   privacy rules as other personal health data.
+
+## Choosing a series
+
+Run `dicom-surface list DICOM_DIR` immediately before conversion. Discovery is
+recursive and can list series from mixed patient or study directory trees. The
+`default` status marks the series automatic selection would use.
+
+Every displayed stack has a unique, 1-based `ID`. Pass that ID, a complete
+SeriesInstanceUID, or a case-insensitive description substring to `--series`:
+
+```sh
+dicom-surface convert scans/ --series 1 -o model.stl
+dicom-surface convert scans/ --series 1.2.840.113619.2.55.3.604688435.123 -o model.stl
+dicom-surface convert scans/ --series "thin axial" -o model.stl
+```
+
+For `merge`, the same syntax applies independently to `--series-a` and
+`--series-b`. A row ID refers only to the corresponding directory's latest
+discovery result.
+
+`DICOM #` is the source file's `SeriesNumber`. Several unrelated UIDs can carry
+the same number, so it is shown as metadata but is not a selector. A UID can
+also contain more than one orientation; discovery gives each orientation its
+own row ID and records its orientation-part number. A complete UID or
+description that matches several rows is rejected as ambiguous and reports the
+row IDs to choose from.
+
+Row IDs are deterministic for unchanged contents but are local to a discovery
+result. Run `list` again after adding, removing, or replacing files instead of
+reusing an older ID. In `list --json`, the selector is the integer `id`; `uid`,
+`series_number`, `part`, and `n_parts` remain separate metadata.
 
 ## Choosing a preset
 
@@ -89,8 +121,8 @@ limitation.
 
 ## Input requirements and limitations
 
-Run `dicom-surface list DICOM_DIR` before conversion. The tested input path is a
-classic single-frame image stack with consistent geometry.
+The tested input path is a classic single-frame image stack with consistent
+geometry.
 
 - Enhanced multi-frame DICOM objects and vendor mosaic formats are unsupported.
 - Compressed pixel data works only when the installed SimpleITK/GDCM build has a
@@ -126,4 +158,3 @@ and therefore invalid.
 
 These checks establish mesh structure, not anatomical correctness,
 manufacturability, dimensional accuracy, or fitness for a clinical purpose.
-
