@@ -229,6 +229,44 @@ def test_every_validating_command_uses_the_same_quality_status():
     assert cli._quality_status({"valid": False}) == 1
 
 
+def test_progress_display_has_plain_redirected_fallback_and_live_elapsed_time():
+    plain_stream = io.StringIO()
+    plain_console = Console(
+        file=plain_stream,
+        width=100,
+        color_system=None,
+        force_terminal=False,
+        highlight=False,
+        markup=False,
+    )
+    with cli._ProgressDisplay(True, "Starting [literal] ...", plain_console) as progress:
+        progress.log("segment [literal] ...")
+        progress.log("  segment  1.2s")
+
+    plain = plain_stream.getvalue()
+    assert "Starting [literal] ..." in plain
+    assert "segment [literal] ..." in plain
+    assert "segment  1.2s" in plain
+    assert "\x1b" not in plain
+
+    live_stream = io.StringIO()
+    live_console = Console(
+        file=live_stream,
+        width=100,
+        color_system="standard",
+        force_terminal=True,
+        force_interactive=True,
+        highlight=False,
+        markup=False,
+    )
+    with cli._ProgressDisplay(True, "Starting ...", live_console) as progress:
+        progress.update("marching cubes ...")
+        assert progress.interactive
+        assert progress.progress is not None
+        assert any(isinstance(column, cli.TimeElapsedColumn) for column in progress.progress.columns)
+        assert progress.progress.tasks[0].description == "marching cubes ..."
+
+
 @pytest.mark.parametrize(
     "argv",
     [
@@ -279,6 +317,16 @@ def test_list_json_uses_unique_id_and_plain_stdout(tmp_path, monkeypatch):
     assert "ident" not in payload[0]
     assert "\x1b" not in result.stdout
     assert result.stderr == ""
+
+
+def test_list_human_output_shows_discovery_progress(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "_discover", lambda _root: [_series()])
+
+    result = runner.invoke(cli.app, ["list", str(tmp_path)], prog_name="dicom-surface")
+
+    assert result.exit_code == 0
+    assert "Discovering DICOM series ..." in result.stdout
+    assert "DICOM #" in result.stdout
 
 
 def test_discovery_warnings_are_deduplicated_and_do_not_corrupt_json(tmp_path, monkeypatch):
@@ -635,6 +683,16 @@ def test_validate_json_is_plain_and_invalid_quality_exits_one(tmp_path, monkeypa
     assert result.stderr == ""
     assert "\x1b" not in result.stdout
 
+    human = runner.invoke(
+        cli.app,
+        ["validate", str(mesh)],
+        prog_name="dicom-surface",
+    )
+    assert human.exit_code == 1
+    assert "Loading validation engine ..." in human.stdout
+    assert "Validating mesh structure and self-intersections ..." in human.stdout
+    assert "Mesh quality" in human.stdout
+
 
 def test_repair_json_is_plain_and_errors_are_concise(tmp_path, monkeypatch):
     mesh = tmp_path / "mesh.stl"
@@ -664,6 +722,7 @@ def test_repair_json_is_plain_and_errors_are_concise(tmp_path, monkeypatch):
         prog_name="dicom-surface",
     )
     assert failed.exit_code == 1
-    assert failed.stdout == ""
+    assert "Loading repair engine ..." in failed.stdout
+    assert "Loading mesh for repair ..." in failed.stdout
     assert "Error: cannot repair" in failed.stderr
     assert "Traceback" not in failed.stderr

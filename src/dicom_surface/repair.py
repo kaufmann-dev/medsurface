@@ -30,6 +30,7 @@ def repair(in_path: str, out_path: str, log=None) -> dict:
         if log:
             log(msg)
 
+    say("load mesh ...")
     mesh = mm.loadMesh(in_path)
     stats = {
         "faces_in": int(mesh.topology.numValidFaces()),
@@ -37,11 +38,15 @@ def repair(in_path: str, out_path: str, log=None) -> dict:
     }
     say("loaded %d faces, %d holes" % (stats["faces_in"], stats["holes_in"]))
 
+    say("unite close vertices ...")
     united = mm.uniteCloseVertices(mesh, 1e-6, False)
     say("united %d close vertices" % united)
 
+    say("fix multiple edges ...")
     mm.fixMultipleEdges(mesh)
+    say("fixed multiple edges")
 
+    say("fix mesh degeneracies ...")
     params = mm.FixMeshDegeneraciesParams()
     # Avoid the default remeshing mode, which can subdivide the entire mesh.
     params.mode = mm.FixMeshDegeneraciesParams.Mode.Decimate
@@ -50,10 +55,12 @@ def repair(in_path: str, out_path: str, log=None) -> dict:
     mm.fixMeshDegeneracies(mesh, params)
     say("fixed degeneracies -> %d faces" % mesh.topology.numValidFaces())
 
+    say("find boundary holes ...")
     holes = mesh.topology.findHoleRepresentiveEdges()
     fill = mm.FillHoleParams()
     fill.metric = mm.getUniversalMetric(mesh)
     filled = 0
+    say("fill %d boundary holes ..." % holes.size())
     for i in range(holes.size()):
         try:
             mm.fillHole(mesh, holes[i], fill)
@@ -62,7 +69,9 @@ def repair(in_path: str, out_path: str, log=None) -> dict:
             pass
     say("filled %d/%d holes" % (filled, holes.size()))
 
+    say("write repaired mesh ...")
     mm.saveMesh(mesh, out_path)
+    say("wrote repaired mesh")
 
     stats.update(
         faces_out=int(mesh.topology.numValidFaces()),

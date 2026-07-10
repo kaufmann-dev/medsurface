@@ -24,8 +24,12 @@ hidden.
 Human output uses shared Rich stdout and stderr consoles with terminal color
 detection. Series, preset, print-profile, and quality results use responsive
 tables. Dynamic paths, UIDs, descriptions, and error text are treated as plain
-text rather than Rich markup. Normal progress can be suppressed with `--quiet`,
-while warnings and failures remain visible.
+text rather than Rich markup. Long operations announce a stage before they
+begin. Interactive terminals show an indeterminate spinner, current stage, and
+per-stage elapsed time; redirected output receives persistent ANSI-free stage
+lines. No percentage is shown because the processing libraries do not expose a
+reliable completed-work total. Normal progress can be suppressed with
+`--quiet`, while warnings and failures remain visible.
 
 JSON is a separate plain-output contract. `list --json`, `validate --json`, and
 `repair --json` write only JSON to stdout. `convert --json FILE` and
