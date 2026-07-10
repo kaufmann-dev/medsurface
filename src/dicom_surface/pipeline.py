@@ -184,19 +184,23 @@ def convert(
             log(msg)
 
     def step(msg: str, fn):
+        say("%s ..." % msg)
         t = time.time()
         out = fn()
         say("  %-34s %6.1fs" % (msg, time.time() - t))
         return out
 
-    vol = volume_mod.load(series)
+    vol = step("load DICOM volume", lambda: volume_mod.load(series))
     warnings = volume_mod.warnings_for(vol)
-    lo, hi = vol.intensity_range()
+    lo, hi = step("measure intensity range", vol.intensity_range)
     say("volume %s  spacing %s mm  intensity %.0f..%.0f"
         % ("x".join(str(v) for v in vol.size),
            " x ".join("%.3f" % s for s in vol.spacing), lo, hi))
 
-    value, source = resolve_threshold(vol.image, series, preset, threshold)
+    value, source = step(
+        "resolve threshold",
+        lambda: resolve_threshold(vol.image, series, preset, threshold),
+    )
     unit = "HU" if volume_mod.has_calibrated_hu(series) else "intensity"
     say("threshold %.1f %s (%s)" % (value, unit, source))
     if value > hi:
@@ -210,11 +214,19 @@ def convert(
         say("print profile %s: %s" % (print_profile.name, print_profile.description))
     binary = step("segment",
                   lambda: build_mask(vol.image, preset, value, print_profile, say))
-    warnings.extend(printability_warnings(binary, print_profile, vol.spacing))
+    warnings.extend(
+        step(
+            "check printability",
+            lambda: printability_warnings(binary, print_profile, vol.spacing),
+        )
+    )
 
-    label_stats = sitk.LabelShapeStatisticsImageFilter()
-    label_stats.Execute(sitk.ConnectedComponent(binary))
-    labelmap_components = len(label_stats.GetLabels())
+    def count_components() -> int:
+        label_stats = sitk.LabelShapeStatisticsImageFilter()
+        label_stats.Execute(sitk.ConnectedComponent(binary))
+        return len(label_stats.GetLabels())
+
+    labelmap_components = step("analyse components", count_components)
 
     touches = volume_mod.touches_boundary(binary)
     if touches and not cap_field_of_view:
@@ -281,7 +293,7 @@ def convert(
     poly = step("index -> patient space (LPS)", lambda: surface.transform(poly, affine))
     poly = step("normals", lambda: surface.compute_normals(poly))
 
-    surface.write(poly, output_path)
+    step("write mesh", lambda: surface.write(poly, output_path))
 
     provenance = {
         "series_uid": series.uid,

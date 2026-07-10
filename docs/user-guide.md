@@ -3,6 +3,7 @@
 [Project README](../README.md) · [Choosing a series](#choosing-a-series) ·
 [Choosing a preset](#choosing-a-preset) ·
 [Print profiles](#print-profiles) · [Input limitations](#input-requirements-and-limitations) ·
+[Long-running commands](#long-running-commands) ·
 [Safety and privacy](#safety-and-privacy) · [Technical reference](technical-reference.md)
 
 This guide explains the user-visible choices and limitations of
@@ -144,6 +145,20 @@ geometry.
 
 The [DICOM compatibility table](technical-reference.md#dicom-compatibility)
 gives the exact behavior for each known case.
+
+## Long-running commands
+
+`list`, `convert`, `merge`, `validate`, and `repair` show the current stage while
+they work. On an interactive terminal, an indeterminate spinner and elapsed
+time make activity visible without inventing a percentage that the processing
+libraries cannot measure. When output is redirected, the same stage changes are
+written as persistent plain-text lines without animation or ANSI control
+sequences.
+
+Use `--quiet` with `convert`, `merge`, or `repair` to suppress normal progress;
+warnings and failures remain visible. Machine-readable `list --json`,
+`validate --json`, and `repair --json` suppress progress so stdout contains only
+JSON.
 
 ## Understanding validation
 

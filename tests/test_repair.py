@@ -46,6 +46,21 @@ def test_repair_refuses_to_overwrite_its_input_or_a_hard_link(tmp_path):
     assert source.read_bytes() == original
 
 
+def test_repair_announces_mesh_loading_before_it_starts(monkeypatch):
+    messages = []
+
+    class StopLoading(Exception):
+        pass
+
+    def stop(_path):
+        assert messages[-1] == "load mesh ..."
+        raise StopLoading
+
+    monkeypatch.setattr(repair.mm, "loadMesh", stop)
+    with pytest.raises(StopLoading):
+        repair.repair("input.stl", "output.stl", log=messages.append)
+
+
 def test_repair_json_mode_writes_only_json(tmp_path):
     box = trimesh.creation.box()
     box.update_faces([False, False] + [True] * (len(box.faces) - 2))

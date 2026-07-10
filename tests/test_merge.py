@@ -13,7 +13,7 @@ import pytest
 import SimpleITK as sitk
 
 from dicom_surface import merge as merge_mod
-from dicom_surface import registration
+from dicom_surface import presets, registration
 from dicom_surface.merge import MergeError
 from dicom_surface.series import Series
 
@@ -269,6 +269,27 @@ def _series(uid="1.2.3", modality="CT", files=(), part=1):
     s.files = list(files)
     s.part = part
     return s
+
+
+def test_merge_announces_volume_loading_before_it_starts(monkeypatch):
+    messages = []
+
+    class StopLoading(Exception):
+        pass
+
+    def stop(_series):
+        assert messages[-1] == "load fixed DICOM volume ..."
+        raise StopLoading
+
+    monkeypatch.setattr(merge_mod.volume_mod, "load", stop)
+    with pytest.raises(StopLoading):
+        merge_mod.merge(
+            _series(uid="a"),
+            _series(uid="b"),
+            presets.get("bone"),
+            "unused.stl",
+            log=messages.append,
+        )
 
 
 def test_same_series_twice_is_refused():

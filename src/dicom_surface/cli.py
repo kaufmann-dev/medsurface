@@ -8,12 +8,13 @@ from collections import Counter
 from dataclasses import replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import typer
 from rich import box
 from rich.console import Console, Group
 from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 from rich.text import Text
 
@@ -70,8 +71,68 @@ def _log(message: str) -> None:
     stdout_console.print(Text(str(message), style="cyan"))
 
 
-def _quiet(message: str) -> None:  # noqa: ARG001
-    pass
+class _ProgressDisplay:
+    """Indeterminate stage progress with a plain-text redirected fallback."""
+
+    def __init__(
+        self,
+        enabled: bool,
+        initial: str,
+        console: Console = stdout_console,
+    ) -> None:
+        self.enabled = enabled
+        self.initial = initial
+        self.console = console
+        self.interactive = enabled and console.is_terminal and console.is_interactive
+        self.progress: Progress | None = None
+        self.task_id: int | None = None
+
+    def __enter__(self):
+        if not self.enabled:
+            return self
+        if self.interactive:
+            self.progress = Progress(
+                SpinnerColumn(style="cyan"),
+                TextColumn("{task.description}", markup=False),
+                TimeElapsedColumn(),
+                console=self.console,
+                transient=True,
+            )
+            self.progress.start()
+            self.task_id = self.progress.add_task(self.initial, total=None)
+        else:
+            self._print(self.initial)
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        if self.progress is not None:
+            self.progress.stop()
+
+    def _print(self, message: str) -> None:
+        self.console.print(Text(message, style="cyan"))
+
+    def update(self, message: str) -> None:
+        """Set the active stage and restart its elapsed-time counter."""
+        if not self.enabled:
+            return
+        message = str(message).strip()
+        if self.progress is not None and self.task_id is not None:
+            self.progress.reset(self.task_id, description=message, total=None)
+            self.progress.refresh()
+        else:
+            self._print(message)
+
+    def log(self, message: str) -> None:
+        """Translate processing start messages into live stage updates."""
+        if not self.enabled:
+            return
+        rendered = str(message)
+        if rendered.strip().endswith("..."):
+            self.update(rendered)
+        elif self.progress is not None:
+            self.progress.console.print(Text(rendered, style="cyan"))
+        else:
+            self._print(rendered)
 
 
 def _success(message: object) -> None:
@@ -306,7 +367,8 @@ def list_series(
     ),
 ) -> None:
     """Show every series in a DICOM directory."""
-    found = _discover(dicom_dir)
+    with _ProgressDisplay(not json_output, "Discovering DICOM series ..."):
+        found = _discover(dicom_dir)
     if not found:
         _error("no DICOM instances found under %s" % dicom_dir)
         raise typer.Exit(1)
@@ -457,63 +519,90 @@ def convert(
 ) -> None:
     """Extract a surface mesh from a DICOM series."""
     threshold_value, auto_threshold = _parse_threshold(threshold)
-    log: Callable[[str], None] = _quiet if quiet else _log
+    progress = _ProgressDisplay(not quiet, "Discovering DICOM series ...")
+    with progress:
+        found = _discover(dicom_dir)
+        if not found:
+            _error("no DICOM instances found under %s" % dicom_dir)
+            raise typer.Exit(1)
 
-    found = _discover(dicom_dir)
-    if not found:
-        _error("no DICOM instances found under %s" % dicom_dir)
-        raise typer.Exit(1)
+        from . import series as series_mod
 
-    from . import series as series_mod
+        try:
+            chosen = series_mod.select(found, series)
+        except ValueError as exc:
+            _error(exc)
+            raise typer.Exit(2) from None
 
-    try:
-        chosen = series_mod.select(found, series)
-    except ValueError as exc:
-        _error(exc)
-        raise typer.Exit(2) from None
-
-    log("series ID %d  %s  (%d slices)" % (chosen.id, chosen.label(), chosen.n_slices))
-    resolved_preset = presets_mod.get(preset.value)
-    resolved_preset = presets_mod.override(
-        resolved_preset,
-        median_mm=median_mm,
-        closing_mm=closing_mm,
-        opening_mm=opening_mm,
-        min_island_mm3=min_island_mm3,
-        resample_mm=resample_mm,
-        smooth_iters=smooth_iters,
-        passband=passband,
-        target_faces=target_faces,
-        post_smooth_iters=post_smooth_iters,
-        keep_largest_island=False if all_islands else None,
-        keep_largest_component=False if all_components else None,
-    )
-    if auto_threshold:
-        resolved_preset = presets_mod.override(resolved_preset, threshold="auto")
-
-    from . import pipeline, validate as validate_mod
-
-    try:
-        result = pipeline.convert(
-            series=chosen,
-            preset=resolved_preset,
-            output_path=str(output),
-            threshold=threshold_value,
-            cap_field_of_view=not no_cap,
-            print_profile=_resolve_print_profile(
-                print_profile,
-                min_feature_mm,
-                closing_mm,
-                min_island_mm3,
-            ),
-            log=log,
+        progress.log("series ID %d  %s  (%d slices)" % (chosen.id, chosen.label(), chosen.n_slices))
+        resolved_preset = presets_mod.get(preset.value)
+        resolved_preset = presets_mod.override(
+            resolved_preset,
+            median_mm=median_mm,
+            closing_mm=closing_mm,
+            opening_mm=opening_mm,
+            min_island_mm3=min_island_mm3,
+            resample_mm=resample_mm,
+            smooth_iters=smooth_iters,
+            passband=passband,
+            target_faces=target_faces,
+            post_smooth_iters=post_smooth_iters,
+            keep_largest_island=False if all_islands else None,
+            keep_largest_component=False if all_components else None,
         )
-    except pipeline.ModalityMismatch as exc:
-        _error(exc)
-        raise typer.Exit(2) from None
-    except ValueError as exc:
-        _error(exc)
-        raise typer.Exit(1) from None
+        if auto_threshold:
+            resolved_preset = presets_mod.override(resolved_preset, threshold="auto")
+
+        progress.update("Loading conversion engine ...")
+        from . import pipeline
+
+        try:
+            result = pipeline.convert(
+                series=chosen,
+                preset=resolved_preset,
+                output_path=str(output),
+                threshold=threshold_value,
+                cap_field_of_view=not no_cap,
+                print_profile=_resolve_print_profile(
+                    print_profile,
+                    min_feature_mm,
+                    closing_mm,
+                    min_island_mm3,
+                ),
+                log=progress.log,
+            )
+        except pipeline.ModalityMismatch as exc:
+            _error(exc)
+            raise typer.Exit(2) from None
+        except ValueError as exc:
+            _error(exc)
+            raise typer.Exit(1) from None
+
+        report = None
+        if not no_validate:
+            progress.update("Validating output mesh ...")
+            from . import validate as validate_mod
+
+            report = validate_mod.validate(result.output_path)
+
+        if json_file is not None:
+            payload = {
+                "result": {
+                    "output": result.output_path,
+                    "triangles": result.triangles,
+                    "vertices": result.vertices,
+                    "bounds_mm": list(result.bounds_mm),
+                    "seconds": result.seconds,
+                    "capped_field_of_view": result.capped_field_of_view,
+                    "labelmap_components": result.labelmap_components,
+                    "surface_components": result.surface_components,
+                    "warnings": result.warnings,
+                },
+                "provenance": result.provenance,
+                "quality": report,
+            }
+            progress.update("Writing JSON report ...")
+            _write_json_file(json_file, payload)
 
     for message in result.warnings:
         _warn(message)
@@ -524,33 +613,13 @@ def convert(
             "triangles %s   vertices %s   %.1fs"
             % (f"{result.triangles:,}", f"{result.vertices:,}", result.seconds)
         )
-
-    report = None
-    if not no_validate:
-        report = validate_mod.validate(result.output_path)
-        if not quiet:
+        if report is not None:
             _print_quality(report)
-        _warn_if_invalid(report, "output")
-
-    if json_file is not None:
-        payload = {
-            "result": {
-                "output": result.output_path,
-                "triangles": result.triangles,
-                "vertices": result.vertices,
-                "bounds_mm": list(result.bounds_mm),
-                "seconds": result.seconds,
-                "capped_field_of_view": result.capped_field_of_view,
-                "labelmap_components": result.labelmap_components,
-                "surface_components": result.surface_components,
-                "warnings": result.warnings,
-            },
-            "provenance": result.provenance,
-            "quality": report,
-        }
-        _write_json_file(json_file, payload)
-        if not quiet:
+        if json_file is not None:
             _success("wrote %s" % json_file)
+
+    if report is not None:
+        _warn_if_invalid(report, "output")
 
     _exit_for_quality(report)
 
@@ -619,63 +688,96 @@ def merge(
 ) -> None:
     """Register two scans of the same anatomy and fuse their surfaces."""
     threshold_value, auto_threshold = _parse_threshold(threshold)
-    log: Callable[[str], None] = _quiet if quiet else _log
     directory_b = dicom_dir_b or dicom_dir_a
+    progress = _ProgressDisplay(not quiet, "Discovering fixed DICOM series ...")
+    with progress:
+        found_a = _discover(dicom_dir_a)
+        if directory_b == dicom_dir_a:
+            found_b = found_a
+        else:
+            progress.update("Discovering moving DICOM series ...")
+            found_b = _discover(directory_b)
+        if not found_a or not found_b:
+            _error("no DICOM instances found")
+            raise typer.Exit(1)
 
-    found_a = _discover(dicom_dir_a)
-    found_b = found_a if directory_b == dicom_dir_a else _discover(directory_b)
-    if not found_a or not found_b:
-        _error("no DICOM instances found")
-        raise typer.Exit(1)
+        from . import series as series_mod
 
-    from . import series as series_mod
+        try:
+            chosen_a = series_mod.select(found_a, series_a)
+            chosen_b = series_mod.select(found_b, series_b)
+        except ValueError as exc:
+            _error(exc)
+            raise typer.Exit(2) from None
 
-    try:
-        chosen_a = series_mod.select(found_a, series_a)
-        chosen_b = series_mod.select(found_b, series_b)
-    except ValueError as exc:
-        _error(exc)
-        raise typer.Exit(2) from None
-
-    resolved_preset = presets_mod.get(preset.value)
-    resolved_preset = presets_mod.override(
-        resolved_preset,
-        median_mm=median_mm,
-        closing_mm=closing_mm,
-        min_island_mm3=min_island_mm3,
-    )
-    if auto_threshold:
-        resolved_preset = presets_mod.override(resolved_preset, threshold="auto")
-
-    from . import merge as merge_mod, pipeline, validate as validate_mod
-
-    try:
-        result = merge_mod.merge(
-            series_a=chosen_a,
-            series_b=chosen_b,
-            preset=resolved_preset,
-            output_path=str(output),
-            threshold=threshold_value,
-            grid_mm=grid_mm,
-            smooth_iters=smooth_iters,
-            passband=passband,
-            target_faces=target_faces,
-            post_smooth_iters=post_smooth_iters,
-            print_profile=_resolve_print_profile(
-                print_profile,
-                min_feature_mm,
-                closing_mm,
-                min_island_mm3,
-            ),
-            force=force,
-            log=log,
+        resolved_preset = presets_mod.get(preset.value)
+        resolved_preset = presets_mod.override(
+            resolved_preset,
+            median_mm=median_mm,
+            closing_mm=closing_mm,
+            min_island_mm3=min_island_mm3,
         )
-    except merge_mod.MergeError as exc:
-        _error(exc)
-        raise typer.Exit(3) from None
-    except (pipeline.ModalityMismatch, ValueError) as exc:
-        _error(exc)
-        raise typer.Exit(2) from None
+        if auto_threshold:
+            resolved_preset = presets_mod.override(resolved_preset, threshold="auto")
+
+        progress.update("Loading merge engine ...")
+        from . import merge as merge_mod, pipeline
+
+        try:
+            result = merge_mod.merge(
+                series_a=chosen_a,
+                series_b=chosen_b,
+                preset=resolved_preset,
+                output_path=str(output),
+                threshold=threshold_value,
+                grid_mm=grid_mm,
+                smooth_iters=smooth_iters,
+                passband=passband,
+                target_faces=target_faces,
+                post_smooth_iters=post_smooth_iters,
+                print_profile=_resolve_print_profile(
+                    print_profile,
+                    min_feature_mm,
+                    closing_mm,
+                    min_island_mm3,
+                ),
+                force=force,
+                log=progress.log,
+            )
+        except merge_mod.MergeError as exc:
+            _error(exc)
+            raise typer.Exit(3) from None
+        except (pipeline.ModalityMismatch, ValueError) as exc:
+            _error(exc)
+            raise typer.Exit(2) from None
+
+        report = None
+        if not no_validate:
+            progress.update("Validating fused mesh ...")
+            from . import validate as validate_mod
+
+            report = validate_mod.validate(result.output_path)
+
+        if json_file is not None:
+            payload = {
+                "result": {
+                    "output": result.output_path,
+                    "triangles": result.triangles,
+                    "vertices": result.vertices,
+                    "bounds_mm": list(result.bounds_mm),
+                    "grid_mm": result.grid_mm,
+                    "grid_size": list(result.grid_size),
+                    "volume_fixed_mm3": result.volume_a_mm3,
+                    "volume_moving_mm3": result.volume_b_mm3,
+                    "volume_fused_mm3": result.volume_union_mm3,
+                    "seconds": result.seconds,
+                    "warnings": result.warnings,
+                },
+                "provenance": result.provenance,
+                "quality": report,
+            }
+            progress.update("Writing JSON report ...")
+            _write_json_file(json_file, payload)
 
     for message in result.warnings:
         _warn(message)
@@ -686,35 +788,13 @@ def merge(
             "triangles %s   vertices %s   %.1fs"
             % (f"{result.triangles:,}", f"{result.vertices:,}", result.seconds)
         )
-
-    report = None
-    if not no_validate:
-        report = validate_mod.validate(result.output_path)
-        if not quiet:
+        if report is not None:
             _print_quality(report)
-        _warn_if_invalid(report, "fused output")
-
-    if json_file is not None:
-        payload = {
-            "result": {
-                "output": result.output_path,
-                "triangles": result.triangles,
-                "vertices": result.vertices,
-                "bounds_mm": list(result.bounds_mm),
-                "grid_mm": result.grid_mm,
-                "grid_size": list(result.grid_size),
-                "volume_fixed_mm3": result.volume_a_mm3,
-                "volume_moving_mm3": result.volume_b_mm3,
-                "volume_fused_mm3": result.volume_union_mm3,
-                "seconds": result.seconds,
-                "warnings": result.warnings,
-            },
-            "provenance": result.provenance,
-            "quality": report,
-        }
-        _write_json_file(json_file, payload)
-        if not quiet:
+        if json_file is not None:
             _success("wrote %s" % json_file)
+
+    if report is not None:
+        _warn_if_invalid(report, "fused output")
 
     _exit_for_quality(report)
 
@@ -732,13 +812,16 @@ def validate(
     json_output: bool = typer.Option(False, "--json", help="Write one plain JSON object to stdout."),
 ) -> None:
     """Report mesh quality without changing the file."""
-    from . import validate as validate_mod
+    progress = _ProgressDisplay(not json_output, "Loading validation engine ...")
+    with progress:
+        from . import validate as validate_mod
 
-    try:
-        report = validate_mod.validate(str(mesh))
-    except (OSError, RuntimeError, ValueError) as exc:
-        _error("cannot validate %s: %s" % (mesh, exc))
-        raise typer.Exit(1) from None
+        progress.update("Validating mesh structure and self-intersections ...")
+        try:
+            report = validate_mod.validate(str(mesh))
+        except (OSError, RuntimeError, ValueError) as exc:
+            _error("cannot validate %s: %s" % (mesh, exc))
+            raise typer.Exit(1) from None
     if json_output:
         print(json.dumps(report, indent=2))
     else:
@@ -762,20 +845,29 @@ def repair(
     quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
 ) -> None:
     """Make a non-watertight mesh watertight."""
-    from . import repair as repair_mod, validate as validate_mod
+    progress = _ProgressDisplay(
+        not quiet and not json_output,
+        "Loading repair engine ...",
+    )
+    with progress:
+        from . import repair as repair_mod
 
-    log = _log if not quiet and not json_output else None
-    try:
-        stats = repair_mod.repair(str(mesh), str(output), log=log)
-    except (OSError, RuntimeError, ValueError) as exc:
-        _error("cannot repair %s: %s" % (mesh, exc))
-        raise typer.Exit(1) from None
+        progress.update("Loading mesh for repair ...")
+        try:
+            stats = repair_mod.repair(str(mesh), str(output), log=progress.log)
+        except (OSError, RuntimeError, ValueError) as exc:
+            _error("cannot repair %s: %s" % (mesh, exc))
+            raise typer.Exit(1) from None
 
-    try:
-        report = validate_mod.validate(str(output))
-    except (OSError, RuntimeError, ValueError) as exc:
-        _error("repaired mesh could not be validated: %s" % exc)
-        raise typer.Exit(1) from None
+        progress.update("Loading validation engine ...")
+        from . import validate as validate_mod
+
+        progress.update("Validating repaired mesh ...")
+        try:
+            report = validate_mod.validate(str(output))
+        except (OSError, RuntimeError, ValueError) as exc:
+            _error("repaired mesh could not be validated: %s" % exc)
+            raise typer.Exit(1) from None
 
     if json_output:
         print(json.dumps({"output": str(output), "repair": stats, "quality": report}, indent=2))

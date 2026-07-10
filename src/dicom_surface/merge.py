@@ -318,6 +318,7 @@ def merge(
             log(msg)
 
     def step(label, fn):
+        say("%s ..." % label)
         t = time.time()
         out = fn()
         say("  %-36s %6.1fs" % (label, time.time() - t))
@@ -332,13 +333,19 @@ def merge(
         % (series_b.series_number if series_b.series_number is not None else "-",
            series_b.label(), series_b.n_slices))
 
-    vol_a = volume_mod.load(series_a)
-    vol_b = volume_mod.load(series_b)
+    vol_a = step("load fixed DICOM volume", lambda: volume_mod.load(series_a))
+    vol_b = step("load moving DICOM volume", lambda: volume_mod.load(series_b))
     warnings.extend(volume_mod.warnings_for(vol_a))
     warnings.extend(volume_mod.warnings_for(vol_b))
 
-    value_a, source_a = pipeline.resolve_threshold(vol_a.image, series_a, preset, threshold)
-    value_b, source_b = pipeline.resolve_threshold(vol_b.image, series_b, preset, threshold)
+    value_a, source_a = step(
+        "resolve fixed threshold",
+        lambda: pipeline.resolve_threshold(vol_a.image, series_a, preset, threshold),
+    )
+    value_b, source_b = step(
+        "resolve moving threshold",
+        lambda: pipeline.resolve_threshold(vol_b.image, series_b, preset, threshold),
+    )
     say("threshold: fixed %.1f (%s), moving %.1f (%s)" % (value_a, source_a, value_b, source_b))
 
     # Register on anatomy, always. Thickening both scans would inflate Dice and
@@ -383,7 +390,10 @@ def merge(
             "them, at cubic cost in memory." % (grid_mm, finest)
         )
 
-    size, origin = _common_grid(mask_a, mask_b, reg.transform, grid_mm)
+    size, origin = step(
+        "plan fused grid",
+        lambda: _common_grid(mask_a, mask_b, reg.transform, grid_mm),
+    )
     voxels = int(np.prod(size))
     say("fused grid %s at %.2f mm isotropic (%.0f M voxels)"
         % ("x".join(str(v) for v in size), grid_mm, voxels / 1e6))
@@ -404,12 +414,21 @@ def merge(
 
     # Union of occupancy, not of labels: keeps the sub-voxel boundary each scan
     # carries, so the fused surface is not quantised to the grid.
-    fused = sitk.Clamp(sitk.Maximum(field_a, field_b), sitk.sitkFloat32, 0.0, 1.0)
+    fused = step(
+        "fuse occupancy fields",
+        lambda: sitk.Clamp(sitk.Maximum(field_a, field_b), sitk.sitkFloat32, 0.0, 1.0),
+    )
 
     voxel_mm3 = grid_mm ** 3
-    vol_a_mm3 = float((sitk.GetArrayViewFromImage(field_a) > 0.5).sum()) * voxel_mm3
-    vol_b_mm3 = float((sitk.GetArrayViewFromImage(field_b) > 0.5).sum()) * voxel_mm3
-    vol_u_mm3 = float((sitk.GetArrayViewFromImage(fused) > 0.5).sum()) * voxel_mm3
+
+    def measure_volumes() -> tuple[float, float, float]:
+        return (
+            float((sitk.GetArrayViewFromImage(field_a) > 0.5).sum()) * voxel_mm3,
+            float((sitk.GetArrayViewFromImage(field_b) > 0.5).sum()) * voxel_mm3,
+            float((sitk.GetArrayViewFromImage(fused) > 0.5).sum()) * voxel_mm3,
+        )
+
+    vol_a_mm3, vol_b_mm3, vol_u_mm3 = step("measure fused volumes", measure_volumes)
     say("bone: fixed %.0f cm3 | moving %.0f cm3 | fused %.0f cm3"
         % (vol_a_mm3 / 1000, vol_b_mm3 / 1000, vol_u_mm3 / 1000))
 
@@ -433,15 +452,15 @@ def merge(
     say("  surface shells %d (kept 1)" % shells)
     poly = step("decimate", lambda: surface.decimate(poly, target_faces))
     poly = step("post-smooth", lambda: surface.smooth(poly, post_smooth_iters, passband))
-    poly = surface.transform(poly, affine)
-    poly = surface.compute_normals(poly)
+    poly = step("index -> patient space (LPS)", lambda: surface.transform(poly, affine))
+    poly = step("normals", lambda: surface.compute_normals(poly))
 
-    boundary, nonmanifold = surface.count_defects(poly)
+    boundary, nonmanifold = step("check surface defects", lambda: surface.count_defects(poly))
     if boundary or nonmanifold:
         warnings.append("fused surface has %d boundary and %d non-manifold edge(s)"
                         % (boundary, nonmanifold))
 
-    surface.write(poly, output_path)
+    step("write mesh", lambda: surface.write(poly, output_path))
 
     provenance = {
         "fixed": {"uid": series_a.uid, "series_number": series_a.series_number,

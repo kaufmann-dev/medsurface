@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 
-from dicom_surface import presets, validate
+from dicom_surface import pipeline as pipeline_mod, presets, validate
 from dicom_surface.pipeline import ModalityMismatch, resolve_threshold
 from dicom_surface.series import Series
 
@@ -22,6 +22,26 @@ def _ct_image():
     vol = np.full(side**3, -1000.0, dtype=np.float32)
     vol[: arr.size] = arr[: side**3]
     return sitk.GetImageFromArray(vol.reshape(side, side, side))
+
+
+def test_conversion_announces_volume_loading_before_it_starts(monkeypatch):
+    messages = []
+
+    class StopLoading(Exception):
+        pass
+
+    def stop(_series):
+        assert messages[-1] == "load DICOM volume ..."
+        raise StopLoading
+
+    monkeypatch.setattr(pipeline_mod.volume_mod, "load", stop)
+    with pytest.raises(StopLoading):
+        pipeline_mod.convert(
+            _series(),
+            presets.get("bone"),
+            "unused.stl",
+            log=messages.append,
+        )
 
 
 def test_explicit_threshold_wins_over_preset():
