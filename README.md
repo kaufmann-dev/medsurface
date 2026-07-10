@@ -16,7 +16,7 @@ command line.
 Python 3.10 or newer and [uv](https://docs.astral.sh/uv/) are required.
 
 ```sh
-uv tool install dicom-surface
+uv tool install .
 ```
 
 On Linux, PyMeshLab needs system OpenGL libraries. Many desktop distributions
