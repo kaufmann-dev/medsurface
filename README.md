@@ -37,8 +37,8 @@ dicom-surface convert ~/scans/head-ct -o skull.stl
 ```
 
 The command prints mesh-quality results after writing the file. A normal result
-should be watertight, consistently wound, and have zero boundary and
-non-manifold edges.
+should be valid, watertight, and consistently wound, with zero boundary and
+non-manifold edges and zero degenerate or self-intersecting faces.
 
 To select a different series, use the number, dotted identifier, UID, or part of
 its description shown by `list`:
@@ -136,11 +136,11 @@ Validation never repairs the file it measures:
 
 ```sh
 dicom-surface validate model.stl
-dicom-surface validate model.stl --self-intersections
 ```
 
-Self-intersection checking is slower and opt-in. Watertightness alone does not
-rule out self-intersections.
+Validation always checks self-intersections because watertightness alone does
+not rule them out. A failed check returns a nonzero exit status. `convert` and
+`merge` use the same validation unless you pass `--no-validate`.
 
 Repair creates a new file and validates it afterward:
 

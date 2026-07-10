@@ -88,8 +88,33 @@ def _component_count(mesh: trimesh.Trimesh) -> int:
     return int(len(components))
 
 
-def validate(path: str, self_intersections: bool = True) -> dict[str, Any]:
-    """Full quality report for a mesh file."""
+def _problems(report: dict[str, Any]) -> list[str]:
+    """Reasons a measured mesh does not satisfy the CLI validity contract."""
+    problems = []
+    if not report["watertight"]:
+        problems.append("mesh is not watertight")
+    if not report["winding_consistent"]:
+        problems.append("face winding is inconsistent")
+    if not report["is_volume"]:
+        problems.append("mesh is not a valid enclosed volume")
+    if report["boundary_edges"]:
+        problems.append("%d boundary edge(s)" % report["boundary_edges"])
+    if report["nonmanifold_edge_uses"]:
+        problems.append("%d non-manifold edge use(s)" % report["nonmanifold_edge_uses"])
+    if report["degenerate_faces"]:
+        problems.append("%d degenerate face(s)" % report["degenerate_faces"])
+
+    intersections = report["self_intersecting_faces"]
+    if isinstance(intersections, int):
+        if intersections:
+            problems.append("%d self-intersecting face(s)" % intersections)
+    else:
+        problems.append("self-intersection check did not complete (%s)" % intersections)
+    return problems
+
+
+def validate(path: str) -> dict[str, Any]:
+    """Full quality report and a single validity result for a mesh file."""
     mesh = _load_mesh(path)
 
     edges = np.sort(mesh.edges_sorted, axis=1)
@@ -123,8 +148,9 @@ def validate(path: str, self_intersections: bool = True) -> dict[str, Any]:
         # genus = (2 - euler) / 2 for a closed orientable surface
         report["genus"] = int((2 - report["euler_number"]) // 2)
 
-    if self_intersections:
-        report["self_intersecting_faces"] = _self_intersections(path, mesh)
+    report["self_intersecting_faces"] = _self_intersections(path, mesh)
+    report["problems"] = _problems(report)
+    report["valid"] = not report["problems"]
 
     return report
 
@@ -132,6 +158,7 @@ def validate(path: str, self_intersections: bool = True) -> dict[str, Any]:
 def summarise(report: dict[str, Any]) -> str:
     ok = "yes" if report["watertight"] else "NO"
     lines = [
+        "  valid               %s" % ("yes" if report["valid"] else "NO"),
         "  triangles           %s" % f"{report['triangles']:,}",
         "  vertices            %s" % f"{report['vertices']:,}",
         "  components          %s" % f"{report['components']:,}",
@@ -153,4 +180,7 @@ def summarise(report: dict[str, Any]) -> str:
     e = report["bbox_extents_mm"]
     lines.append("  bounding box        %.1f x %.1f x %.1f mm" % (e[0], e[1], e[2]))
     lines.append("  size                %.1f MB" % (report["bytes"] / 1048576.0))
+    if report["problems"]:
+        lines.append("  problems")
+        lines.extend("    - %s" % problem for problem in report["problems"])
     return "\n".join(lines)

@@ -105,7 +105,7 @@ def test_validate_does_not_repair_the_mesh_it_measures(tmp_path):
     p = str(tmp_path / "openbox.stl")
     trimesh.Trimesh(vertices=v, faces=f, process=False).export(p)
 
-    report = validate.validate(p, self_intersections=False)
+    report = validate.validate(p)
     assert report["watertight"] is False
     assert report["boundary_edges"] > 0
     assert report["components"] == 1
@@ -121,7 +121,7 @@ def test_validate_reports_open_mesh_volume_as_none(tmp_path):
     m = trimesh.Trimesh(vertices=[[0, 0, 0], [1, 0, 0], [0, 1, 0]], faces=[[0, 1, 2]])
     p = str(tmp_path / "tri.stl")
     m.export(p)
-    report = validate.validate(p, self_intersections=False)
+    report = validate.validate(p)
     assert report["watertight"] is False
     assert report["volume_mm3"] is None
     assert report["boundary_edges"] == 3

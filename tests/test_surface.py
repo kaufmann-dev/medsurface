@@ -31,9 +31,11 @@ def _write(poly, tmp_path, name="m.stl"):
 def test_solid_sphere_is_watertight_with_correct_volume(solid_sphere, tmp_path):
     image, radius = solid_sphere
     poly = _mesh(image, smooth_iters=10)
-    report = validate.validate(_write(poly, tmp_path), self_intersections=False)
+    report = validate.validate(_write(poly, tmp_path))
 
     assert report["watertight"]
+    assert report["valid"]
+    assert report["problems"] == []
     assert report["components"] == 1
     assert report["boundary_edges"] == 0
     assert report["genus"] == 0
@@ -55,14 +57,13 @@ def test_uncapped_boundary_leaves_the_mesh_open(clipped_sphere, tmp_path):
 
     open_report = validate.validate(
         _write(_mesh(clipped_sphere, cap=False), tmp_path, "open.stl"),
-        self_intersections=False,
     )
     assert not open_report["watertight"]
+    assert not open_report["valid"]
     assert open_report["boundary_edges"] > 0
 
     capped_report = validate.validate(
         _write(_mesh(clipped_sphere, cap=True), tmp_path, "capped.stl"),
-        self_intersections=False,
     )
     assert capped_report["watertight"]
     assert capped_report["boundary_edges"] == 0
@@ -81,13 +82,11 @@ def test_largest_component_removes_internal_cavities(hollow_sphere, tmp_path):
 
     # ... yet the surface has two shells.
     all_shells = _mesh(image)
-    report_all = validate.validate(_write(all_shells, tmp_path, "shells.stl"),
-                                   self_intersections=False)
+    report_all = validate.validate(_write(all_shells, tmp_path, "shells.stl"))
     assert report_all["components"] == 2
 
     kept = _mesh(image, largest=True)
-    report_one = validate.validate(_write(kept, tmp_path, "outer.stl"),
-                                   self_intersections=False)
+    report_one = validate.validate(_write(kept, tmp_path, "outer.stl"))
     assert report_one["components"] == 1
     assert report_one["watertight"]
 
@@ -194,8 +193,7 @@ def test_isotropic_resampling_stays_watertight(solid_sphere, tmp_path, mm):
     poly = surface.transform(poly, surface.index_to_physical(grid))
 
     assert surface.count_defects(poly) == (0, 0)
-    report = validate.validate(_write(poly, tmp_path, "iso%s.stl" % mm),
-                               self_intersections=False)
+    report = validate.validate(_write(poly, tmp_path, "iso%s.stl" % mm))
     assert report["watertight"]
     assert report["components"] == 1
     expected = 4.0 / 3.0 * math.pi * radius**3
@@ -240,8 +238,7 @@ def test_decimation_never_opens_a_closed_mesh(solid_sphere, tmp_path, keep):
     smaller = surface.decimate(poly, target)
 
     assert surface.count_defects(smaller) == (0, 0)
-    report = validate.validate(_write(smaller, tmp_path, "dec_%s.stl" % keep),
-                               self_intersections=False)
+    report = validate.validate(_write(smaller, tmp_path, "dec_%s.stl" % keep))
     assert report["watertight"], report
     assert report["components"] == 1
     assert report["genus"] == 0
@@ -267,7 +264,7 @@ def test_decimation_preserves_genus(tmp_path):
                                    major_sections=192, minor_sections=96)
     p = os.path.join(str(tmp_path), "torus.stl")
     torus.export(p)
-    assert validate.validate(p, self_intersections=False)["genus"] == 1
+    assert validate.validate(p)["genus"] == 1
 
     reader = _vtk.vtkSTLReader()
     reader.SetFileName(p)
@@ -275,8 +272,7 @@ def test_decimation_preserves_genus(tmp_path):
     poly = reader.GetOutput()
 
     smaller = surface.decimate(poly, max(64, poly.GetNumberOfPolys() // 6))
-    after = validate.validate(_write(smaller, tmp_path, "torus_dec.stl"),
-                              self_intersections=False)
+    after = validate.validate(_write(smaller, tmp_path, "torus_dec.stl"))
     assert after["watertight"]
     assert after["genus"] == 1, "decimation closed the tunnel"
 
@@ -335,12 +331,90 @@ def test_roundtrip_formats(solid_sphere, tmp_path, ext):
     poly = _mesh(image, smooth_iters=5)
     path = _write(poly, tmp_path, "m" + ext)
     assert os.path.getsize(path) > 0
-    report = validate.validate(path, self_intersections=False)
+    report = validate.validate(path)
     assert report["triangles"] > 0
+    assert report["valid"], report["problems"]
 
 
 def test_vtp_self_intersection_check(solid_sphere, tmp_path):
     image, _ = solid_sphere
     path = _write(_mesh(image, smooth_iters=5), tmp_path, "m.vtp")
-    report = validate.validate(path, self_intersections=True)
+    report = validate.validate(path)
     assert report["self_intersecting_faces"] == 0
+
+
+def test_disjoint_closed_shells_are_valid(tmp_path):
+    """Multiple closed printable parts do not make a mesh invalid."""
+    import trimesh
+
+    left = trimesh.creation.box()
+    right = trimesh.creation.box()
+    right.apply_translation((3.0, 0.0, 0.0))
+    path = str(tmp_path / "two-shells.ply")
+    trimesh.util.concatenate([left, right]).export(path)
+
+    report = validate.validate(path)
+    assert report["components"] == 2
+    assert report["valid"], report["problems"]
+
+
+def test_transversely_overlapping_closed_shells_are_invalid(tmp_path):
+    """Watertightness alone does not rule out intersecting surfaces."""
+    import trimesh
+
+    fixed = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
+    crossing = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
+    crossing.apply_transform(
+        trimesh.transformations.rotation_matrix(np.deg2rad(30.0), (0.0, 0.0, 1.0))
+    )
+    crossing.apply_translation((0.35, 0.1, 0.2))
+    path = str(tmp_path / "intersecting-shells.ply")
+    trimesh.util.concatenate([fixed, crossing]).export(path)
+
+    report = validate.validate(path)
+    assert report["watertight"]
+    assert report["self_intersecting_faces"] > 0
+    assert not report["valid"]
+    assert any("self-intersecting" in problem for problem in report["problems"])
+
+
+def test_inconsistent_winding_fails_validation(tmp_path):
+    import trimesh
+
+    box = trimesh.creation.box()
+    faces = box.faces.copy()
+    faces[0] = faces[0][::-1]
+    path = str(tmp_path / "flipped-face.ply")
+    trimesh.Trimesh(vertices=box.vertices, faces=faces, process=False).export(path)
+
+    report = validate.validate(path)
+    assert report["watertight"]
+    assert not report["winding_consistent"]
+    assert not report["valid"]
+
+
+def test_degenerate_faces_fail_validation(tmp_path):
+    import trimesh
+
+    box = trimesh.creation.box()
+    vertices = np.vstack([box.vertices, [[0.0, 0.0, 0.0]]])
+    faces = np.vstack([box.faces, [[len(vertices) - 1] * 3]])
+    path = str(tmp_path / "degenerate.ply")
+    trimesh.Trimesh(vertices=vertices, faces=faces, process=False).export(path)
+
+    report = validate.validate(path)
+    assert report["degenerate_faces"] == 1
+    assert not report["valid"]
+
+
+def test_failed_intersection_measurement_fails_validation(tmp_path, monkeypatch):
+    import trimesh
+
+    path = str(tmp_path / "box.stl")
+    trimesh.creation.box().export(path)
+    monkeypatch.setattr(validate, "_self_intersections", lambda _path, _mesh: "error: Test")
+
+    report = validate.validate(path)
+    assert not report["valid"]
+    assert "did not complete" in " ".join(report["problems"])
+    assert "valid               NO" in validate.summarise(report)
