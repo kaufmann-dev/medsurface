@@ -1,12 +1,7 @@
 """Topological repair for meshes that are not watertight.
 
-The extraction pipeline in this package normally produces a closed, manifold
-surface directly. This module exists for meshes from elsewhere, or for the rare
-case where aggressive morphology leaves a defect.
-
-MeshLib was chosen over the alternatives after a head-to-head comparison on a
-7.5M-triangle CT bone surface: it was the only library that returned a watertight,
-2-manifold, hole-free result, and it did so in ~9 seconds.
+The extraction pipeline normally produces a closed, manifold surface. This
+module repairs meshes from elsewhere or an output that still contains a defect.
 """
 
 from __future__ import annotations
@@ -33,8 +28,7 @@ def repair(in_path: str, out_path: str, log=None) -> dict:
     mm.fixMultipleEdges(mesh)
 
     params = mm.FixMeshDegeneraciesParams()
-    # The default is Mode.Remesh, which SUBDIVIDES: on a 7.5M-face mesh it
-    # produced 30M faces and a 1.5 GB file while reporting success.
+    # Avoid the default remeshing mode, which can subdivide the entire mesh.
     params.mode = mm.FixMeshDegeneraciesParams.Mode.Decimate
     params.maxDeviation = 1e-5
     params.tinyEdgeLength = 1e-4

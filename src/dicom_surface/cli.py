@@ -45,7 +45,7 @@ def _resolve_print_profile(args: argparse.Namespace):
     if not changes:
         return profile
 
-    # A profile bent by explicit flags is no longer the profile it was named after.
+    # Explicit flags produce a derived profile with matching display metadata.
     # `anatomical` in particular must stop describing itself as "no changes" the
     # moment --min-feature-mm is given.
     return replace(profile, name="%s+flags" % profile.name,
@@ -444,7 +444,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="do not close the surface where anatomy leaves the field of view")
     pc.add_argument("--no-validate", action="store_true")
     pc.add_argument("--self-intersections", action="store_true",
-                    help="also count self-intersecting faces (needs the 'quality' extra)")
+                    help="also count self-intersecting faces")
     pc.add_argument("--json", help="write results and provenance to this JSON file")
     pc.add_argument("-q", "--quiet", action="store_true")
     pc.set_defaults(func=cmd_convert)

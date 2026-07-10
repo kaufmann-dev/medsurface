@@ -175,18 +175,9 @@ def from_arrays(verts: np.ndarray, faces: np.ndarray) -> vtk.vtkPolyData:
 def decimate(poly: vtk.vtkPolyData, target_faces: int) -> vtk.vtkPolyData:
     """Topology-constrained quadric edge-collapse toward a face target.
 
-    Uses MeshLab's decimator, not VTK's. This is not a preference; VTK has no
-    working alternative. Measured on a 4M-triangle skull:
-
-    * ``vtkQuadricDecimation`` tears the mesh at *every* reduction -- 6 boundary
-      edges at 50%, 90 boundary and 207 non-manifold at 85%. A skull's orbital
-      walls are one voxel thick, and edge collapses weld their opposite faces
-      together. No backoff strategy converges to a clean result.
-    * ``vtkDecimatePro`` with ``PreserveTopologyOn`` both misses the target
-      (898k triangles when asked for 600k) and still emits non-manifold edges.
-    * Historical MeshLab runs with ``preservetopology=True`` hit 600k and 250k
-      exactly on that skull while holding genus and volume. Constrained meshes
-      are not universally guaranteed to reach a requested count.
+    PyMeshLab exposes the boundary, normal, and topology constraints used by the
+    pipeline. Those constraints can prevent a mesh from reaching the requested
+    face count.
     """
     current = poly.GetNumberOfPolys()
     if target_faces <= 0 or current <= target_faces:
