@@ -159,7 +159,15 @@ descriptions, paths, and derived anatomy can still be identifying.
 
 Validation reports triangle/vertex counts, components, watertightness, winding,
 boundary edges, non-manifold edge uses, degenerate faces, genus when defined,
-volume when closed, and bounding box. Self-intersection checking is opt-in.
+volume when closed, bounding box, and self-intersecting faces. The same complete
+check runs after `convert`, `merge`, and `repair`, and for `validate`.
+
+A report is valid only when the mesh is watertight, consistently wound, a valid
+enclosed volume, and has zero boundary edges, non-manifold edge uses, degenerate
+faces, and self-intersecting faces. Multiple closed components are allowed. A
+failed or unavailable self-intersection measurement makes validation incomplete
+and therefore invalid. Commands return exit status 1 for an invalid report;
+`convert` and `merge` retain `--no-validate` as an explicit full bypass.
 
 STL facets do not encode shared topology. Trimesh processing welds positions at
 digits derived from its merge tolerance before topology is calculated. Duplicate
@@ -172,7 +180,8 @@ directly.
 
 `repair` uses MeshLib to unite vertices within 1e-6, fix multiple edges,
 decimate degeneracies, and fill holes. It writes a new file; validation never
-mutates the input it measures.
+mutates the input it measures. A repaired file remains on disk if it does not
+pass the complete validation contract.
 
 ## Dependencies and development
 

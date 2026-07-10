@@ -13,11 +13,11 @@ def test_repair_closes_an_open_mesh(tmp_path):
     output = str(tmp_path / "repaired.stl")
     box.export(source)
 
-    before = validate.validate(source, self_intersections=False)
+    before = validate.validate(source)
     assert not before["watertight"]
 
     stats = repair.repair(source, output)
-    after = validate.validate(output, self_intersections=False)
+    after = validate.validate(output)
 
     assert stats["holes_in"] > 0
     assert stats["holes_out"] == 0

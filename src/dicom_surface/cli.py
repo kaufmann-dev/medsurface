@@ -26,6 +26,16 @@ def _warn(msg: str) -> None:
     print("warning: %s" % msg, file=sys.stderr, flush=True)
 
 
+def _quality_status(report: dict | None) -> int:
+    """Shared exit status for every command that validates a mesh."""
+    return 0 if report is None or report["valid"] else 1
+
+
+def _warn_if_invalid(report: dict, subject: str) -> None:
+    if not report["valid"]:
+        _warn("%s failed validation: %s" % (subject, "; ".join(report["problems"])))
+
+
 def _resolve_print_profile(args: argparse.Namespace):
     """Compose the print profile, letting explicit flags beat it.
 
@@ -200,14 +210,11 @@ def cmd_convert(args: argparse.Namespace) -> int:
 
     report = None
     if not args.no_validate:
-        report = validate_mod.validate(result.output_path,
-                                       self_intersections=args.self_intersections)
+        report = validate_mod.validate(result.output_path)
         log("")
         log("quality:")
         log(validate_mod.summarise(report))
-        if not report["watertight"]:
-            _warn("output is not watertight; try 'dicom-surface repair' "
-                  "or relax --closing-mm")
+        _warn_if_invalid(report, "output")
 
     if args.json:
         payload = {
@@ -229,7 +236,7 @@ def cmd_convert(args: argparse.Namespace) -> int:
             json.dump(payload, fh, indent=2)
         log("wrote %s" % args.json)
 
-    return 0
+    return _quality_status(report)
 
 
 # -------------------------------------------------------------------- merge
@@ -304,13 +311,11 @@ def cmd_merge(args: argparse.Namespace) -> int:
 
     report = None
     if not args.no_validate:
-        report = validate_mod.validate(result.output_path,
-                                       self_intersections=args.self_intersections)
+        report = validate_mod.validate(result.output_path)
         log("")
         log("quality:")
         log(validate_mod.summarise(report))
-        if not report["watertight"]:
-            _warn("fused mesh is not watertight; try 'dicom-surface repair'")
+        _warn_if_invalid(report, "fused output")
 
     if args.json:
         payload = {
@@ -334,18 +339,18 @@ def cmd_merge(args: argparse.Namespace) -> int:
             json.dump(payload, fh, indent=2)
         log("wrote %s" % args.json)
 
-    return 0
+    return _quality_status(report)
 
 
 # ----------------------------------------------------------------- validate
 def cmd_validate(args: argparse.Namespace) -> int:
-    report = validate_mod.validate(args.mesh, self_intersections=args.self_intersections)
+    report = validate_mod.validate(args.mesh)
     if args.json:
         print(json.dumps(report, indent=2))
     else:
         print(args.mesh)
         print(validate_mod.summarise(report))
-    return 0 if report["watertight"] else 1
+    return _quality_status(report)
 
 
 # -------------------------------------------------------------------- repair
@@ -355,11 +360,11 @@ def cmd_repair(args: argparse.Namespace) -> int:
     stats = repair_mod.repair(args.mesh, args.output, log=_log if not args.quiet else None)
 
     print("wrote %s" % args.output)
-    report = validate_mod.validate(args.output, self_intersections=args.self_intersections)
+    report = validate_mod.validate(args.output)
     print(validate_mod.summarise(report))
     if args.json:
         print(json.dumps({"repair": stats, "quality": report}, indent=2))
-    return 0 if report["watertight"] else 1
+    return _quality_status(report)
 
 
 # ---------------------------------------------------------------- presets
@@ -443,8 +448,6 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--no-cap", action="store_true",
                     help="do not close the surface where anatomy leaves the field of view")
     pc.add_argument("--no-validate", action="store_true")
-    pc.add_argument("--self-intersections", action="store_true",
-                    help="also count self-intersecting faces")
     pc.add_argument("--json", help="write results and provenance to this JSON file")
     pc.add_argument("-q", "--quiet", action="store_true")
     pc.set_defaults(func=cmd_convert)
@@ -483,7 +486,6 @@ def build_parser() -> argparse.ArgumentParser:
                     help="fuse even if the scans look like different patients or the "
                          "registration fails its quality gates")
     pm.add_argument("--no-validate", action="store_true")
-    pm.add_argument("--self-intersections", action="store_true")
     pm.add_argument("--json", help="write results and provenance to this JSON file")
     pm.add_argument("-q", "--quiet", action="store_true")
     pm.set_defaults(func=cmd_merge)
@@ -491,14 +493,12 @@ def build_parser() -> argparse.ArgumentParser:
     pv = sub.add_parser("validate", help="report mesh quality")
     pv.add_argument("mesh")
     pv.add_argument("--json", action="store_true")
-    pv.add_argument("--self-intersections", action="store_true")
     pv.set_defaults(func=cmd_validate)
 
     pr = sub.add_parser("repair", help="make a non-watertight mesh watertight")
     pr.add_argument("mesh")
     pr.add_argument("-o", "--output", required=True)
     pr.add_argument("--json", action="store_true")
-    pr.add_argument("--self-intersections", action="store_true")
     pr.add_argument("-q", "--quiet", action="store_true")
     pr.set_defaults(func=cmd_repair)
 
