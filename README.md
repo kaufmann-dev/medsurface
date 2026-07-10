@@ -48,11 +48,6 @@ description printed by `list` to select a different series:
 dicom-surface convert ~/scans/head-ct --series 1 -o skull.stl
 ```
 
-The `DICOM #` column is the source `SeriesNumber` metadata and is not a unique
-selector. Row IDs are local to one discovery result, so run `list` again and use
-its current IDs after directory contents change. If one SeriesInstanceUID
-contains several orientations, each orientation receives its own row ID.
-
 Read [Choosing a preset][presets] before converting other tissues or non-CT
 data. For a printable model, also read [Print profiles][profiles].
 
