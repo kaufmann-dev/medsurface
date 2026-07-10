@@ -78,7 +78,7 @@ def _quality(*, valid: bool = True) -> dict:
     }
 
 
-def _convert_result(output: str, *, warnings_: list[str] | None = None):
+def _convert_result(output: str, *, warnings_: list[str] | None = None, quality: dict | None = None):
     return SimpleNamespace(
         output_path=output,
         triangles=1200,
@@ -90,10 +90,11 @@ def _convert_result(output: str, *, warnings_: list[str] | None = None):
         surface_components=1,
         warnings=warnings_ or [],
         provenance={"series_uid": "1.2.3"},
+        quality=_quality() if quality is None else quality,
     )
 
 
-def _merge_result(output: str, *, warnings_: list[str] | None = None):
+def _merge_result(output: str, *, warnings_: list[str] | None = None, quality: dict | None = None):
     return SimpleNamespace(
         output_path=output,
         triangles=1400,
@@ -107,6 +108,7 @@ def _merge_result(output: str, *, warnings_: list[str] | None = None):
         seconds=2.5,
         warnings=warnings_ or [],
         provenance={"fixed": {"uid": "1.2.3"}, "moving": {"uid": "1.2.4"}},
+        quality=_quality() if quality is None else quality,
     )
 
 
@@ -274,6 +276,10 @@ def test_progress_display_has_plain_redirected_fallback_and_live_elapsed_time():
         ["merge", ".", ".", "-o", "out.stl", "--self-intersections"],
         ["validate", __file__, "--self-intersections"],
         ["repair", __file__, "-o", "fixed.stl", "--self-intersections"],
+        ["convert", ".", "-o", "out.stl", "--target-faces", "100"],
+        ["merge", ".", ".", "-o", "out.stl", "--target-faces", "100"],
+        ["convert", ".", "-o", "out.stl", "--no-validate"],
+        ["merge", ".", ".", "-o", "out.stl", "--no-validate"],
     ],
 )
 def test_removed_self_intersection_flag_is_a_usage_error(argv):
@@ -459,12 +465,11 @@ def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
             "11",
             "--passband",
             "0.12",
-            "--target-faces",
-            "1234",
+            "--simplify-error-mm",
+            "0.18",
             "--post-smooth-iters",
             "9",
             "--no-cap",
-            "--no-validate",
             "--json",
             str(json_file),
             "-q",
@@ -480,6 +485,7 @@ def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
     assert captured["preset"].threshold == "auto"
     assert captured["preset"].median_mm == pytest.approx(1.1)
     assert captured["preset"].opening_mm == pytest.approx(3.3)
+    assert captured["preset"].simplify_error_mm == pytest.approx(0.18)
     assert not captured["preset"].keep_largest_island
     assert not captured["preset"].keep_largest_component
     assert captured["threshold"] is None
@@ -488,7 +494,7 @@ def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
     assert captured["print_profile"].min_feature_mm == pytest.approx(0.7)
     payload = json.loads(json_file.read_text())
     assert payload["result"]["output"] == str(output)
-    assert payload["quality"] is None
+    assert payload["quality"]["valid"]
 
 
 def test_convert_defaults_quality_output_and_invalid_exit(tmp_path, monkeypatch):
@@ -497,14 +503,13 @@ def test_convert_defaults_quality_output_and_invalid_exit(tmp_path, monkeypatch)
     output = tmp_path / "surface.stl"
     monkeypatch.setattr(cli, "_discover", lambda _root: [chosen])
 
-    from dicom_surface import pipeline, validate as validate_mod
+    from dicom_surface import pipeline
 
     def fake_convert(**kwargs):
         captured.update(kwargs)
-        return _convert_result(str(output))
+        return _convert_result(str(output), quality=_quality(valid=False))
 
     monkeypatch.setattr(pipeline, "convert", fake_convert)
-    monkeypatch.setattr(validate_mod, "validate", lambda _path: _quality(valid=False))
     result = runner.invoke(
         cli.app,
         ["convert", str(tmp_path), "-o", str(output)],
@@ -565,7 +570,7 @@ def test_quiet_suppresses_progress_but_not_warnings(tmp_path, monkeypatch):
     )
     result = runner.invoke(
         cli.app,
-        ["convert", str(tmp_path), "-o", "out.stl", "--no-validate", "-q"],
+        ["convert", str(tmp_path), "-o", "out.stl", "-q"],
         prog_name="dicom-surface",
     )
 
@@ -626,12 +631,11 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
             "12",
             "--passband",
             "0.1",
-            "--target-faces",
-            "5000",
+            "--simplify-error-mm",
+            "0.2",
             "--post-smooth-iters",
             "8",
             "--force",
-            "--no-validate",
             "--json",
             str(json_file),
             "-q",
@@ -647,7 +651,7 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
     assert captured["grid_mm"] == pytest.approx(0.8)
     assert captured["smooth_iters"] == 12
     assert captured["passband"] == pytest.approx(0.1)
-    assert captured["target_faces"] == 5000
+    assert captured["simplify_error_mm"] == pytest.approx(0.2)
     assert captured["post_smooth_iters"] == 8
     assert captured["force"]
     assert captured["print_profile"].name == "fdm+flags"

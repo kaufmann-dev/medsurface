@@ -34,13 +34,14 @@ class Preset:
     #: Isotropic voxel size for the surface grid, mm. 0 = keep the native grid.
     #: Cheap and fast, but it destroys structures thinner than the target voxel:
     #: on a head CT, 0.6 mm reopened 257 pores that the closing had sealed.
-    #: Prefer target_faces to control triangle count.
+    #: Prefer simplify_error_mm to control triangle count without coarsening the grid.
     resample_mm: float = 0.0
     #: Surface stage.
     smooth_iters: int = 20
     passband: float = 0.1
-    #: Decimation to a triangle budget. 0 = off. Topology-preserving.
-    target_faces: int = 0
+    #: MeshLib estimated surface-deviation/QEM limit in model millimetres.
+    #: This is not a certified Hausdorff bound. 0 disables simplification.
+    simplify_error_mm: float = 0.0
     post_smooth_iters: int = 0
     keep_largest_component: bool = True
 
@@ -57,7 +58,7 @@ PRESETS: dict[str, Preset] = {
         closing_mm=2.4,
         min_island_mm3=50.0,
         smooth_iters=20,
-        target_faces=600_000,
+        simplify_error_mm=0.25,
         # 25, not 12. Measured on a head CT: 12 leaves visible slice terracing,
         # 25 removes it for 0.03 mm of extra mean displacement -- against a 0.8 mm
         # slice pitch whose stair-step amplitude is ~0.4 mm. Past 25 the returns
@@ -77,7 +78,7 @@ PRESETS: dict[str, Preset] = {
         # have a filter move their geometry: mean displacement here is ~0.02 mm
         # against ~0.085 mm for the `bone` preset.
         smooth_iters=8,
-        target_faces=0,
+        simplify_error_mm=0.0,
     ),
     "teeth": Preset(
         name="teeth",
@@ -90,7 +91,7 @@ PRESETS: dict[str, Preset] = {
         keep_largest_island=False,
         keep_largest_component=False,
         smooth_iters=10,
-        target_faces=300_000,
+        simplify_error_mm=0.12,
     ),
     "skin": Preset(
         name="skin",
@@ -101,7 +102,7 @@ PRESETS: dict[str, Preset] = {
         closing_mm=3.2,
         min_island_mm3=500.0,
         smooth_iters=25,
-        target_faces=400_000,
+        simplify_error_mm=0.35,
         post_smooth_iters=10,
     ),
     "auto": Preset(
@@ -113,7 +114,7 @@ PRESETS: dict[str, Preset] = {
         closing_mm=2.0,
         min_island_mm3=50.0,
         smooth_iters=20,
-        target_faces=600_000,
+        simplify_error_mm=0.25,
         post_smooth_iters=25,
     ),
 }

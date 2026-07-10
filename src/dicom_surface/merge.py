@@ -98,6 +98,7 @@ class MergeResult:
     seconds: float
     warnings: list[str] = field(default_factory=list)
     provenance: dict[str, Any] = field(default_factory=dict)
+    quality: dict[str, Any] = field(default_factory=dict)
 
 
 def _normalise_name(value: str) -> str:
@@ -297,7 +298,7 @@ def merge(
     grid_mm: float = DEFAULT_MERGE_GRID_MM,
     smooth_iters: int | None = None,
     passband: float | None = None,
-    target_faces: int | None = None,
+    simplify_error_mm: float | None = None,
     post_smooth_iters: int | None = None,
     print_profile: PrintProfile = ANATOMICAL,
     force: bool = False,
@@ -309,7 +310,8 @@ def merge(
     # single-scan one is.
     smooth_iters = preset.smooth_iters if smooth_iters is None else smooth_iters
     passband = preset.passband if passband is None else passband
-    target_faces = preset.target_faces if target_faces is None else target_faces
+    simplify_error_mm = (preset.simplify_error_mm if simplify_error_mm is None
+                         else simplify_error_mm)
     post_smooth_iters = (preset.post_smooth_iters if post_smooth_iters is None
                          else post_smooth_iters)
 
@@ -451,7 +453,7 @@ def merge(
         poly,
         smooth_iters=smooth_iters,
         passband=passband,
-        target_faces=target_faces,
+        simplify_error_mm=simplify_error_mm,
         post_smooth_iters=post_smooth_iters,
         keep_largest_component=True,
         step=step,
@@ -468,7 +470,7 @@ def merge(
         warnings.append("fused surface has %d boundary and %d non-manifold edge(s)"
                         % (boundary, nonmanifold))
 
-    step("write mesh", lambda: surface.write(poly, output_path))
+    quality = step("validate and publish mesh", lambda: surface.write_validated(poly, output_path))
 
     provenance = {
         "fixed": {"uid": series_a.uid, "series_number": series_a.series_number,
@@ -510,4 +512,5 @@ def merge(
         seconds=time.time() - started,
         warnings=warnings,
         provenance=provenance,
+        quality=quality,
     )

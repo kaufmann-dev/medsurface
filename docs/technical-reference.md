@@ -64,9 +64,9 @@ IDs that disambiguate it.
 4. Apply island filtering, median filtering, optional opening, and closing.
 5. Optionally apply a print profile on a selected isotropic mask grid.
 6. Pad field-of-view boundaries, extract the 0.5 isosurface with VTK Flying
-   Edges, smooth, select surface components, and optionally decimate.
-7. Transform vertices into DICOM patient LPS coordinates, write the requested
-   format, and validate the written file.
+   Edges, smooth, select surface components, and optionally simplify.
+7. Transform vertices into DICOM patient LPS coordinates; validate the mesh in
+   memory, write and validate a temporary file, then atomically publish it.
 
 The output is normally a closed surface because the mask is padded with
 background before extraction. When anatomy touches the scan boundary, the cap is
@@ -153,7 +153,7 @@ closes the volume boundary, but Flying Edges can emit degenerate triangles and
 mesh validity is measured rather than assumed.
 
 Smoothing uses `vtkWindowedSincPolyDataFilter`. The preset controls initial
-iterations, passband, and post-decimation iterations. Smoothing moves surfaces,
+iterations, passband, and post-simplification iterations. Smoothing moves surfaces,
 and the project does not provide a general deviation bound. Every requested
 iteration runs before self-intersection detection. If smoothing makes
 non-adjacent faces collide, vertices in those collision patches return to their
@@ -161,22 +161,23 @@ pre-smooth positions. The protected set grows by topological rings until the
 mesh is collision-free. Smoothing is therefore retained globally instead of
 reducing the iteration count for the whole surface.
 
-Decimation uses MeshLib's quadric edge-collapse implementation. A candidate is
-accepted only when it reaches the requested face budget within the parity of a
-closed mesh, preserves the component/hole/Euler signature, does not increase
-boundary or non-manifold edges, and has no self-intersections. If a candidate
+Simplification uses MeshLib's quadric edge-collapse implementation with
+`DecimateStrategy.MinimizeError`. `--simplify-error-mm` sets the estimated
+surface-deviation/QEM limit in model millimetres; this is not a certified
+Hausdorff bound, and `0` disables simplification. A candidate is accepted only
+when it preserves the component/hole/Euler signature, does not increase boundary
+or non-manifold edges, and has no self-intersections. If a candidate
 contains collisions, the colliding triangles are projected back onto the
 pre-decimation source mesh. Four-ring source neighborhoods around those
 locations are excluded from collapse and decimation restarts. Up to eight local
-protection passes are allowed. MeshLib supplies the fast per-pass collision
-selection and PyMeshLab independently checks a candidate before acceptance.
+protection passes are allowed. MeshLib supplies every collision check and marks
+both faces from each colliding pair.
 
-This keeps the requested face count while retaining source resolution only in
-small unsafe patches. If topology or manifold checks fail, a collision patch
-cannot be mapped, or all protection passes are exhausted, the valid
-pre-decimation mesh is retained and the command reports a warning. Meshes
-already under budget are unchanged. Conversion and merging use this same
-finishing path.
+This keeps simplification active outside small unsafe patches. If topology or
+manifold checks fail, a collision patch cannot be mapped, or all protection
+passes are exhausted, the valid pre-decimation mesh is retained and the command
+reports a warning. The resulting face count and MeshLib's introduced-error
+estimate are reported. Conversion and merging use this same finishing path.
 
 ## Merge registration and gates
 
@@ -239,18 +240,19 @@ check runs after `convert`, `merge`, and `repair`, and for `validate`.
 A report is valid only when the mesh is watertight, consistently wound, a valid
 enclosed volume, and has zero boundary edges, non-manifold edge uses, degenerate
 faces, and self-intersecting faces. Multiple closed components are allowed. A
-failed or unavailable self-intersection measurement makes validation incomplete
-and therefore invalid. Commands return exit status 1 for an invalid report;
-`convert` and `merge` retain `--no-validate` as an explicit full bypass.
+failed self-intersection measurement makes validation incomplete and therefore
+invalid. `convert` and `merge` have no validation bypass: they validate both the
+in-memory mesh and the serialized temporary file, then atomically replace the
+requested destination only with a valid output.
 
 STL facets do not encode shared topology. Trimesh processing welds positions at
 digits derived from its merge tolerance before topology is calculated. Duplicate
 faces are not removed and inconsistent winding is reported rather than repaired.
 
 STL, PLY, and OBJ are loaded by Trimesh. VTP is loaded and triangulated with VTK,
-then passed through the same Trimesh metric pipeline. VTP self-intersection checks
-pass the in-memory triangle mesh to PyMeshLab because PyMeshLab cannot load VTP
-directly.
+then passed through the same Trimesh metric pipeline. Every format's
+self-intersection check converts its in-memory triangles to MeshLib and counts
+the unique faces in colliding pairs.
 
 `repair` uses MeshLib to unite vertices within 1e-6, fix multiple edges,
 decimate degeneracies, and fill holes. It writes a new file; validation never
@@ -270,11 +272,8 @@ uv run pytest -q
 ```
 
 Hatchling is the PEP 517 build backend, and uv orchestrates the workflow.
-
-On Linux, the PyMeshLab wheel expects `libGL.so.1`, and its meshing plugin used
-for decimation expects `libOpenGL.so.0`. Distribution package names differ; on
-Debian and Ubuntu they are provided by `libgl1` and `libopengl0`. CI installs
-both before `uv sync --locked`.
+MeshLib is pinned to `3.1.3.297` for consistent collision and simplification
+behavior; no OpenGL system dependency is required.
 
 ## Verification
 

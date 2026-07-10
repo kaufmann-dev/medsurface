@@ -132,14 +132,14 @@ def test_padding_preserves_physical_coordinates(solid_sphere):
     assert padded.GetSize() == tuple(s + 2 for s in image.GetSize())
 
 
-def test_decimation_hits_the_triangle_budget(solid_sphere, tmp_path):
+def test_looser_simplification_error_produces_no_more_faces(solid_sphere):
     image, _ = solid_sphere
     poly = _mesh(image, smooth_iters=5)
     before = poly.GetNumberOfPolys()
-    target = before // 4
-    smaller = surface.decimate(poly, target)
-    assert smaller.GetNumberOfPolys() < before
-    assert smaller.GetNumberOfPolys() == pytest.approx(target, rel=0.25)
+    strict = surface.decimate(poly, 0.05)
+    loose = surface.decimate(poly, 0.25)
+    assert strict.GetNumberOfPolys() < before
+    assert loose.GetNumberOfPolys() <= strict.GetNumberOfPolys()
 
 
 def test_smoothing_trades_roughness_for_displacement(solid_sphere):
@@ -207,6 +207,27 @@ def test_smoothing_safeguard_changes_only_a_collision_neighborhood():
     assert surface.count_defects(guarded) == surface.count_defects(original)
 
 
+def test_meshlib_marks_both_faces_in_an_intersecting_pair():
+    import meshlib.mrmeshnumpy as mrmeshnumpy
+    import meshlib.mrmeshpy as mrmeshpy
+    import trimesh
+
+    left = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
+    right = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
+    right.apply_translation((1.6, 0.0, 0.0))
+    mesh = trimesh.util.concatenate([left, right])
+    poly = surface.from_arrays(mesh.vertices, mesh.faces)
+
+    selected = surface.selected_self_intersecting_faces(poly)
+    mr_mesh = mrmeshnumpy.meshFromFacesVerts(mesh.faces.astype(np.int32), mesh.vertices)
+    pairs = mrmeshpy.findSelfCollidingTriangles(mrmeshpy.MeshPart(mr_mesh))
+
+    assert pairs
+    pair = pairs[0]
+    assert selected[int(pair.aFace)]
+    assert selected[int(pair.bFace)]
+
+
 def test_count_defects_matches_validate(clipped_sphere, solid_sphere):
     closed = _mesh(solid_sphere[0])
     assert surface.count_defects(closed) == (0, 0)
@@ -257,8 +278,8 @@ def test_resampling_preserves_physical_placement(solid_sphere):
         assert grid.GetSize()[axis] * 1.0 >= padded.GetSize()[axis] * padded.GetSpacing()[axis]
 
 
-@pytest.mark.parametrize("keep", [0.5, 0.2, 0.05])
-def test_decimation_never_opens_a_closed_mesh(solid_sphere, tmp_path, keep):
+@pytest.mark.parametrize("error_mm", [0.05, 0.1, 0.25])
+def test_simplification_never_opens_a_closed_mesh(solid_sphere, tmp_path, error_mm):
     """Regression: both of VTK's decimators tear a closed surface.
 
     vtkQuadricDecimation leaks boundary edges at every reduction (6 at 50%, 90 at
@@ -270,11 +291,10 @@ def test_decimation_never_opens_a_closed_mesh(solid_sphere, tmp_path, keep):
     poly = _mesh(image, smooth_iters=10)
     assert surface.count_defects(poly) == (0, 0)
 
-    target = max(64, int(poly.GetNumberOfPolys() * keep))
-    smaller = surface.decimate(poly, target)
+    smaller = surface.decimate(poly, error_mm)
 
     assert surface.count_defects(smaller) == (0, 0)
-    report = validate.validate(_write(smaller, tmp_path, "dec_%s.stl" % keep))
+    report = validate.validate(_write(smaller, tmp_path, "dec_%s.stl" % error_mm))
     assert report["watertight"], report
     assert report["valid"], report["problems"]
     assert report["components"] == 1
@@ -283,13 +303,10 @@ def test_decimation_never_opens_a_closed_mesh(solid_sphere, tmp_path, keep):
     assert report["volume_mm3"] == pytest.approx(expected, rel=0.05)
 
 
-def test_decimation_hits_the_target(solid_sphere):
-    """Within a triangle or two: a closed surface has an even face count, so an
-    odd target cannot be hit exactly."""
+def test_zero_simplification_error_is_a_noop(solid_sphere):
     image, _ = solid_sphere
     poly = _mesh(image, smooth_iters=5)
-    target = poly.GetNumberOfPolys() // 3
-    assert surface.decimate(poly, target).GetNumberOfPolys() == pytest.approx(target, abs=2)
+    assert surface.decimate(poly, 0).GetNumberOfPolys() == poly.GetNumberOfPolys()
 
 
 def test_decimation_preserves_genus(tmp_path):
@@ -308,7 +325,7 @@ def test_decimation_preserves_genus(tmp_path):
     reader.Update()
     poly = reader.GetOutput()
 
-    smaller = surface.decimate(poly, max(64, poly.GetNumberOfPolys() // 6))
+    smaller = surface.decimate(poly, 0.25)
     after = validate.validate(_write(smaller, tmp_path, "torus_dec.stl"))
     assert after["watertight"]
     assert after["genus"] == 1, "decimation closed the tunnel"
@@ -330,10 +347,10 @@ def test_unsafe_decimation_is_discarded(monkeypatch):
     monkeypatch.setattr(
         surface,
         "_decimate_candidate",
-        lambda *_args: (intersecting, signature, signature),
+        lambda *_args: (intersecting, signature, signature, 0.25),
     )
 
-    result, stats = surface.decimate_safely(original, original.GetNumberOfPolys() - 2)
+    result, stats = surface.decimate_safely(original, 0.25)
 
     assert result is original
     assert not stats.accepted
@@ -360,13 +377,13 @@ def test_decimation_protects_source_patches_until_the_candidate_is_clean(monkeyp
     intersecting = surface.from_arrays(moved, valid_mesh.faces)
     signature = (2, 0, 4)
 
-    def candidate(_poly, _target, protected):
+    def candidate(_poly, _error, protected):
         result = valid if protected.any() else intersecting
-        return result, signature, signature
+        return result, signature, signature, 0.25
 
     monkeypatch.setattr(surface, "_decimate_candidate", candidate)
 
-    result, stats = surface.decimate_safely(original, valid.GetNumberOfPolys())
+    result, stats = surface.decimate_safely(original, 0.25)
 
     assert result is valid
     assert stats.accepted
@@ -409,11 +426,10 @@ def test_resampling_erases_structures_thinner_than_the_target_voxel():
     assert _slab_survives(20, 1.5), "4 mm of bone must survive a 1.5 mm grid"
 
 
-def test_decimation_is_a_noop_when_already_under_budget(solid_sphere):
+def test_simplification_with_zero_error_is_a_noop(solid_sphere):
     image, _ = solid_sphere
     poly = _mesh(image)
     n = poly.GetNumberOfPolys()
-    assert surface.decimate(poly, n * 10).GetNumberOfPolys() == n
     assert surface.decimate(poly, 0).GetNumberOfPolys() == n
 
 
@@ -422,6 +438,23 @@ def test_unsupported_extension_is_rejected(solid_sphere, tmp_path):
     poly = _mesh(image)
     with pytest.raises(ValueError, match="unsupported output extension"):
         surface.write(poly, os.path.join(str(tmp_path), "mesh.xyz"))
+
+
+def test_invalid_serialized_output_does_not_replace_destination(solid_sphere, tmp_path, monkeypatch):
+    image, _ = solid_sphere
+    destination = tmp_path / "mesh.stl"
+    destination.write_bytes(b"known valid destination")
+    monkeypatch.setattr(
+        validate,
+        "validate",
+        lambda _path: {"valid": False, "problems": ["test serialization failure"]},
+    )
+
+    with pytest.raises(ValueError, match="serialized output mesh is invalid"):
+        surface.write_validated(_mesh(image), str(destination))
+
+    assert destination.read_bytes() == b"known valid destination"
+    assert not list(tmp_path.glob(".mesh.stl.*"))
 
 
 @pytest.mark.parametrize("ext", [".stl", ".ply", ".obj", ".vtp"])

@@ -19,12 +19,8 @@ Python 3.10 or newer and [uv](https://docs.astral.sh/uv/) are required.
 uv tool install .
 ```
 
-On Linux, PyMeshLab needs system OpenGL libraries. Many desktop distributions
-already provide them. On Debian or Ubuntu, install them with:
-
-```sh
-sudo apt install libgl1 libopengl0
-```
+Mesh finishing and validation use the pinned MeshLib Python package; no system
+OpenGL libraries are required.
 
 ## Quick start
 
