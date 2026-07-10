@@ -1,11 +1,15 @@
 # dicom-surface
 
 [Install](#install) · [Quick start](#quick-start) · [Commands](#commands) ·
-[Printing](#prepare-a-model-for-printing) · [Merging](#merge-two-scans) ·
-[Safety](#safety-and-privacy) · [Technical documentation](docs/README.md)
+[User guide][user-guide] · [Technical reference][technical-reference]
 
 Turn a DICOM image series into an STL, PLY, OBJ, or VTP surface mesh from the
 command line.
+
+> **Safety:** `dicom-surface` is not validated for diagnosis, treatment
+> planning, or other clinical decisions. Segmentation and mesh processing can
+> change or omit anatomy. Review the source images and output independently.
+> See [Safety and privacy][safety].
 
 ## Install
 
@@ -36,16 +40,16 @@ Then convert the recommended series:
 dicom-surface convert ~/scans/head-ct -o skull.stl
 ```
 
-The command prints mesh-quality results after writing the file. A normal result
-should be valid, watertight, and consistently wound, with zero boundary and
-non-manifold edges and zero degenerate or self-intersecting faces.
-
-To select a different series, use the number, dotted identifier, UID, or part of
-its description shown by `list`:
+The default `bone` preset extracts CT voxels at or above 300 HU. Use the number,
+dotted identifier, UID, or part of the description printed by `list` to select
+a different series:
 
 ```sh
 dicom-surface convert ~/scans/head-ct --series 6 -o skull.stl
 ```
+
+Read [Choosing a preset][presets] before converting other tissues or non-CT
+data. For a printable model, also read [Print profiles][profiles].
 
 ## Commands
 
@@ -58,125 +62,57 @@ dicom-surface convert ~/scans/head-ct --series 6 -o skull.stl
 | `dicom-surface validate MODEL.stl`             | Report mesh quality without changing the file       |
 | `dicom-surface repair MODEL.stl -o FIXED.stl`  | Repair an open or non-manifold mesh                 |
 
-Run `dicom-surface COMMAND --help` for every option.
+Run `dicom-surface COMMAND --help` for every option. Output format follows the
+extension: `.stl`, `.ply`, `.obj`, or `.vtp`.
 
-Output format follows the extension: `.stl`, `.ply`, `.obj`, or `.vtp`.
-Coordinates are millimetres in DICOM patient LPS space. STL does not store that
-coordinate-system label.
+## Common workflows
 
-## Choose what to extract
-
-| preset        | use it for                                                | threshold | median | closing | island floor | smoothing iterations (initial + final) | triangle target |
-| ------------- | --------------------------------------------------------- | --------: | -----: | ------: | -----------: | -------------------------------------: | --------------: |
-| `bone`        | General CT bone models                                    |    300 HU | 1.0 mm |  2.4 mm |       50 mm³ |                                20 + 25 |         600,000 |
-| `bone-detail` | Maximum detail and measurement; produces very large files |    300 HU | 0.6 mm |  1.2 mm |       20 mm³ |                                  8 + 0 |             off |
-| `teeth`       | Enamel and dense dentin; keeps separate teeth             |  1,200 HU | 0.6 mm |  0.6 mm |        5 mm³ |                                 10 + 0 |         300,000 |
-| `skin`        | Outer skin surface from CT                                |   −300 HU | 1.4 mm |  3.2 mm |      500 mm³ |                                25 + 10 |         400,000 |
-| `auto`        | MR, CBCT, ultrasound, or other uncalibrated intensities   |      Otsu | 1.0 mm |  2.0 mm |       50 mm³ |                                20 + 25 |         600,000 |
-
-Numeric thresholds are inclusive lower bounds; `auto` calculates an Otsu
-threshold from the scan. The triangle target is a requested face-count budget,
-not a guaranteed exact count. `teeth` keeps every surviving mask island and
-surface component; the other presets keep only the largest.
-
-Examples:
+Choose a different tissue preset or an explicit threshold:
 
 ```sh
 dicom-surface convert scans/ --preset teeth -o teeth.stl
 dicom-surface convert scans/ --threshold 250 -o bone-250hu.stl
 ```
 
-CT Hounsfield-unit presets are refused on non-CT data unless you provide an
-explicit threshold. Use `--preset auto` when intensities are not calibrated HU.
-
-## Prepare a model for printing
-
-Print profiles seal small pores, remove tiny fragments, and add material to
-selected thin mask regions:
+Prepare selected thin regions for resin or FDM printing:
 
 ```sh
 dicom-surface convert scans/ --print-profile resin -o resin-skull.stl
-dicom-surface convert scans/ --print-profile fdm -o fdm-skull.stl
 ```
 
-| profile      | intended use                      | closing floor | island floor | feature target |
-| ------------ | --------------------------------- | ------------: | -----------: | -------------: |
-| `anatomical` | No print-profile changes; default |     unchanged |    unchanged |           none |
-| `resin`      | Fine-detail resin printing        |        3.2 mm |      100 mm³ |         0.6 mm |
-| `fdm`        | FDM/nozzle printing               |        4.8 mm |      200 mm³ |         1.2 mm |
-
-Closing and island floors raise the preset values only when the profile value
-is larger.
-
-These are mask-processing targets, not guarantees about final STL thickness or
-the manufactured part. Inspect the result in your slicer. Short thin structures
-next to thick anatomy are a documented limitation; see the
-[technical reference](docs/technical-reference.md#print-profile-behavior).
-
-## Merge two scans
-
-Use `merge` only for scans of the same person and anatomy:
+Merge two scans after confirming that they show the same person and anatomy:
 
 ```sh
 dicom-surface merge facial-ct/ sinus-ct/ \
   --series-a 6 --series-b 2 -o skull.stl
 ```
 
-The first scan defines the output coordinate frame. The second is rigidly
-registered before both masks are combined. Identity and registration-quality
-checks can refuse unsafe input.
-
-`--force` overrides patient, modality, and registration checks. It can create a
-plausible-looking but incorrect model, so use it only after independently
-confirming the scans belong together.
+The first scan defines the output coordinate frame. Identity and registration
+checks can refuse unsafe input. `--force` overrides those checks and can create
+a plausible-looking but incorrect model.
 
 ## Validate and repair
 
-Validation never repairs the file it measures:
+`convert` and `merge` validate the written mesh by default. Inspect an existing
+mesh without changing it:
 
 ```sh
 dicom-surface validate model.stl
 ```
 
-Validation always checks self-intersections because watertightness alone does
-not rule them out. A failed check returns a nonzero exit status. `convert` and
-`merge` use the same validation unless you pass `--no-validate`.
-
-Repair creates a new file and validates it afterward:
+Repair writes and then validates a separate output file:
 
 ```sh
 dicom-surface repair broken.stl -o repaired.stl
 ```
 
-Input and output must be different files; repair never overwrites its input.
+A valid mesh can still be anatomically wrong. Read the [input limitations][input-limitations]
+and the [validation explanation][validation] before relying on an output.
 
-## Input limitations
-
-The tested input path is a classic single-frame DICOM image stack. Enhanced
-multi-frame DICOM and vendor mosaic formats are not supported. Compressed pixel
-data depends on the codecs included with SimpleITK/GDCM.
-
-Use `list` before converting. It rejects short stacks, labelled localizers, and
-severely inconsistent spacing, but it cannot prove that every DICOM geometry is
-correct. See the [compatibility table](docs/technical-reference.md#dicom-compatibility).
-
-## Safety and privacy
-
-- Segmentation thresholds, smoothing, capping, print preparation, and scan
-  resolution can all change or omit anatomy.
-- A watertight mesh can still be anatomically wrong or self-intersecting.
-- Field-of-view truncation is capped flat by default and cannot recover missing
-  anatomy.
-- `merge` compares selected patient fields but does not establish identity.
-- Series UIDs, descriptions, paths, and derived anatomy can remain identifying.
-- Treat every output mesh as personal health data.
-
-## Development
-
-```sh
-uv sync --locked
-uv run pytest -q
-```
-
-The project pins uv 0.11.28, uses Python 3.12 for local development, and tests
-Python 3.10–3.13 in CI.
+[user-guide]: https://github.com/kaufmann-dev/dicom-surface/blob/main/docs/user-guide.md
+[technical-reference]: https://github.com/kaufmann-dev/dicom-surface/blob/main/docs/technical-reference.md
+[safety]: https://github.com/kaufmann-dev/dicom-surface/blob/main/docs/user-guide.md#safety-and-privacy
+[presets]: https://github.com/kaufmann-dev/dicom-surface/blob/main/docs/user-guide.md#choosing-a-preset
+[profiles]: https://github.com/kaufmann-dev/dicom-surface/blob/main/docs/user-guide.md#print-profiles
+[input-limitations]: https://github.com/kaufmann-dev/dicom-surface/blob/main/docs/user-guide.md#input-requirements-and-limitations
+[validation]: https://github.com/kaufmann-dev/dicom-surface/blob/main/docs/user-guide.md#understanding-validation
