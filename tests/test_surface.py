@@ -171,6 +171,42 @@ def test_smoothing_trades_roughness_for_displacement(solid_sphere):
     assert roughness[0] > roughness[-1]
 
 
+def test_safe_smoothing_leaves_a_clean_result_exactly_unchanged(solid_sphere):
+    image, _ = solid_sphere
+    original = _mesh(image)
+    requested = surface.smooth(original, 10, 0.1)
+
+    guarded, stats = surface.protect_smoothed_surface(original, requested, 10)
+
+    requested_verts, requested_faces = surface.to_arrays(requested)
+    guarded_verts, guarded_faces = surface.to_arrays(guarded)
+    assert np.array_equal(guarded_faces, requested_faces)
+    assert np.array_equal(guarded_verts, requested_verts)
+    assert stats.initial_self_intersecting_faces == 0
+    assert stats.protected_vertices == 0
+
+
+def test_smoothing_safeguard_changes_only_a_collision_neighborhood():
+    import trimesh
+
+    left = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
+    right = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
+    right.apply_translation((2.2, 0.0, 0.0))
+    original_mesh = trimesh.util.concatenate([left, right])
+
+    moved = original_mesh.vertices.copy()
+    moved[len(left.vertices):, 0] -= 0.4
+    original = surface.from_arrays(original_mesh.vertices, original_mesh.faces)
+    intersecting = surface.from_arrays(moved, original_mesh.faces)
+    assert surface.selected_self_intersecting_faces(intersecting).any()
+
+    guarded, stats = surface.protect_smoothed_surface(original, intersecting, 25)
+
+    assert not surface.selected_self_intersecting_faces(guarded).any()
+    assert 0 < stats.protected_vertices < len(original_mesh.vertices)
+    assert surface.count_defects(guarded) == surface.count_defects(original)
+
+
 def test_count_defects_matches_validate(clipped_sphere, solid_sphere):
     closed = _mesh(solid_sphere[0])
     assert surface.count_defects(closed) == (0, 0)
@@ -227,7 +263,7 @@ def test_decimation_never_opens_a_closed_mesh(solid_sphere, tmp_path, keep):
 
     vtkQuadricDecimation leaks boundary edges at every reduction (6 at 50%, 90 at
     85% on a real skull); vtkDecimatePro with PreserveTopologyOn misses the target
-    and still emits non-manifold edges. The MeshLab decimator holds topology, so a
+    and still emits non-manifold edges. The MeshLib decimator holds topology, so a
     watertight mesh stays watertight and its volume barely moves.
     """
     image, radius = solid_sphere
@@ -240,6 +276,7 @@ def test_decimation_never_opens_a_closed_mesh(solid_sphere, tmp_path, keep):
     assert surface.count_defects(smaller) == (0, 0)
     report = validate.validate(_write(smaller, tmp_path, "dec_%s.stl" % keep))
     assert report["watertight"], report
+    assert report["valid"], report["problems"]
     assert report["components"] == 1
     assert report["genus"] == 0
     expected = 4.0 / 3.0 * math.pi * radius**3
@@ -275,6 +312,68 @@ def test_decimation_preserves_genus(tmp_path):
     after = validate.validate(_write(smaller, tmp_path, "torus_dec.stl"))
     assert after["watertight"]
     assert after["genus"] == 1, "decimation closed the tunnel"
+
+
+def test_unsafe_decimation_is_discarded(monkeypatch):
+    import trimesh
+
+    left = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
+    right = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
+    right.apply_translation((2.2, 0.0, 0.0))
+    original_mesh = trimesh.util.concatenate([left, right])
+    original = surface.from_arrays(original_mesh.vertices, original_mesh.faces)
+
+    moved = original_mesh.vertices.copy()
+    moved[len(left.vertices):, 0] -= 0.4
+    intersecting = surface.from_arrays(moved, original_mesh.faces)
+    signature = (2, 0, 4)
+    monkeypatch.setattr(
+        surface,
+        "_decimate_candidate",
+        lambda *_args: (intersecting, signature, signature),
+    )
+
+    result, stats = surface.decimate_safely(original, original.GetNumberOfPolys() - 2)
+
+    assert result is original
+    assert not stats.accepted
+    assert stats.remaining_self_intersecting_faces > 0
+    assert "self-intersecting" in stats.rejection_reason
+
+
+def test_decimation_protects_source_patches_until_the_candidate_is_clean(monkeypatch):
+    import trimesh
+
+    source_left = trimesh.creation.icosphere(subdivisions=3, radius=1.0)
+    source_right = trimesh.creation.icosphere(subdivisions=3, radius=1.0)
+    source_right.apply_translation((2.2, 0.0, 0.0))
+    source_mesh = trimesh.util.concatenate([source_left, source_right])
+    original = surface.from_arrays(source_mesh.vertices, source_mesh.faces)
+
+    left = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
+    right = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
+    right.apply_translation((2.2, 0.0, 0.0))
+    valid_mesh = trimesh.util.concatenate([left, right])
+    valid = surface.from_arrays(valid_mesh.vertices, valid_mesh.faces)
+    moved = valid_mesh.vertices.copy()
+    moved[len(left.vertices):, 0] -= 0.4
+    intersecting = surface.from_arrays(moved, valid_mesh.faces)
+    signature = (2, 0, 4)
+
+    def candidate(_poly, _target, protected):
+        result = valid if protected.any() else intersecting
+        return result, signature, signature
+
+    monkeypatch.setattr(surface, "_decimate_candidate", candidate)
+
+    result, stats = surface.decimate_safely(original, valid.GetNumberOfPolys())
+
+    assert result is valid
+    assert stats.accepted
+    assert stats.repair_attempts == 1
+    assert stats.initial_self_intersecting_faces > 0
+    assert stats.remaining_self_intersecting_faces == 0
+    assert stats.protected_input_faces > 0
 
 
 def _slab_survives(thickness_voxels, mm, spacing=0.2):

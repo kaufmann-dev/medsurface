@@ -81,7 +81,11 @@ explicit `--threshold`.
 `teeth` keeps every mask island and surface component that survives its size
 floor. The other presets keep only the largest component. Triangle targets are
 requested face-count budgets; constrained meshes may finish above them, and
-meshes already below the target are not enlarged.
+meshes already below the target are not enlarged. Decimation protects small
+source-surface neighborhoods when collapsing them would create
+self-intersections. It keeps the target count by simplifying elsewhere; if no
+candidate can preserve topology and mesh validity, the valid higher-resolution
+surface is retained with a warning.
 
 ```sh
 dicom-surface convert scans/ --preset teeth -o teeth.stl
@@ -170,6 +174,12 @@ enclosed volume, and has no boundary edges, non-manifold edge uses, degenerate
 faces, or self-intersecting faces. Multiple closed components are allowed. A
 failed or unavailable self-intersection measurement makes the result incomplete
 and therefore invalid.
+
+Before writing, conversion and merging also guard both smoothing stages and
+decimation against self-intersections. Smoothing still runs every requested
+iteration; only vertices in collision neighborhoods retain their pre-smooth
+positions. These safeguards are reported as warnings and recorded in JSON
+provenance when they are used.
 
 These checks establish mesh structure, not anatomical correctness,
 manufacturability, dimensional accuracy, or fitness for a clinical purpose.

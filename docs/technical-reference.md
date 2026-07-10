@@ -154,14 +154,29 @@ mesh validity is measured rather than assumed.
 
 Smoothing uses `vtkWindowedSincPolyDataFilter`. The preset controls initial
 iterations, passband, and post-decimation iterations. Smoothing moves surfaces,
-and the project does not provide a general deviation bound.
+and the project does not provide a general deviation bound. Every requested
+iteration runs before self-intersection detection. If smoothing makes
+non-adjacent faces collide, vertices in those collision patches return to their
+pre-smooth positions. The protected set grows by topological rings until the
+mesh is collision-free. Smoothing is therefore retained globally instead of
+reducing the iteration count for the whole surface.
 
-Decimation uses PyMeshLab's
-`meshing_decimation_quadric_edge_collapse` with boundary, normal, and topology
-preservation enabled. `targetfacenum` is a requested budget, not a guarantee
-that every constrained mesh can reach it. Meshes already under budget are left
-unchanged. Boundary and non-manifold edges are compared before and after
-decimation.
+Decimation uses MeshLib's quadric edge-collapse implementation. A candidate is
+accepted only when it reaches the requested face budget within the parity of a
+closed mesh, preserves the component/hole/Euler signature, does not increase
+boundary or non-manifold edges, and has no self-intersections. If a candidate
+contains collisions, the colliding triangles are projected back onto the
+pre-decimation source mesh. Four-ring source neighborhoods around those
+locations are excluded from collapse and decimation restarts. Up to eight local
+protection passes are allowed. MeshLib supplies the fast per-pass collision
+selection and PyMeshLab independently checks a candidate before acceptance.
+
+This keeps the requested face count while retaining source resolution only in
+small unsafe patches. If topology or manifold checks fail, a collision patch
+cannot be mapped, or all protection passes are exhausted, the valid
+pre-decimation mesh is retained and the command reports a warning. Meshes
+already under budget are unchanged. Conversion and merging use this same
+finishing path.
 
 ## Merge registration and gates
 

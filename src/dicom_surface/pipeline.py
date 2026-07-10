@@ -13,6 +13,7 @@ from .presets import ANATOMICAL, Preset, PrintProfile, accepts_modality
 from .series import Series
 
 Logger = Callable[[str], None]
+StepRunner = Callable[[str, Callable[[], Any]], Any]
 
 
 @dataclass
@@ -31,8 +32,112 @@ class Result:
     provenance: dict[str, Any]
 
 
+@dataclass
+class SurfaceFinish:
+    poly: Any
+    surface_components: int
+    warnings: list[str]
+    provenance: dict[str, Any]
+
+
 class ModalityMismatch(ValueError):
     pass
+
+
+def finish_surface(
+    poly,
+    *,
+    smooth_iters: int,
+    passband: float,
+    target_faces: int,
+    post_smooth_iters: int,
+    keep_largest_component: bool,
+    step: StepRunner,
+    log: Logger,
+) -> SurfaceFinish:
+    """Shared, intersection-safe finishing for conversion and fusion."""
+    warnings = []
+
+    poly, initial = step(
+        "smooth",
+        lambda: surface.smooth_safely(poly, smooth_iters, passband),
+    )
+    if initial.initial_self_intersecting_faces:
+        warnings.append(
+            "initial smoothing kept %s vertices at their pre-smooth positions "
+            "to prevent %d self-intersecting face(s); all %d requested iterations "
+            "were retained elsewhere"
+            % (
+                f"{initial.protected_vertices:,}",
+                initial.initial_self_intersecting_faces,
+                initial.requested_iterations,
+            )
+        )
+
+    surface_components = 1
+    if keep_largest_component:
+        poly, surface_components = step(
+            "largest component",
+            lambda: surface.largest_component(poly),
+        )
+        log("  surface shells: %d (kept 1)" % surface_components)
+
+    if target_faces > 0 and poly.GetNumberOfPolys() > target_faces:
+        poly, decimation = step(
+            "decimate",
+            lambda: surface.decimate_safely(poly, target_faces),
+        )
+    else:
+        poly, decimation = surface.decimate_safely(poly, target_faces)
+    if decimation.attempted and not decimation.accepted:
+        warnings.append(
+            "decimation to %s triangles was discarded because %s; kept the valid "
+            "%s-triangle surface"
+            % (
+                f"{decimation.requested_faces:,}",
+                decimation.rejection_reason,
+                f"{decimation.actual_faces:,}",
+            )
+        )
+    elif decimation.repair_attempts:
+        warnings.append(
+            "decimation protected %s source faces (%.2f%%) from collapse to prevent "
+            "%s self-intersecting candidate faces; the collision-free result contains "
+            "%s triangles"
+            % (
+                f"{decimation.protected_input_faces:,}",
+                100.0 * decimation.protected_input_face_fraction,
+                f"{decimation.initial_self_intersecting_faces:,}",
+                f"{decimation.actual_faces:,}",
+            )
+        )
+
+    poly, final = step(
+        "post-smooth",
+        lambda: surface.smooth_safely(poly, post_smooth_iters, passband),
+    )
+    if final.initial_self_intersecting_faces:
+        warnings.append(
+            "post-smoothing kept %s vertices at their pre-smooth positions "
+            "to prevent %d self-intersecting face(s); all %d requested iterations "
+            "were retained elsewhere"
+            % (
+                f"{final.protected_vertices:,}",
+                final.initial_self_intersecting_faces,
+                final.requested_iterations,
+            )
+        )
+
+    return SurfaceFinish(
+        poly=poly,
+        surface_components=surface_components,
+        warnings=warnings,
+        provenance={
+            "initial_smoothing": asdict(initial),
+            "decimation": asdict(decimation),
+            "post_smoothing": asdict(final),
+        },
+    )
 
 
 def build_mask(image: sitk.Image, preset: Preset, threshold: float,
@@ -268,28 +373,19 @@ def convert(
     if poly.GetNumberOfPolys() == 0:
         raise ValueError("marching cubes produced no triangles")
 
-    poly = step("smooth", lambda: surface.smooth(poly, preset.smooth_iters, preset.passband))
-
-    surface_components = 1
-    if preset.keep_largest_component:
-        poly, surface_components = step("largest component",
-                                        lambda: surface.largest_component(poly))
-        say("  surface shells: %d (kept 1)" % surface_components)
-
-    if preset.target_faces > 0 and poly.GetNumberOfPolys() > preset.target_faces:
-        before = surface.count_defects(poly)
-        poly = step("decimate", lambda: surface.decimate(poly, preset.target_faces))
-        after = surface.count_defects(poly)
-        if after > before:
-            warnings.append(
-                "decimation to %s triangles introduced %d boundary and %d non-manifold "
-                "edge(s); the mesh is no longer watertight. Raise --target-faces, or run "
-                "'dicom-surface repair'."
-                % (f"{preset.target_faces:,}", after[0] - before[0], after[1] - before[1])
-            )
-
-    poly = step("post-smooth",
-                lambda: surface.smooth(poly, preset.post_smooth_iters, preset.passband))
+    finished = finish_surface(
+        poly,
+        smooth_iters=preset.smooth_iters,
+        passband=preset.passband,
+        target_faces=preset.target_faces,
+        post_smooth_iters=preset.post_smooth_iters,
+        keep_largest_component=preset.keep_largest_component,
+        step=step,
+        log=say,
+    )
+    poly = finished.poly
+    surface_components = finished.surface_components
+    warnings.extend(finished.warnings)
     poly = step("index -> patient space (LPS)", lambda: surface.transform(poly, affine))
     poly = step("normals", lambda: surface.compute_normals(poly))
 
@@ -308,6 +404,7 @@ def convert(
         "threshold": value,
         "threshold_source": source,
         "print_profile": asdict(print_profile),
+        "surface_finishing": finished.provenance,
         "capped_field_of_view": bool(touches and cap_field_of_view),
         "coordinate_system": "LPS (DICOM patient space)",
     }
