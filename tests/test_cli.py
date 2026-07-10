@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 import warnings
@@ -19,6 +20,13 @@ from dicom_surface.series import Series
 
 
 runner = CliRunner()
+
+
+def _plain_subprocess_env() -> dict[str, str]:
+    """Keep captured Typer output plain even when GitHub Actions forces color."""
+    env = os.environ.copy()
+    env["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
+    return env
 
 
 def _series(
@@ -135,6 +143,7 @@ raise SystemExit(result.exit_code)
         capture_output=True,
         text=True,
         check=False,
+        env=_plain_subprocess_env(),
     )
 
 
@@ -143,6 +152,7 @@ def test_root_command_without_arguments_is_lightweight_help():
 
     assert result.returncode == 0
     assert result.stderr == ""
+    assert "\x1b" not in result.stdout
     assert "Usage: dicom-surface [OPTIONS] [COMMAND]" in result.stdout
     for command in ("list", "presets", "convert", "merge", "validate", "repair"):
         assert command in result.stdout
@@ -166,6 +176,7 @@ def test_every_help_surface_is_lightweight(argv):
     assert result.returncode == 0
     assert "Usage: dicom-surface" in result.stdout
     assert result.stderr == ""
+    assert "\x1b" not in result.stdout
     assert "Traceback" not in result.stdout
 
 
@@ -188,6 +199,7 @@ def test_malformed_invocations_fail_before_heavy_imports(argv):
     assert result.returncode == 2
     assert result.stdout == ""
     assert result.stderr.startswith("Usage: dicom-surface")
+    assert "\x1b" not in result.stderr
     assert "Error" in result.stderr
     assert "Traceback" not in result.stderr
 
@@ -198,10 +210,12 @@ def test_python_module_uses_public_program_name():
         capture_output=True,
         text=True,
         check=False,
+        env=_plain_subprocess_env(),
     )
 
     assert result.returncode == 0
     assert "Usage: dicom-surface" in result.stdout
+    assert "\x1b" not in result.stdout
 
 
 def test_registry_enums_match_presets_exactly():
