@@ -1,11 +1,9 @@
 """Mesh quality metrics.
 
-STL stores a triangle soup: every triangle carries its own three vertices and no
-connectivity at all. "Watertight", "manifold" and "hole" are therefore undefined
-until vertices are welded. Every metric below is computed after an exact-coordinate
-weld, which merges bit-identical positions and moves nothing.
-
-Without that step every STL ever written reports as 100% boundary edges.
+STL stores triangle facets without an explicit shared-vertex graph. "Watertight",
+"manifold", and "hole" therefore depend on welding coincident positions first.
+Trimesh processing performs an approximate, tolerance-derived weld before the
+metrics below are calculated.
 """
 
 from __future__ import annotations
@@ -15,16 +13,53 @@ from typing import Any
 
 import numpy as np
 import trimesh
+import vtk
+from vtk.util import numpy_support
 
 
-def _self_intersections(path: str) -> int | str:
+def _load_mesh(path: str) -> trimesh.Trimesh:
+    """Load a triangle mesh without limiting validation to Trimesh formats."""
+    if os.path.splitext(path)[1].lower() != ".vtp":
+        return trimesh.load_mesh(path, process=True)
+
+    reader = vtk.vtkXMLPolyDataReader()
+    if not reader.CanReadFile(path):
+        raise ValueError("invalid VTP file: %s" % path)
+    reader.SetFileName(path)
+
+    triangles = vtk.vtkTriangleFilter()
+    triangles.SetInputConnection(reader.GetOutputPort())
+    triangles.PassLinesOff()
+    triangles.PassVertsOff()
+    triangles.Update()
+    poly = triangles.GetOutput()
+    if poly.GetPoints() is None or poly.GetNumberOfPolys() == 0:
+        raise ValueError("VTP file contains no surface triangles: %s" % path)
+
+    vertices = numpy_support.vtk_to_numpy(poly.GetPoints().GetData()).astype(np.float64)
+    connectivity = numpy_support.vtk_to_numpy(poly.GetPolys().GetConnectivityArray())
+    faces = connectivity.reshape(-1, 3).astype(np.int64)
+    return trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
+
+
+def _self_intersections(path: str, mesh: trimesh.Trimesh | None = None) -> int | str:
     try:
         import pymeshlab
     except ImportError:  # pragma: no cover - pymeshlab is a hard dependency
         return "not measured (pymeshlab unavailable)"
     try:
         ms = pymeshlab.MeshSet()
-        ms.load_new_mesh(path)
+        if os.path.splitext(path)[1].lower() == ".vtp":
+            if mesh is None:
+                mesh = _load_mesh(path)
+            ms.add_mesh(
+                pymeshlab.Mesh(
+                    vertex_matrix=np.asarray(mesh.vertices),
+                    face_matrix=np.asarray(mesh.faces),
+                )
+            )
+        else:
+            ms.load_new_mesh(path)
         ms.apply_filter("meshing_remove_duplicate_vertices")
         ms.apply_filter("compute_selection_by_self_intersections_per_face")
         return int(ms.current_mesh().selected_face_number())
@@ -55,7 +90,7 @@ def _component_count(mesh: trimesh.Trimesh) -> int:
 
 def validate(path: str, self_intersections: bool = True) -> dict[str, Any]:
     """Full quality report for a mesh file."""
-    mesh = trimesh.load_mesh(path, process=True)  # process=True welds vertices
+    mesh = _load_mesh(path)
 
     edges = np.sort(mesh.edges_sorted, axis=1)
     _uniq, inverse, counts = np.unique(edges, axis=0, return_inverse=True, return_counts=True)
@@ -89,7 +124,7 @@ def validate(path: str, self_intersections: bool = True) -> dict[str, Any]:
         report["genus"] = int((2 - report["euler_number"]) // 2)
 
     if self_intersections:
-        report["self_intersecting_faces"] = _self_intersections(path)
+        report["self_intersecting_faces"] = _self_intersections(path, mesh)
 
     return report
 

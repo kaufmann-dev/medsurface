@@ -56,8 +56,8 @@ DEFAULT_GRID_MM = 0.4
 #: visibly rougher than the scans it was built from.
 
 # --- acceptance gates -------------------------------------------------------
-# Calibrated against four true pairs and one deliberate impostor (a metal bar
-# phantom given the skull's own patient identity):
+# Empirically selected from four positive reconstructions/repeat studies of one
+# skull and one deliberate impostor (a metal bar given the skull's identity):
 #
 #   pair                                   min overlap   dice    rms
 #   2024 x 2023 (cross-study, cross-kernel)    0.922    0.855   0.123
@@ -216,7 +216,7 @@ def check_compatible(a: Series, b: Series, force: bool = False) -> list[str]:
             raise MergeError(msg + ". Pass --force if these really are the same body.")
         warnings.append(msg)
     elif match.verdict == "unknown":
-        # De-identified data lands here, and merges without complaint.
+        # De-identified data lands here, warns, and proceeds.
         warnings.append("cannot verify that both scans are of the same person "
                         "(no comparable patient identifiers)")
 
@@ -341,7 +341,7 @@ def merge(
     say("threshold: fixed %.1f (%s), moving %.1f (%s)" % (value_a, source_a, value_b, source_b))
 
     # Register on anatomy, always. Thickening both scans would inflate Dice and
-    # surface overlap -- the very numbers the impostor gates are calibrated on --
+    # surface overlap -- the very numbers used by the empirical gates --
     # so a print profile would quietly make `merge` easier to fool.
     mask_a = step("segment fixed", lambda: pipeline.build_mask(vol_a.image, preset, value_a))
     mask_b = step("segment moving", lambda: pipeline.build_mask(vol_b.image, preset, value_b))
@@ -354,11 +354,13 @@ def merge(
 
     if print_profile != ANATOMICAL:
         say("print profile %s: %s" % (print_profile.name, print_profile.description))
-        # Dilation distributes over union -- dilate(A | B) == dilate(A) | dilate(B) --
-        # so thickening each scan before fusing is exactly thickening the fused
-        # solid, and it leaves each scan's fractional occupancy field intact. The
-        # selection of *what* to thicken does not distribute (a wall thin in one
-        # scan may be thick in the other), which errs toward more material: safe.
+        # Profile each scan before fractional-occupancy fusion. This preserves
+        # each scan's post-profile boundary, but the complete transform is not
+        # distributive: closing, island filtering, grid conversion, and thin-set
+        # selection can differ from profiling the fused mask. Controlled overlap
+        # cases show that this order can over-thicken shared structures; changing
+        # it requires a separate geometry task because fusion-first closing can
+        # also seal an anatomical inter-scan gap.
         mask_a = step("re-segment fixed for printing",
                       lambda: pipeline.build_mask(vol_a.image, preset, value_a,
                                                   print_profile, say))

@@ -4,6 +4,10 @@ Audit date: 2026-07-10. This report records the evidence used to correct the
 README and investigate two print-profile concerns. It describes the current
 implementation; no production algorithm or default was changed.
 
+> Historical note: the VTP validation issue identified in this report was fixed
+> in the subsequent low-risk workflow tranche. The two print-profile algorithm
+> concerns remain documented limitations pending a separate geometry task.
+
 ## Baseline and commands
 
 Repository state before the documentation patch: `8fb6668`. The workspace
@@ -351,7 +355,7 @@ Only `README.md` and this report were changed.
   version sensitivity, and pressure to alter production thresholds merely to
   satisfy a synthetic oracle.
 
-### 4. Make VTP output compatible with default validation
+### 4. Resolved: make VTP output compatible with default validation
 
 - **Observed failure:** `surface.write` accepts `.vtp`, but both default
   post-conversion validation and `dicom-surface validate` call Trimesh, which
@@ -366,3 +370,8 @@ Only `README.md` and this report were changed.
   a clear warning for unsupported validator formats.
 - **Regression risks:** metric differences between readers/welding rules,
   inconsistent self-intersection support, and extension-specific code paths.
+
+Resolution: VTP is now read and triangulated with VTK before entering the same
+Trimesh metric pipeline. The VTP self-intersection path passes the in-memory mesh
+to PyMeshLab. Both paths have regression tests; see
+`docs/bugs/vtp-validation.md`.

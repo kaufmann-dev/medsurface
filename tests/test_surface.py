@@ -184,8 +184,7 @@ def test_count_defects_matches_validate(clipped_sphere, solid_sphere):
 
 @pytest.mark.parametrize("mm", [0.6, 1.0, 1.5])
 def test_isotropic_resampling_stays_watertight(solid_sphere, tmp_path, mm):
-    """Resampling is the topology-safe way to shed triangles: marching cubes
-    always returns a manifold surface, so no defect can be introduced."""
+    """The tested padded sphere stays closed after occupancy resampling."""
     image, radius = solid_sphere
     padded = segment.pad(image, 1)
     grid = segment.resample_isotropic(padded, mm)
@@ -330,7 +329,7 @@ def test_unsupported_extension_is_rejected(solid_sphere, tmp_path):
         surface.write(poly, os.path.join(str(tmp_path), "mesh.xyz"))
 
 
-@pytest.mark.parametrize("ext", [".stl", ".ply", ".obj"])
+@pytest.mark.parametrize("ext", [".stl", ".ply", ".obj", ".vtp"])
 def test_roundtrip_formats(solid_sphere, tmp_path, ext):
     image, _ = solid_sphere
     poly = _mesh(image, smooth_iters=5)
@@ -338,3 +337,10 @@ def test_roundtrip_formats(solid_sphere, tmp_path, ext):
     assert os.path.getsize(path) > 0
     report = validate.validate(path, self_intersections=False)
     assert report["triangles"] > 0
+
+
+def test_vtp_self_intersection_check(solid_sphere, tmp_path):
+    image, _ = solid_sphere
+    path = _write(_mesh(image, smooth_iters=5), tmp_path, "m.vtp")
+    report = validate.validate(path, self_intersections=True)
+    assert report["self_intersecting_faces"] == 0

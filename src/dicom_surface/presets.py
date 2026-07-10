@@ -139,11 +139,9 @@ class PrintProfile:
     closing_mm: float = 0.0
     #: Floor on the island filter: fragments below this are unprintable anyway.
     min_island_mm3: float = 0.0
-    #: The printer's minimum feature size, and the whole of the thickening
-    #: contract: *no wall thinner than this*. One number, because the probe that
-    #: finds thin material and the growth that fixes it are the same ball of
-    #: radius ``min_feature_mm / 2``. A separate "thickening distance" could only
-    #: disagree with it about what was being promised.
+    #: Intended mask-space feature target. The selector and growth primitive use
+    #: the same ball of radius ``min_feature_mm / 2``. This is not a final-mesh
+    #: or manufactured-wall guarantee.
     min_feature_mm: float = 0.0
 
 
@@ -162,14 +160,14 @@ PRINT_PROFILES: dict[str, PrintProfile] = {
     "anatomical": ANATOMICAL,
     "resin": PrintProfile(
         name="resin",
-        description="Seals pores and brings every wall up to 0.6 mm. Keeps fine detail.",
+        description="Seals pores and targets 0.6 mm mask features. Keeps fine detail.",
         closing_mm=3.2,
         min_island_mm3=100.0,
         min_feature_mm=0.6,
     ),
     "fdm": PrintProfile(
         name="fdm",
-        description="Seals hard and brings every wall up to 1.2 mm for a nozzle. Sacrifices fine detail.",
+        description="Seals hard and targets 1.2 mm mask features for a nozzle. Sacrifices fine detail.",
         closing_mm=4.8,
         min_island_mm3=200.0,
         min_feature_mm=1.2,

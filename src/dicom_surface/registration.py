@@ -1,9 +1,9 @@
 """Rigid registration of two scans of the same anatomy.
 
-Two studies of one patient rarely share a usable frame of reference. DICOM patient
-coordinates are patient-oriented (LPS), but origin, pose and head tilt are set by
-the acquisition, so meshes from a 2023 and a 2024 head CT of the same skull can be
-850 mm apart in z and 10 degrees apart in tilt.
+This implementation does not inspect ``FrameOfReferenceUID`` or assume that two
+series already align. DICOM patient coordinates are patient-oriented (LPS), but
+origin, pose, and head tilt can differ between acquisitions, so ``merge`` always
+registers the moving scan.
 
 The search is global-then-local:
 

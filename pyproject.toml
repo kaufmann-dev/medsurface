@@ -32,10 +32,12 @@ dependencies = [
   # VTK's tear a closed skull surface open. Also provides self-intersection
   # counting for `validate`.
   "pymeshlab>=2023.12",
+  # `repair` is a first-class command, so its implementation must always be
+  # present in a normal installation.
+  "meshlib>=3.0",
 ]
 
-[project.optional-dependencies]
-repair = ["meshlib>=3.0"]
+[dependency-groups]
 dev = ["pytest>=7.0"]
 
 [project.scripts]
@@ -50,3 +52,6 @@ packages = ["src/dicom_surface"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv]
+required-version = "==0.11.28"

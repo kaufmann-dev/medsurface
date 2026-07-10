@@ -461,12 +461,11 @@ def test_thin_mask_speckles_a_voxelised_surface_which_is_why_thicken_ignores_it(
 
 
 def test_the_scans_own_resolution_limit_is_reported_not_hidden():
-    """A 0.6 mm feature cannot be *measured* on 0.8 mm slices, however finely the
-    printability grid is chosen: bone that thin never entered the data."""
+    """Sub-pitch anatomy is not reliably resolved in every direction."""
     profile = presets.PrintProfile(name="t", description="d", min_feature_mm=0.6)
     messages = " ".join(pipeline.grid_warnings(_box(spacing=(0.3, 0.3, 0.3)),
                                                profile, HEAD_CT))
-    assert "not a measurement of the anatomy" in messages
+    assert "not an anatomical thickness measurement" in messages
 
 
 # ------------------------------------------------------------------- merge
@@ -478,7 +477,7 @@ def test_merge_registers_on_anatomy_not_on_the_print_mask(monkeypatch):
     """The safety invariant.
 
     Thickening both scans inflates Dice and surface overlap -- the very numbers
-    the impostor gates are calibrated against -- so registration must never see a
+    used by the empirical gates -- so registration must never see a
     print mask. Confirmed end to end too: the bar phantom is refused with exactly
     the same 24.5% overlap and 0.314 Dice whether or not `--print-profile fdm` is
     given.
