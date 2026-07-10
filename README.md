@@ -148,6 +148,8 @@ Repair creates a new file and validates it afterward:
 dicom-surface repair broken.stl -o repaired.stl
 ```
 
+Input and output must be different files; repair never overwrites its input.
+
 ## Input limitations
 
 The tested input path is a classic single-frame DICOM image stack. Enhanced

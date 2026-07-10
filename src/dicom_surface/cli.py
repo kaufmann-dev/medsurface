@@ -344,7 +344,11 @@ def cmd_merge(args: argparse.Namespace) -> int:
 
 # ----------------------------------------------------------------- validate
 def cmd_validate(args: argparse.Namespace) -> int:
-    report = validate_mod.validate(args.mesh)
+    try:
+        report = validate_mod.validate(args.mesh)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print("error: cannot validate %s: %s" % (args.mesh, exc), file=sys.stderr)
+        return 1
     if args.json:
         print(json.dumps(report, indent=2))
     else:
@@ -357,13 +361,24 @@ def cmd_validate(args: argparse.Namespace) -> int:
 def cmd_repair(args: argparse.Namespace) -> int:
     from . import repair as repair_mod
 
-    stats = repair_mod.repair(args.mesh, args.output, log=_log if not args.quiet else None)
+    log = _log if not args.quiet and not args.json else None
+    try:
+        stats = repair_mod.repair(args.mesh, args.output, log=log)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print("error: cannot repair %s: %s" % (args.mesh, exc), file=sys.stderr)
+        return 1
 
-    print("wrote %s" % args.output)
-    report = validate_mod.validate(args.output)
-    print(validate_mod.summarise(report))
+    try:
+        report = validate_mod.validate(args.output)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print("error: repaired mesh could not be validated: %s" % exc, file=sys.stderr)
+        return 1
+
     if args.json:
-        print(json.dumps({"repair": stats, "quality": report}, indent=2))
+        print(json.dumps({"output": args.output, "repair": stats, "quality": report}, indent=2))
+    else:
+        print("wrote %s" % args.output)
+        print(validate_mod.summarise(report))
     return _quality_status(report)
 
 
@@ -492,13 +507,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     pv = sub.add_parser("validate", help="report mesh quality")
     pv.add_argument("mesh")
-    pv.add_argument("--json", action="store_true")
+    pv.add_argument("--json", action="store_true", help="write one JSON object to stdout")
     pv.set_defaults(func=cmd_validate)
 
     pr = sub.add_parser("repair", help="make a non-watertight mesh watertight")
     pr.add_argument("mesh")
     pr.add_argument("-o", "--output", required=True)
-    pr.add_argument("--json", action="store_true")
+    pr.add_argument("--json", action="store_true", help="write one JSON object to stdout")
     pr.add_argument("-q", "--quiet", action="store_true")
     pr.set_defaults(func=cmd_repair)
 
