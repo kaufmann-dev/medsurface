@@ -5,11 +5,56 @@ for auditing results or contributing to `dicom-surface`. Start with the project
 [README](../README.md) for installation and first use, or the [user
 guide](user-guide.md) for presets, profiles, input limitations, and safety.
 
+## Command-line architecture
+
+The console script points directly to a Typer application. Typer owns command
+dispatch, Rich-formatted help, required input path validation, typed preset and
+print-profile choices, and usage errors. The root callback prints help and
+returns success when no command is supplied. Shell completion options are not
+installed by the application.
+
+The CLI module imports only Typer, Rich, defaults, and preset registries while
+constructing commands. VTK, MeshLib, registration, validation, and processing
+modules are imported inside the command that needs them. Root help, command
+help, and malformed invocations therefore finish without loading the processing
+pipeline. Expected selection, modality, file, and safety failures are concise;
+unexpected programming exceptions remain visible, with traceback locals
+hidden.
+
+Human output uses shared Rich stdout and stderr consoles with terminal color
+detection. Series, preset, print-profile, and quality results use responsive
+tables. Dynamic paths, UIDs, descriptions, and error text are treated as plain
+text rather than Rich markup. Normal progress can be suppressed with `--quiet`,
+while warnings and failures remain visible.
+
+JSON is a separate plain-output contract. `list --json`, `validate --json`, and
+`repair --json` write only JSON to stdout. `convert --json FILE` and
+`merge --json FILE` write JSON only to the requested file. Human output never
+shares the JSON destination, and JSON contains no ANSI control sequences.
+Warnings raised by pydicom during discovery are captured, deduplicated with
+their occurrence counts preserved, and rendered concisely on stderr without
+Python source locations.
+
+## Series discovery and selection
+
+Discovery sorts stacks by DICOM `SeriesNumber`, complete SeriesInstanceUID, and
+orientation part, then assigns unique 1-based row IDs. Those IDs are stable for
+unchanged directory contents but intentionally local to one discovery result.
+They are not written into processing provenance. Provenance uses the complete
+UID, DICOM SeriesNumber, and orientation-part metadata instead.
+
+`--series`, `--series-a`, and `--series-b` resolve a displayed row ID, a complete
+SeriesInstanceUID, or a case-insensitive description substring. DICOM
+`SeriesNumber` is not a selector because it need not be unique. When a UID or
+description matches several orientation stacks, selection fails with the row
+IDs that disambiguate it.
+
 ## Processing pipeline
 
 `convert` performs these stages:
 
-1. Discover DICOM instances and group them by series UID and orientation.
+1. Discover DICOM instances, group them by series UID and orientation, and
+   assign deterministic row IDs after sorting.
 2. Order slices by `ImagePositionPatient` projected onto the slice normal.
 3. Load the ordered stack with SimpleITK and resolve the intensity threshold.
 4. Apply island filtering, median filtering, optional opening, and closing.
@@ -196,8 +241,9 @@ pass the complete validation contract.
 ## Dependencies and development
 
 The repository uses uv 0.11.28 for dependency resolution, environments, command
-execution, and CI. `uv.lock` covers Python 3.10–3.13; local development defaults
-to Python 3.12.
+execution, and CI. Typer 0.21 defines the CLI and Rich 14 renders human terminal
+output. `uv.lock` covers Python 3.10–3.13; local development defaults to Python
+3.12.
 
 ```sh
 uv sync --locked

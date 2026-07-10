@@ -5,6 +5,7 @@ import os
 
 import pytest
 import trimesh
+from typer.testing import CliRunner
 
 from dicom_surface import cli, repair, validate
 
@@ -45,18 +46,22 @@ def test_repair_refuses_to_overwrite_its_input_or_a_hard_link(tmp_path):
     assert source.read_bytes() == original
 
 
-def test_repair_json_mode_writes_only_json(tmp_path, capsys):
+def test_repair_json_mode_writes_only_json(tmp_path):
     box = trimesh.creation.box()
     box.update_faces([False, False] + [True] * (len(box.faces) - 2))
     source = tmp_path / "open.stl"
     output = tmp_path / "fixed.stl"
     box.export(source)
 
-    assert cli.main(["repair", str(source), "-o", str(output), "--json"]) == 0
-    captured = capsys.readouterr()
-    payload = json.loads(captured.out)
+    result = CliRunner().invoke(
+        cli.app,
+        ["repair", str(source), "-o", str(output), "--json"],
+        prog_name="dicom-surface",
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
 
-    assert captured.err == ""
+    assert result.stderr == ""
     assert payload["output"] == str(output)
     assert payload["repair"]["holes_filled"] > 0
     assert payload["quality"]["valid"]

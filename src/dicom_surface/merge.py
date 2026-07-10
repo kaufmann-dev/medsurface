@@ -189,7 +189,7 @@ def check_compatible(a: Series, b: Series, force: bool = False) -> list[str]:
     warnings: list[str] = []
 
     if a.uid == b.uid and a.part == b.part:
-        raise MergeError("both inputs resolve to the same series (%s)" % a.ident)
+        raise MergeError("both inputs resolve to the same series (%s)" % a.uid)
 
     if a.modality != b.modality:
         msg = ("modalities differ (%s vs %s); intensities are not comparable"
@@ -325,8 +325,12 @@ def merge(
 
     warnings = check_compatible(series_a, series_b, force=force)
 
-    say("fixed  %s  %s  (%d slices)" % (series_a.ident, series_a.label(), series_a.n_slices))
-    say("moving %s  %s  (%d slices)" % (series_b.ident, series_b.label(), series_b.n_slices))
+    say("fixed  DICOM #%s  %s  (%d slices)"
+        % (series_a.series_number if series_a.series_number is not None else "-",
+           series_a.label(), series_a.n_slices))
+    say("moving DICOM #%s  %s  (%d slices)"
+        % (series_b.series_number if series_b.series_number is not None else "-",
+           series_b.label(), series_b.n_slices))
 
     vol_a = volume_mod.load(series_a)
     vol_b = volume_mod.load(series_b)
@@ -440,10 +444,12 @@ def merge(
     surface.write(poly, output_path)
 
     provenance = {
-        "fixed": {"uid": series_a.uid, "ident": series_a.ident,
+        "fixed": {"uid": series_a.uid, "series_number": series_a.series_number,
+                  "series_orientation_part": [series_a.part, series_a.n_parts],
                   "description": series_a.description, "slices": series_a.n_slices,
                   "spacing_mm": list(vol_a.spacing), "threshold": value_a},
-        "moving": {"uid": series_b.uid, "ident": series_b.ident,
+        "moving": {"uid": series_b.uid, "series_number": series_b.series_number,
+                   "series_orientation_part": [series_b.part, series_b.n_parts],
                    "description": series_b.description, "slices": series_b.n_slices,
                    "spacing_mm": list(vol_b.spacing), "threshold": value_b},
         "grid_mm": grid_mm,

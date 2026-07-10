@@ -62,6 +62,9 @@ class Series:
     modality: str
     description: str
     series_number: int | None
+    #: Unique 1-based row identifier within one deterministic discovery result.
+    #: It is intentionally local to that result, unlike ``uid``.
+    id: int = 0
     files: list[str] = field(default_factory=list)
     rows: int | None = None
     columns: int | None = None
@@ -86,14 +89,6 @@ class Series:
     @property
     def n_slices(self) -> int:
         return len(self.files)
-
-    @property
-    def ident(self) -> str:
-        """Stable handle for ``--series``. ``6`` normally, ``1021.2`` when split."""
-        number = self.series_number if self.series_number is not None else "?"
-        if self.n_parts > 1:
-            return "%s.%d" % (number, self.part)
-        return "%s" % number
 
     @property
     def voxel_volume_mm3(self) -> float | None:
@@ -263,6 +258,8 @@ def discover(root: str) -> list[Series]:
             s.part,
         )
     )
+    for row_id, series in enumerate(out, start=1):
+        series.id = row_id
     return out
 
 
@@ -355,20 +352,17 @@ def rank(series: Iterable[Series]) -> list[Series]:
 
 
 def _resolve(hits: list[Series], what: str) -> Series:
-    """One match, or the single usable one among several, else an error."""
+    """Return one match or explain which discovery row IDs disambiguate it."""
     if len(hits) == 1:
         return hits[0]
-    usable = [s for s in hits if s.usable]
-    if len(usable) == 1:
-        return usable[0]
     raise ValueError(
-        "%s is ambiguous (%d stacks: %s); pass one of them explicitly"
-        % (what, len(hits), ", ".join(s.ident for s in hits))
+        "%s is ambiguous (%d rows: %s); pass a row ID from 'dicom-surface list'"
+        % (what, len(hits), ", ".join(str(s.id) for s in hits))
     )
 
 
 def select(series: list[Series], wanted: str | None) -> Series:
-    """Resolve ``wanted``: an ident (``6``, ``1021.2``), a UID, or a description."""
+    """Resolve a discovery row ID, complete UID, or description substring."""
     usable = [s for s in series if s.usable]
     if not usable:
         raise ValueError("no usable image series found")
@@ -376,19 +370,15 @@ def select(series: list[Series], wanted: str | None) -> Series:
     if wanted is None:
         return rank(usable)[0]
 
-    for s in series:
-        if s.ident == wanted:
-            return s
+    if wanted.isdigit():
+        row_id = int(wanted)
+        hits = [s for s in series if s.id == row_id]
+        if hits:
+            return _resolve(hits, "row ID %d" % row_id)
 
     hits = [s for s in series if s.uid == wanted]
     if hits:
         return _resolve(hits, "series UID %s" % wanted)
-
-    if wanted.isdigit():
-        n = int(wanted)
-        hits = [s for s in series if s.series_number == n]
-        if hits:
-            return _resolve(hits, "series number %d" % n)
 
     lowered = wanted.lower()
     hits = [s for s in series if lowered in s.description.lower()]

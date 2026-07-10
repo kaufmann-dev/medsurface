@@ -40,13 +40,18 @@ Then convert the recommended series:
 dicom-surface convert ~/scans/head-ct -o skull.stl
 ```
 
-The default `bone` preset extracts CT voxels at or above 300 HU. Use the number,
-dotted identifier, UID, or part of the description printed by `list` to select
-a different series:
+The default `bone` preset extracts CT voxels at or above 300 HU. Use the unique
+row ID in the `ID` column, a complete SeriesInstanceUID, or part of the
+description printed by `list` to select a different series:
 
 ```sh
-dicom-surface convert ~/scans/head-ct --series 6 -o skull.stl
+dicom-surface convert ~/scans/head-ct --series 1 -o skull.stl
 ```
+
+The `DICOM #` column is the source `SeriesNumber` metadata and is not a unique
+selector. Row IDs are local to one discovery result, so run `list` again and use
+its current IDs after directory contents change. If one SeriesInstanceUID
+contains several orientations, each orientation receives its own row ID.
 
 Read [Choosing a preset][presets] before converting other tissues or non-CT
 data. For a printable model, also read [Print profiles][profiles].
@@ -84,7 +89,7 @@ Merge two scans after confirming that they show the same person and anatomy:
 
 ```sh
 dicom-surface merge facial-ct/ sinus-ct/ \
-  --series-a 6 --series-b 2 -o skull.stl
+  --series-a 1 --series-b 1 -o skull.stl
 ```
 
 The first scan defines the output coordinate frame. Identity and registration
