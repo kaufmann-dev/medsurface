@@ -20,7 +20,7 @@ classifiers = [
   "Topic :: Multimedia :: Graphics :: 3D Modeling",
 ]
 dependencies = [
-  "numpy>=1.24",
+  "numpy>=1.24,<2.5",
   "pydicom>=2.4",
   "SimpleITK>=2.3",
   "vtk>=9.2",

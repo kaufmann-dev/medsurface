@@ -15,7 +15,8 @@ Python 3.10 or newer and [uv](https://docs.astral.sh/uv/) are required.
 uv tool install dicom-surface
 ```
 
-On Debian or Ubuntu, PyMeshLab also needs these system libraries:
+On Linux, PyMeshLab needs system OpenGL libraries. Many desktop distributions
+already provide them. On Debian or Ubuntu, install them with:
 
 ```sh
 sudo apt install libgl1 libopengl0

@@ -187,8 +187,10 @@ uv run pytest -q
 
 Hatchling is the PEP 517 build backend, and uv orchestrates the workflow.
 
-On Ubuntu, PyMeshLab requires `libgl1` to import and `libopengl0` for the meshing
-plugin used by decimation. CI installs both before `uv sync --locked`.
+On Linux, the PyMeshLab wheel expects `libGL.so.1`, and its meshing plugin used
+for decimation expects `libOpenGL.so.0`. Distribution package names differ; on
+Debian and Ubuntu they are provided by `libgl1` and `libopengl0`. CI installs
+both before `uv sync --locked`.
 
 ## Verification
 
