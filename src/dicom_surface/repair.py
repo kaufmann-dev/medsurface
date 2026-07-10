@@ -6,11 +6,26 @@ module repairs meshes from elsewhere or an output that still contains a defect.
 
 from __future__ import annotations
 
+import os
+
 import meshlib.mrmeshpy as mm
+
+
+def _same_file(left: str, right: str) -> bool:
+    """Compare paths safely even through symlinks or hard links."""
+    if os.path.realpath(os.path.abspath(left)) == os.path.realpath(os.path.abspath(right)):
+        return True
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return False
 
 
 def repair(in_path: str, out_path: str, log=None) -> dict:
     """Weld, fix multiple edges, collapse degeneracies, fill every hole."""
+    if _same_file(in_path, out_path):
+        raise ValueError("input and output must be different files; repair is not in-place")
+
     def say(msg):
         if log:
             log(msg)

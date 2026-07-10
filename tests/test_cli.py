@@ -23,3 +23,19 @@ def test_every_validating_command_uses_the_same_quality_status():
 def test_self_intersection_flag_is_not_a_second_validation_mode(argv):
     with pytest.raises(SystemExit, match="2"):
         cli.build_parser().parse_args(argv)
+
+
+@pytest.mark.parametrize(
+    "argv, action",
+    [
+        (["validate", "missing.stl"], "cannot validate"),
+        (["repair", "missing.stl", "-o", "fixed.stl"], "cannot repair"),
+    ],
+)
+def test_mesh_file_errors_are_concise(argv, action, capsys):
+    assert cli.main(argv) == 1
+    captured = capsys.readouterr()
+
+    assert captured.out == ""
+    assert captured.err.startswith("error: %s" % action)
+    assert "Traceback" not in captured.err

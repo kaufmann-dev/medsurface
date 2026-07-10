@@ -1,8 +1,12 @@
 """Mesh-repair behavior."""
 
+import json
+import os
+
+import pytest
 import trimesh
 
-from dicom_surface import repair, validate
+from dicom_surface import cli, repair, validate
 
 
 def test_repair_closes_an_open_mesh(tmp_path):
@@ -23,3 +27,36 @@ def test_repair_closes_an_open_mesh(tmp_path):
     assert stats["holes_out"] == 0
     assert stats["holes_filled"] > 0
     assert after["watertight"]
+
+
+def test_repair_refuses_to_overwrite_its_input_or_a_hard_link(tmp_path):
+    source = tmp_path / "source.stl"
+    alias = tmp_path / "alias.stl"
+    trimesh.creation.box().export(source)
+    original = source.read_bytes()
+
+    with pytest.raises(ValueError, match="not in-place"):
+        repair.repair(str(source), str(source))
+    assert source.read_bytes() == original
+
+    os.link(source, alias)
+    with pytest.raises(ValueError, match="not in-place"):
+        repair.repair(str(source), str(alias))
+    assert source.read_bytes() == original
+
+
+def test_repair_json_mode_writes_only_json(tmp_path, capsys):
+    box = trimesh.creation.box()
+    box.update_faces([False, False] + [True] * (len(box.faces) - 2))
+    source = tmp_path / "open.stl"
+    output = tmp_path / "fixed.stl"
+    box.export(source)
+
+    assert cli.main(["repair", str(source), "-o", str(output), "--json"]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert captured.err == ""
+    assert payload["output"] == str(output)
+    assert payload["repair"]["holes_filled"] > 0
+    assert payload["quality"]["valid"]
