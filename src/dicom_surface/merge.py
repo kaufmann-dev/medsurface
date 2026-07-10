@@ -447,11 +447,19 @@ def merge(
         raise MergeError("the fused volume produced no surface")
     say("  raw triangles %s" % f"{poly.GetNumberOfPolys():,}")
 
-    poly = step("smooth", lambda: surface.smooth(poly, smooth_iters, passband))
-    poly, shells = step("largest component", lambda: surface.largest_component(poly))
-    say("  surface shells %d (kept 1)" % shells)
-    poly = step("decimate", lambda: surface.decimate(poly, target_faces))
-    poly = step("post-smooth", lambda: surface.smooth(poly, post_smooth_iters, passband))
+    finished = pipeline.finish_surface(
+        poly,
+        smooth_iters=smooth_iters,
+        passband=passband,
+        target_faces=target_faces,
+        post_smooth_iters=post_smooth_iters,
+        keep_largest_component=True,
+        step=step,
+        log=say,
+    )
+    poly = finished.poly
+    shells = finished.surface_components
+    warnings.extend(finished.warnings)
     poly = step("index -> patient space (LPS)", lambda: surface.transform(poly, affine))
     poly = step("normals", lambda: surface.compute_normals(poly))
 
@@ -473,6 +481,7 @@ def merge(
                    "spacing_mm": list(vol_b.spacing), "threshold": value_b},
         "grid_mm": grid_mm,
         "print_profile": asdict(print_profile),
+        "surface_finishing": finished.provenance,
         "transform_moving_to_fixed": reg.transform.tolist(),
         "rotation_deg": reg.rotation_deg,
         "registration": {
