@@ -1,6 +1,8 @@
 # VTP output failed default validation
 
-Status: fixed.
+Fixed: 2026-07-10 07:39:38 UTC (+0000)
+
+Baseline commit: `f6f90b067f8b628592cfc69ac7a5bc8886a5f5cf`
 
 ## Symptom
 
