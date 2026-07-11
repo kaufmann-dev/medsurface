@@ -7,6 +7,7 @@ import SimpleITK as sitk
 from dicom_surface import pipeline as pipeline_mod, presets, validate
 from dicom_surface.pipeline import ModalityMismatch, resolve_threshold
 from dicom_surface.series import Series
+from tests.mesh_helpers import write
 
 
 def _series(modality="CT"):
@@ -109,10 +110,7 @@ def test_accepts_modality():
 
 
 def test_validate_does_not_repair_the_mesh_it_measures(tmp_path):
-    """Regression: trimesh's ``split()`` builds submeshes with ``repair=True``,
-    which fills holes. A validator that silently repairs would report an open
-    mesh as closed."""
-    import trimesh
+    """A validator must not silently fill an open input mesh."""
 
     # An open box: five faces of a cube, one side missing.
     v = [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
@@ -123,7 +121,7 @@ def test_validate_does_not_repair_the_mesh_it_measures(tmp_path):
          [1, 2, 6], [1, 6, 5],  # right
          [2, 3, 7], [2, 7, 6]]  # back  (left face omitted)
     p = str(tmp_path / "openbox.stl")
-    trimesh.Trimesh(vertices=v, faces=f, process=False).export(p)
+    write(p, (np.asarray(v, dtype=float), np.asarray(f, dtype=np.int32)))
 
     report = validate.validate(p)
     assert report["watertight"] is False
@@ -133,14 +131,17 @@ def test_validate_does_not_repair_the_mesh_it_measures(tmp_path):
 
 
 def test_validate_reports_open_mesh_volume_as_none(tmp_path):
-    """An open mesh has no well-defined volume; the report must say so rather
-    than emit trimesh's meaningless divergence-theorem number."""
-    import trimesh
+    """An open mesh has no well-defined volume."""
 
     # a single triangle: maximally open
-    m = trimesh.Trimesh(vertices=[[0, 0, 0], [1, 0, 0], [0, 1, 0]], faces=[[0, 1, 2]])
     p = str(tmp_path / "tri.stl")
-    m.export(p)
+    write(
+        p,
+        (
+            np.asarray([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=float),
+            np.asarray([[0, 1, 2]], dtype=np.int32),
+        ),
+    )
     report = validate.validate(p)
     assert report["watertight"] is False
     assert report["volume_mm3"] is None

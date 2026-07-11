@@ -23,11 +23,9 @@ memory rather than loading the file itself.
 
 ## Fix
 
-Validation now loads VTP through `vtkXMLPolyDataReader`, triangulates it with
-`vtkTriangleFilter`, and passes the resulting arrays into the existing Trimesh
-metric pipeline. The in-memory vertices and faces are also passed to MeshLib,
-the sole self-intersection predicate, so VTP follows the same path as every
-other format.
+Validation loads VTP through `vtkXMLPolyDataReader`, triangulates it with
+`vtkTriangleFilter`, and converts the resulting arrays into the same MeshLib
+representation used for every quality metric and self-intersection check.
 
 Regression tests cover ordinary VTP validation and the VTP self-intersection
 path. STL, PLY, and OBJ continue to use their existing Trimesh loaders.

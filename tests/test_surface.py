@@ -8,6 +8,16 @@ import pytest
 import SimpleITK as sitk
 
 from dicom_surface import segment, surface, validate
+from tests.mesh_helpers import (
+    box,
+    concatenate,
+    mean_adjacency_angle,
+    sphere,
+    torus,
+    transformed,
+    volume,
+    write,
+)
 
 
 def _mesh(image, cap=True, smooth_iters=0, largest=False):
@@ -148,24 +158,20 @@ def test_smoothing_trades_roughness_for_displacement(solid_sphere):
     Guards the one knob users actually feel. Windowed-sinc must not shrink the
     surface either -- a plain Laplacian would contract it toward the centroid.
     """
-    import numpy as np
-    import trimesh
-
     image, radius = solid_sphere
     padded = segment.pad(image, 1)
     affine = surface.index_to_physical(padded)
     raw = surface.transform(surface.marching_cubes(surface.to_vtk_image(padded)), affine)
 
-    ref = trimesh.Trimesh(*surface.to_arrays(raw), process=True)
     exact = 4.0 / 3.0 * math.pi * radius**3
 
     roughness = []
     for iterations in (0, 10, 25, 40):
         poly = surface.smooth(raw, iterations, 0.1) if iterations else raw
-        m = trimesh.Trimesh(*surface.to_arrays(poly), process=True)
-        roughness.append(float(np.degrees(m.face_adjacency_angles).mean()))
+        mesh = surface.to_arrays(poly)
+        roughness.append(mean_adjacency_angle(mesh))
         # no shrinkage: volume stays within 2% of the analytic sphere
-        assert m.volume == pytest.approx(exact, rel=0.02), iterations
+        assert volume(mesh) == pytest.approx(exact, rel=0.02), iterations
 
     assert roughness == sorted(roughness, reverse=True), roughness
     assert roughness[0] > roughness[-1]
@@ -187,39 +193,34 @@ def test_safe_smoothing_leaves_a_clean_result_exactly_unchanged(solid_sphere):
 
 
 def test_smoothing_safeguard_changes_only_a_collision_neighborhood():
-    import trimesh
+    left = sphere(subdivisions=2, radius=1.0)
+    right = transformed(sphere(subdivisions=2, radius=1.0), translation=(2.2, 0.0, 0.0))
+    original_verts, original_faces = concatenate(left, right)
 
-    left = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
-    right = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
-    right.apply_translation((2.2, 0.0, 0.0))
-    original_mesh = trimesh.util.concatenate([left, right])
-
-    moved = original_mesh.vertices.copy()
-    moved[len(left.vertices):, 0] -= 0.4
-    original = surface.from_arrays(original_mesh.vertices, original_mesh.faces)
-    intersecting = surface.from_arrays(moved, original_mesh.faces)
+    moved = original_verts.copy()
+    moved[len(left[0]):, 0] -= 0.4
+    original = surface.from_arrays(original_verts, original_faces)
+    intersecting = surface.from_arrays(moved, original_faces)
     assert surface.selected_self_intersecting_faces(intersecting).any()
 
     guarded, stats = surface.protect_smoothed_surface(original, intersecting, 25)
 
     assert not surface.selected_self_intersecting_faces(guarded).any()
-    assert 0 < stats.protected_vertices < len(original_mesh.vertices)
+    assert 0 < stats.protected_vertices < len(original_verts)
     assert surface.count_defects(guarded) == surface.count_defects(original)
 
 
 def test_meshlib_marks_both_faces_in_an_intersecting_pair():
     import meshlib.mrmeshnumpy as mrmeshnumpy
     import meshlib.mrmeshpy as mrmeshpy
-    import trimesh
-
-    left = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
-    right = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
-    right.apply_translation((1.6, 0.0, 0.0))
-    mesh = trimesh.util.concatenate([left, right])
-    poly = surface.from_arrays(mesh.vertices, mesh.faces)
+    mesh = concatenate(
+        sphere(subdivisions=2, radius=1.0),
+        transformed(sphere(subdivisions=2, radius=1.0), translation=(1.6, 0.0, 0.0)),
+    )
+    poly = surface.from_arrays(*mesh)
 
     selected = surface.selected_self_intersecting_faces(poly)
-    mr_mesh = mrmeshnumpy.meshFromFacesVerts(mesh.faces.astype(np.int32), mesh.vertices)
+    mr_mesh = mrmeshnumpy.meshFromFacesVerts(mesh[1].astype(np.int32), mesh[0])
     pairs = mrmeshpy.findSelfCollidingTriangles(mrmeshpy.MeshPart(mr_mesh))
 
     assert pairs
@@ -311,13 +312,10 @@ def test_zero_simplification_error_is_a_noop(solid_sphere):
 
 def test_decimation_preserves_genus(tmp_path):
     """A skull has genus >1000. Decimation must not close its tunnels."""
-    import trimesh
     import vtk as _vtk
 
-    torus = trimesh.creation.torus(major_radius=10.0, minor_radius=3.0,
-                                   major_sections=192, minor_sections=96)
     p = os.path.join(str(tmp_path), "torus.stl")
-    torus.export(p)
+    write(p, torus(10.0, 3.0, 192, 96))
     assert validate.validate(p)["genus"] == 1
 
     reader = _vtk.vtkSTLReader()
@@ -332,17 +330,14 @@ def test_decimation_preserves_genus(tmp_path):
 
 
 def test_unsafe_decimation_is_discarded(monkeypatch):
-    import trimesh
+    left = sphere(subdivisions=2, radius=1.0)
+    right = transformed(sphere(subdivisions=2, radius=1.0), translation=(2.2, 0.0, 0.0))
+    original_verts, original_faces = concatenate(left, right)
+    original = surface.from_arrays(original_verts, original_faces)
 
-    left = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
-    right = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
-    right.apply_translation((2.2, 0.0, 0.0))
-    original_mesh = trimesh.util.concatenate([left, right])
-    original = surface.from_arrays(original_mesh.vertices, original_mesh.faces)
-
-    moved = original_mesh.vertices.copy()
-    moved[len(left.vertices):, 0] -= 0.4
-    intersecting = surface.from_arrays(moved, original_mesh.faces)
+    moved = original_verts.copy()
+    moved[len(left[0]):, 0] -= 0.4
+    intersecting = surface.from_arrays(moved, original_faces)
     signature = (2, 0, 4)
     monkeypatch.setattr(
         surface,
@@ -359,22 +354,21 @@ def test_unsafe_decimation_is_discarded(monkeypatch):
 
 
 def test_decimation_protects_source_patches_until_the_candidate_is_clean(monkeypatch):
-    import trimesh
+    source_mesh = concatenate(
+        sphere(subdivisions=3, radius=1.0),
+        transformed(sphere(subdivisions=3, radius=1.0), translation=(2.2, 0.0, 0.0)),
+    )
+    original = surface.from_arrays(*source_mesh)
 
-    source_left = trimesh.creation.icosphere(subdivisions=3, radius=1.0)
-    source_right = trimesh.creation.icosphere(subdivisions=3, radius=1.0)
-    source_right.apply_translation((2.2, 0.0, 0.0))
-    source_mesh = trimesh.util.concatenate([source_left, source_right])
-    original = surface.from_arrays(source_mesh.vertices, source_mesh.faces)
-
-    left = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
-    right = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
-    right.apply_translation((2.2, 0.0, 0.0))
-    valid_mesh = trimesh.util.concatenate([left, right])
-    valid = surface.from_arrays(valid_mesh.vertices, valid_mesh.faces)
-    moved = valid_mesh.vertices.copy()
-    moved[len(left.vertices):, 0] -= 0.4
-    intersecting = surface.from_arrays(moved, valid_mesh.faces)
+    left = sphere(subdivisions=2, radius=1.0)
+    valid_mesh = concatenate(
+        left,
+        transformed(sphere(subdivisions=2, radius=1.0), translation=(2.2, 0.0, 0.0)),
+    )
+    valid = surface.from_arrays(*valid_mesh)
+    moved = valid_mesh[0].copy()
+    moved[len(left[0]):, 0] -= 0.4
+    intersecting = surface.from_arrays(moved, valid_mesh[1])
     signature = (2, 0, 4)
 
     def candidate(_poly, _error, protected):
@@ -477,13 +471,8 @@ def test_vtp_self_intersection_check(solid_sphere, tmp_path):
 
 def test_disjoint_closed_shells_are_valid(tmp_path):
     """Multiple closed printable parts do not make a mesh invalid."""
-    import trimesh
-
-    left = trimesh.creation.box()
-    right = trimesh.creation.box()
-    right.apply_translation((3.0, 0.0, 0.0))
     path = str(tmp_path / "two-shells.ply")
-    trimesh.util.concatenate([left, right]).export(path)
+    write(path, concatenate(box(), transformed(box(), translation=(3.0, 0.0, 0.0))))
 
     report = validate.validate(path)
     assert report["components"] == 2
@@ -492,16 +481,13 @@ def test_disjoint_closed_shells_are_valid(tmp_path):
 
 def test_transversely_overlapping_closed_shells_are_invalid(tmp_path):
     """Watertightness alone does not rule out intersecting surfaces."""
-    import trimesh
-
-    fixed = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
-    crossing = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
-    crossing.apply_transform(
-        trimesh.transformations.rotation_matrix(np.deg2rad(30.0), (0.0, 0.0, 1.0))
-    )
-    crossing.apply_translation((0.35, 0.1, 0.2))
     path = str(tmp_path / "intersecting-shells.ply")
-    trimesh.util.concatenate([fixed, crossing]).export(path)
+    crossing = transformed(
+        box((2.0, 2.0, 2.0)),
+        translation=(0.35, 0.1, 0.2),
+        rotation_z_deg=30.0,
+    )
+    write(path, concatenate(box((2.0, 2.0, 2.0)), crossing))
 
     report = validate.validate(path)
     assert report["watertight"]
@@ -511,40 +497,30 @@ def test_transversely_overlapping_closed_shells_are_invalid(tmp_path):
 
 
 def test_inconsistent_winding_fails_validation(tmp_path):
-    import trimesh
-
-    box = trimesh.creation.box()
-    faces = box.faces.copy()
+    vertices, faces = box()
+    faces = faces.copy()
     faces[0] = faces[0][::-1]
     path = str(tmp_path / "flipped-face.ply")
-    trimesh.Trimesh(vertices=box.vertices, faces=faces, process=False).export(path)
+    write(path, (vertices, faces))
 
     report = validate.validate(path)
-    assert report["watertight"]
+    assert report["disoriented_faces"] > 0
     assert not report["winding_consistent"]
     assert not report["valid"]
 
 
-def test_degenerate_faces_fail_validation(tmp_path):
-    import trimesh
-
-    box = trimesh.creation.box()
-    vertices = np.vstack([box.vertices, [[0.0, 0.0, 0.0]]])
-    faces = np.vstack([box.faces, [[len(vertices) - 1] * 3]])
-    path = str(tmp_path / "degenerate.ply")
-    trimesh.Trimesh(vertices=vertices, faces=faces, process=False).export(path)
-
+def test_meshlib_native_report_omits_raw_geometry_counters(tmp_path):
+    path = write(tmp_path / "box.ply", box())
     report = validate.validate(path)
-    assert report["degenerate_faces"] == 1
-    assert not report["valid"]
+    assert "degenerate_faces" not in report
+    assert "nonmanifold_edge_uses" not in report
+    assert report["holes"] == 0
+    assert report["disoriented_faces"] == 0
 
 
 def test_failed_intersection_measurement_fails_validation(tmp_path, monkeypatch):
-    import trimesh
-
-    path = str(tmp_path / "box.stl")
-    trimesh.creation.box().export(path)
-    monkeypatch.setattr(validate, "_self_intersections", lambda _path, _mesh: "error: Test")
+    path = write(tmp_path / "box.stl", box())
+    monkeypatch.setattr(validate, "_self_intersections", lambda _mesh: "error: Test")
 
     report = validate.validate(path)
     assert not report["valid"]

@@ -232,27 +232,25 @@ descriptions, paths, and derived anatomy can still be identifying.
 
 ## Validation and repair
 
-Validation reports triangle/vertex counts, components, watertightness, winding,
-boundary edges, non-manifold edge uses, degenerate faces, genus when defined,
-volume when closed, bounding box, and self-intersecting faces. The same complete
-check runs after `convert`, `merge`, and `repair`, and for `validate`.
+Validation reports MeshLib-imported triangle/vertex counts, components,
+watertightness, winding, holes, boundary edges, disoriented faces, genus when
+defined, volume when closed, bounding box, and self-intersecting faces. The same
+complete check runs after `convert`, `merge`, and `repair`, and for `validate`.
 
-A report is valid only when the mesh is watertight, consistently wound, a valid
-enclosed volume, and has zero boundary edges, non-manifold edge uses, degenerate
-faces, and self-intersecting faces. Multiple closed components are allowed. A
-failed self-intersection measurement makes validation incomplete and therefore
-invalid. `convert` and `merge` have no validation bypass: they validate both the
+A report is valid only when MeshLib imports the mesh as watertight, consistently
+wound, and enclosing a volume, with zero holes, boundary edges, disoriented
+faces, and self-intersecting faces. Multiple closed components are allowed.
+MeshLib can normalize raw face configurations while loading, so validation does
+not expose separate non-manifold or degenerate-face counters. A failed
+self-intersection measurement is invalid. `convert` and `merge` have no
+validation bypass: they validate both the
 in-memory mesh and the serialized temporary file, then atomically replace the
 requested destination only with a valid output.
 
-STL facets do not encode shared topology. Trimesh processing welds positions at
-digits derived from its merge tolerance before topology is calculated. Duplicate
-faces are not removed and inconsistent winding is reported rather than repaired.
-
-STL, PLY, and OBJ are loaded by Trimesh. VTP is loaded and triangulated with VTK,
-then passed through the same Trimesh metric pipeline. Every format's
-self-intersection check converts its in-memory triangles to MeshLib and counts
-the unique faces in colliding pairs.
+STL, PLY, and OBJ are loaded directly by MeshLib. VTP is loaded and triangulated
+with VTK, then converted to the same MeshLib representation. All metrics describe
+that imported representation, and self-intersections count the unique faces in
+MeshLib collision pairs.
 
 `repair` uses MeshLib to unite vertices within 1e-6, fix multiple edges,
 decimate degeneracies, and fill holes. It writes a new file; validation never
