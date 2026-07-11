@@ -240,7 +240,7 @@ def test_surface_stage_comes_from_the_preset():
         )
 
     bone = presets.get("bone")
-    assert (bone.smooth_iters, bone.smooth_force, bone.post_smooth_iters) == (20, 0.1, 25)
+    assert (bone.smooth_iters, bone.smooth_force, bone.post_smooth_iters) == (20, 0.1, 40)
 
 
 def test_force_overrides_the_gates():

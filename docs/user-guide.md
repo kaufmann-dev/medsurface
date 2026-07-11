@@ -65,13 +65,12 @@ reusing an older ID. In `list --json`, the selector is the integer `id`; `uid`,
 A preset supplies the segmentation and mesh-finishing defaults. List the
 installed values at any time with `dicom-surface presets`.
 
-| preset        | use it for                                                | threshold | median | closing | island floor | smoothing iterations (initial + final) | simplify error |
-| ------------- | --------------------------------------------------------- | --------: | -----: | ------: | -----------: | -------------------------------------: | -------------: |
-| `bone`        | General CT bone models                                    |    300 HU | 1.0 mm |  2.4 mm |       50 mm³ |                                20 + 25 |        0.25 mm |
-| `bone-detail` | Maximum detail and measurement; produces very large files |    300 HU | 0.6 mm |  1.2 mm |       20 mm³ |                                  8 + 0 |            off |
-| `teeth`       | Enamel and dense dentin; keeps separate teeth             |  1,200 HU | 0.6 mm |  0.6 mm |        5 mm³ |                                 10 + 0 |        0.12 mm |
-| `skin`        | Outer skin surface from CT                                |   −300 HU | 1.4 mm |  3.2 mm |      500 mm³ |                                25 + 10 |        0.35 mm |
-| `auto`        | MR, CBCT, ultrasound, or other uncalibrated intensities   |      Otsu | 1.0 mm |  2.0 mm |       50 mm³ |                                20 + 25 |        0.25 mm |
+| preset  | use it for                                              | threshold | median | closing | island floor | smoothing iterations (initial + final) | simplify error |
+| ------- | ------------------------------------------------------- | --------: | -----: | ------: | -----------: | -------------------------------------: | -------------: |
+| `bone`  | General CT bone models                                  |    300 HU | 1.0 mm |  2.4 mm |       50 mm³ |                                20 + 40 |        0.25 mm |
+| `teeth` | Enamel and dense dentin; keeps separate teeth           |  1,200 HU | 0.6 mm |  0.6 mm |        5 mm³ |                                 10 + 0 |        0.12 mm |
+| `skin`  | Outer skin surface from CT                              |   −300 HU | 1.4 mm |  3.2 mm |      500 mm³ |                                25 + 10 |        0.35 mm |
+| `auto`  | MR, CBCT, ultrasound, or other uncalibrated intensities |      Otsu | 1.0 mm |  2.0 mm |       50 mm³ |                                20 + 40 |        0.25 mm |
 
 Numeric thresholds are inclusive lower bounds. `auto` calculates an Otsu
 threshold from the scan instead of assuming calibrated Hounsfield units. CT
