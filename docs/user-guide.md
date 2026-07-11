@@ -2,7 +2,7 @@
 
 [Project README](../README.md) · [Choosing a series](#choosing-a-series) ·
 [Choosing a preset](#choosing-a-preset) ·
-[Print profiles](#print-profiles) · [Input limitations](#input-requirements-and-limitations) ·
+[Input limitations](#input-requirements-and-limitations) ·
 [Long-running commands](#long-running-commands) ·
 [Safety and privacy](#safety-and-privacy) · [Technical reference](technical-reference.md)
 
@@ -16,8 +16,8 @@ processing algorithms, metrics, thresholds, and dependency details.
 clinical decisions. Independently review both the source images and generated
 surface.
 
-- Segmentation thresholds, smoothing, field-of-view capping, print preparation,
-  and scan resolution can change or omit anatomy.
+- Segmentation thresholds, smoothing, field-of-view capping, and scan resolution
+  can change or omit anatomy.
 - A valid and watertight mesh can still be anatomically wrong.
 - Anatomy cut off by the scan is capped flat by default; missing anatomy cannot
   be recovered from the input.
@@ -100,34 +100,6 @@ dicom-surface convert scans/ --threshold 250 -o bone-250hu.stl
 
 An explicit CLI value overrides the corresponding preset value. Run
 `dicom-surface convert --help` for the complete set of overrides.
-
-## Print profiles
-
-A print profile raises selected morphology settings after the tissue preset is
-resolved. It does not replace the preset or change the intensity threshold.
-
-| profile      | intended use                      | closing floor | island floor | feature target |
-| ------------ | --------------------------------- | ------------: | -----------: | -------------: |
-| `anatomical` | No print-profile changes; default |     unchanged |    unchanged |           none |
-| `resin`      | Fine-detail resin printing        |        3.2 mm |      100 mm³ |         0.6 mm |
-| `fdm`        | FDM/nozzle printing               |        4.8 mm |      200 mm³ |         1.2 mm |
-
-Closing and island floors raise the preset values only when the profile value
-is larger. The feature target selects thin mask regions and adds material around
-them; there is no separate user-facing thickening distance.
-
-```sh
-dicom-surface convert scans/ --print-profile resin -o resin-skull.stl
-dicom-surface convert scans/ --print-profile fdm -o fdm-skull.stl
-```
-
-Profile values are mask-processing targets, not guarantees about final mesh or
-manufactured wall thickness. Scan sampling, interpolation, surface extraction,
-smoothing, simplification, and the printer can all change the realized result.
-Inspect the final mesh in a slicer. Short thin features close to thick anatomy
-may not be selected for thickening; the [technical
-reference](technical-reference.md#print-profile-behavior) describes this known
-limitation.
 
 ## Input requirements and limitations
 

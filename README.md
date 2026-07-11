@@ -45,14 +45,14 @@ dicom-surface convert ~/scans/head-ct --series 1 -o skull.stl
 ```
 
 Read [Choosing a preset][presets] before converting other tissues or non-CT
-data. For a printable model, also read [Print profiles][profiles].
+data.
 
 ## Commands
 
 | command                                        | purpose                                             |
 | ---------------------------------------------- | --------------------------------------------------- |
 | `dicom-surface list DICOM_DIR`                 | Show every image series and the recommended default |
-| `dicom-surface presets`                        | Show tissue presets and print profiles              |
+| `dicom-surface presets`                        | Show the available tissue presets                   |
 | `dicom-surface convert DICOM_DIR -o MODEL.stl` | Convert one series to a surface mesh                |
 | `dicom-surface merge DIR_A DIR_B -o MODEL.stl` | Register and combine two scans of the same person   |
 | `dicom-surface validate MODEL.stl`             | Report mesh quality without changing the file       |
@@ -68,12 +68,6 @@ Choose a different tissue preset or an explicit threshold:
 ```sh
 dicom-surface convert scans/ --preset teeth -o teeth.stl
 dicom-surface convert scans/ --threshold 250 -o bone-250hu.stl
-```
-
-Prepare selected thin regions for resin or FDM printing:
-
-```sh
-dicom-surface convert scans/ --print-profile resin -o resin-skull.stl
 ```
 
 Merge two scans after confirming that they show the same person and anatomy:
@@ -109,6 +103,5 @@ and the [validation explanation][validation] before relying on an output.
 [technical-reference]: https://github.com/kaufmann-dev/dicom-surface/blob/main/docs/technical-reference.md
 [safety]: https://github.com/kaufmann-dev/dicom-surface/blob/main/docs/user-guide.md#safety-and-privacy
 [presets]: https://github.com/kaufmann-dev/dicom-surface/blob/main/docs/user-guide.md#choosing-a-preset
-[profiles]: https://github.com/kaufmann-dev/dicom-surface/blob/main/docs/user-guide.md#print-profiles
 [input-limitations]: https://github.com/kaufmann-dev/dicom-surface/blob/main/docs/user-guide.md#input-requirements-and-limitations
 [validation]: https://github.com/kaufmann-dev/dicom-surface/blob/main/docs/user-guide.md#understanding-validation

@@ -225,7 +225,6 @@ def test_python_module_uses_public_program_name():
 
 def test_registry_enums_match_presets_exactly():
     assert {choice.value for choice in cli.PresetChoice} == set(cli.PRESETS)
-    assert {choice.value for choice in cli.PrintProfileChoice} == set(cli.PRINT_PROFILES)
 
 
 def test_every_validating_command_uses_the_same_quality_status():
@@ -314,6 +313,10 @@ def test_interactive_progress_renderer_runs_in_an_independent_process():
         ["merge", ".", ".", "-o", "out.stl", "--no-validate"],
         ["convert", ".", "-o", "out.stl", "--passband", "0.1"],
         ["merge", ".", ".", "-o", "out.stl", "--passband", "0.1"],
+        ["convert", ".", "-o", "out.stl", "--print-profile", "resin"],
+        ["merge", ".", ".", "-o", "out.stl", "--print-profile", "fdm"],
+        ["convert", ".", "-o", "out.stl", "--min-feature-mm", "0.6"],
+        ["merge", ".", ".", "-o", "out.stl", "--min-feature-mm", "1.2"],
     ],
 )
 def test_removed_self_intersection_flag_is_a_usage_error(argv):
@@ -441,14 +444,12 @@ def test_series_table_is_responsive_safe_and_ansi_free():
         assert all(len(line) <= width for line in rendered.splitlines())
 
 
-def test_presets_renders_two_rich_tables_without_ansi():
+def test_presets_renders_tissue_table_without_ansi():
     result = runner.invoke(cli.app, ["presets"], prog_name="dicom-surface")
 
     assert result.exit_code == 0
     assert "Tissue presets (--preset)" in result.stdout
-    assert "Print profiles (--print-profile)" in result.stdout
     assert "bone-detail" in result.stdout
-    assert "anatomical" in result.stdout
     assert "\x1b" not in result.stdout
 
 
@@ -487,10 +488,6 @@ def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
             "3.3",
             "--min-island-mm3",
             "4.4",
-            "--print-profile",
-            "resin",
-            "--min-feature-mm",
-            "0.7",
             "--all-islands",
             "--all-components",
             "--resample-mm",
@@ -524,8 +521,6 @@ def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
     assert not captured["preset"].keep_largest_component
     assert captured["threshold"] is None
     assert not captured["cap_field_of_view"]
-    assert captured["print_profile"].name == "resin+flags"
-    assert captured["print_profile"].min_feature_mm == pytest.approx(0.7)
     payload = json.loads(json_file.read_text())
     assert payload["result"]["output"] == str(output)
     assert payload["quality"]["valid"]
@@ -554,7 +549,6 @@ def test_convert_defaults_quality_output_and_invalid_exit(tmp_path, monkeypatch)
     assert captured["preset"].name == "bone"
     assert captured["threshold"] is None
     assert captured["cap_field_of_view"]
-    assert captured["print_profile"] == cli.presets_mod.ANATOMICAL
     assert "Success: wrote" in result.stdout
     assert "Mesh quality" in result.stdout
     assert "invalid" in result.stdout
@@ -655,10 +649,6 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
             "2.2",
             "--min-island-mm3",
             "3.3",
-            "--print-profile",
-            "fdm",
-            "--min-feature-mm",
-            "1.4",
             "--grid-mm",
             "0.8",
             "--smooth-iters",
@@ -688,7 +678,6 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
     assert captured["simplify_error_mm"] == pytest.approx(0.2)
     assert captured["post_smooth_iters"] == 8
     assert captured["force"]
-    assert captured["print_profile"].name == "fdm+flags"
     assert json.loads(json_file.read_text())["result"]["grid_size"] == [10, 20, 30]
 
     def refuse(**_kwargs):

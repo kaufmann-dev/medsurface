@@ -121,62 +121,6 @@ PRESETS: dict[str, Preset] = {
 }
 
 
-@dataclass(frozen=True)
-class PrintProfile:
-    """What a printer needs, as distinct from what the anatomy is.
-
-    A :class:`Preset` says which tissue to extract and how finely. A profile says
-    how to make that tissue survive a printer: seal the pores that would print as
-    fragile holes, thicken the walls that are thinner than the machine can lay
-    down, and drop the fragments too small to handle.
-
-    Every field is a no-op at zero, so ``ANATOMICAL`` -- all zeros -- is a true
-    identity. There is no "printing disabled" branch to drift out of sync with
-    the enabled one.
-    """
-
-    name: str
-    description: str
-    #: Kernel extent (diameter) the closing is raised to, if the preset's is smaller.
-    closing_mm: float = 0.0
-    #: Floor on the island filter: fragments below this are unprintable anyway.
-    min_island_mm3: float = 0.0
-    #: Intended mask-space feature target. The selector and growth primitive use
-    #: the same ball of radius ``min_feature_mm / 2``. This is not a final-mesh
-    #: or manufactured-wall guarantee.
-    min_feature_mm: float = 0.0
-
-
-#: The identity profile: geometry stays faithful to the scan.
-ANATOMICAL = PrintProfile(
-    name="anatomical",
-    description="No printability changes. Geometry faithful to the scan.",
-)
-
-# The numbers below are engineering judgement, not measurement. The closings were
-# tuned on one head CT; the minimum feature sizes are typical machine limits (a
-# 0.4 mm FDM nozzle needs ~1 mm of wall to be sound; resin holds finer detail) and
-# were not measured against a printer. Treat them as defaults to override, which is
-# why both are exposed on the command line.
-PRINT_PROFILES: dict[str, PrintProfile] = {
-    "anatomical": ANATOMICAL,
-    "resin": PrintProfile(
-        name="resin",
-        description="Seals pores and targets 0.6 mm mask features. Keeps fine detail.",
-        closing_mm=3.2,
-        min_island_mm3=100.0,
-        min_feature_mm=0.6,
-    ),
-    "fdm": PrintProfile(
-        name="fdm",
-        description="Seals hard and targets 1.2 mm mask features for a nozzle. Sacrifices fine detail.",
-        closing_mm=4.8,
-        min_island_mm3=200.0,
-        min_feature_mm=1.2,
-    ),
-}
-
-
 def get(name: str) -> Preset:
     try:
         return PRESETS[name]
@@ -184,18 +128,6 @@ def get(name: str) -> Preset:
         raise KeyError(
             "unknown preset %r; available: %s" % (name, ", ".join(sorted(PRESETS)))
         ) from None
-
-
-def get_print_profile(name: str) -> PrintProfile:
-    try:
-        return PRINT_PROFILES[name]
-    except KeyError:
-        raise KeyError(
-            "unknown print profile %r; available: %s"
-            % (name, ", ".join(sorted(PRINT_PROFILES)))
-        ) from None
-
-
 def override(preset: Preset, **kwargs) -> Preset:
     """Apply non-None overrides on top of a preset."""
     changes = {k: v for k, v in kwargs.items() if v is not None}

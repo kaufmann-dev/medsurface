@@ -7,7 +7,6 @@ import subprocess
 import sys
 import warnings
 from collections import Counter
-from dataclasses import replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -21,7 +20,7 @@ from rich.table import Table
 from rich.text import Text
 
 from . import defaults, presets as presets_mod
-from .presets import PRESETS, PRINT_PROFILES
+from .presets import PRESETS
 
 
 class PresetChoice(str, Enum):
@@ -32,14 +31,6 @@ class PresetChoice(str, Enum):
     BONE_DETAIL = "bone-detail"
     SKIN = "skin"
     TEETH = "teeth"
-
-
-class PrintProfileChoice(str, Enum):
-    """Print profiles accepted by ``--print-profile``."""
-
-    ANATOMICAL = "anatomical"
-    FDM = "fdm"
-    RESIN = "resin"
 
 
 stdout_console = Console(highlight=False, markup=False)
@@ -208,37 +199,6 @@ def _exit_for_quality(report: dict[str, Any] | None) -> None:
 def _warn_if_invalid(report: dict[str, Any], subject: str) -> None:
     if not report["valid"]:
         _warn("%s failed validation: %s" % (subject, "; ".join(report["problems"])))
-
-
-def _resolve_print_profile(
-    print_profile: PrintProfileChoice,
-    min_feature_mm: float | None,
-    closing_mm: float | None,
-    min_island_mm3: float | None,
-):
-    """Compose a print profile, letting explicit flags beat its values.
-
-    ``build_mask`` takes ``max(preset.closing_mm, profile.closing_mm)``, so an
-    explicit ``--closing-mm`` has to be written to both sides or the profile
-    would silently win whenever it asks for more.
-    """
-    profile = presets_mod.get_print_profile(print_profile.value)
-    changes = {}
-    if min_feature_mm is not None:
-        changes["min_feature_mm"] = min_feature_mm
-    if closing_mm is not None:
-        changes["closing_mm"] = closing_mm
-    if min_island_mm3 is not None:
-        changes["min_island_mm3"] = min_island_mm3
-    if not changes:
-        return profile
-
-    return replace(
-        profile,
-        name="%s+flags" % profile.name,
-        description="based on '%s', overridden on the command line" % profile.name,
-        **changes,
-    )
 
 
 def _parse_threshold(value: str | None) -> tuple[float | None, bool]:
@@ -470,7 +430,7 @@ def list_series(
 
 @app.command()
 def presets() -> None:
-    """Describe the built-in tissue presets and print profiles."""
+    """Describe the built-in tissue presets."""
     tissue = Table(title="Tissue presets (--preset)", box=box.SIMPLE_HEAVY, expand=True)
     tissue.add_column("Preset", no_wrap=True)
     tissue.add_column("Modality", no_wrap=True)
@@ -498,24 +458,6 @@ def presets() -> None:
         )
     stdout_console.print(tissue)
 
-    profiles = Table(title="Print profiles (--print-profile)", box=box.SIMPLE_HEAVY, expand=True)
-    profiles.add_column("Profile", no_wrap=True)
-    profiles.add_column("Morphology", ratio=2, overflow="fold")
-    profiles.add_column("Description", ratio=2, overflow="fold")
-    for name in sorted(PRINT_PROFILES):
-        profile = PRINT_PROFILES[name]
-        if profile == presets_mod.ANATOMICAL:
-            morphology = "no geometric changes"
-        else:
-            morphology = "closing ≥ %.1f mm; islands ≥ %.0f mm³; feature %.1f mm" % (
-                profile.closing_mm,
-                profile.min_island_mm3,
-                profile.min_feature_mm,
-            )
-        profiles.add_row(_plain(name), _plain(morphology), _plain(profile.description))
-    stdout_console.print(profiles)
-
-
 @app.command()
 def convert(
     dicom_dir: Path = typer.Argument(
@@ -542,16 +484,6 @@ def convert(
     closing_mm: float | None = typer.Option(None, "--closing-mm", help="Pore-sealing kernel extent, mm."),
     opening_mm: float | None = typer.Option(None, "--opening-mm", help="Bridge-breaking kernel extent, mm."),
     min_island_mm3: float | None = typer.Option(None, "--min-island-mm3", help="Drop blobs smaller than this."),
-    print_profile: PrintProfileChoice = typer.Option(
-        PrintProfileChoice.ANATOMICAL,
-        "--print-profile",
-        help="Prepare the mesh for a printer; anatomical makes no printability changes.",
-    ),
-    min_feature_mm: float | None = typer.Option(
-        None,
-        "--min-feature-mm",
-        help="Mask-space feature target; not a final-mesh thickness guarantee.",
-    ),
     all_islands: bool = typer.Option(False, "--all-islands", help="Keep every labelmap island."),
     all_components: bool = typer.Option(False, "--all-components", help="Keep every surface shell."),
     resample_mm: float | None = typer.Option(
@@ -619,12 +551,6 @@ def convert(
                 output_path=str(output),
                 threshold=threshold_value,
                 cap_field_of_view=not no_cap,
-                print_profile=_resolve_print_profile(
-                    print_profile,
-                    min_feature_mm,
-                    closing_mm,
-                    min_island_mm3,
-                ),
                 log=progress.log,
             )
         except pipeline.ModalityMismatch as exc:
@@ -711,12 +637,6 @@ def merge(
     median_mm: float | None = typer.Option(None, "--median-mm"),
     closing_mm: float | None = typer.Option(None, "--closing-mm"),
     min_island_mm3: float | None = typer.Option(None, "--min-island-mm3"),
-    print_profile: PrintProfileChoice = typer.Option(
-        PrintProfileChoice.ANATOMICAL,
-        "--print-profile",
-        help="Prepare the fused mesh for a printer; registration uses unmodified anatomy.",
-    ),
-    min_feature_mm: float | None = typer.Option(None, "--min-feature-mm"),
     grid_mm: float = typer.Option(
         defaults.DEFAULT_MERGE_GRID_MM,
         "--grid-mm",
@@ -789,12 +709,6 @@ def merge(
                 smooth_force=smooth_force,
                 simplify_error_mm=simplify_error_mm,
                 post_smooth_iters=post_smooth_iters,
-                print_profile=_resolve_print_profile(
-                    print_profile,
-                    min_feature_mm,
-                    closing_mm,
-                    min_island_mm3,
-                ),
                 force=force,
                 log=progress.log,
             )

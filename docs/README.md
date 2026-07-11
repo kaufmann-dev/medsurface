@@ -1,9 +1,9 @@
 # Documentation
 
-- [User guide](user-guide.md): series selection, presets, print profiles, input
-  limitations, safety, privacy, and validation guidance.
+- [User guide](user-guide.md): series selection, presets, input limitations,
+  safety, privacy, and validation guidance.
 - [Technical reference](technical-reference.md): CLI architecture,
-  implementation details, compatibility, metrics, profiles, and validation
+  implementation details, compatibility, metrics, and validation
   semantics.
 - [Bug records](bugs/): confirmed bugs fixed in the repository.
 

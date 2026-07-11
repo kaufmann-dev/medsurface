@@ -3,13 +3,13 @@
 This document describes implementation details and limitations that are useful
 for auditing results or contributing to `dicom-surface`. Start with the project
 [README](../README.md) for installation and first use, or the [user
-guide](user-guide.md) for presets, profiles, input limitations, and safety.
+guide](user-guide.md) for presets, input limitations, and safety.
 
 ## Command-line architecture
 
 The console script points directly to a Typer application. Typer owns command
-dispatch, Rich-formatted help, required input path validation, typed preset and
-print-profile choices, and usage errors. The root callback prints help and
+dispatch, Rich-formatted help, required input path validation, typed preset
+choices, and usage errors. The root callback prints help and
 returns success when no command is supplied. Shell completion options are not
 installed by the application.
 
@@ -22,7 +22,7 @@ unexpected programming exceptions remain visible, with traceback locals
 hidden.
 
 Human output uses shared Rich stdout and stderr consoles with terminal color
-detection. Series, preset, print-profile, and quality results use responsive
+detection. Series, preset, and quality results use responsive
 tables. Dynamic paths, UIDs, descriptions, and error text are treated as plain
 text rather than Rich markup. Long operations announce a stage before they
 begin. Interactive terminals show an indeterminate spinner, current stage, and
@@ -64,10 +64,9 @@ IDs that disambiguate it.
 2. Order slices by `ImagePositionPatient` projected onto the slice normal.
 3. Load the ordered stack with SimpleITK and resolve the intensity threshold.
 4. Apply island filtering, median filtering, optional opening, and closing.
-5. Optionally apply a print profile on a selected isotropic mask grid.
-6. Pad field-of-view boundaries, extract the 0.5 isosurface with MeshLib marching
+5. Pad field-of-view boundaries, extract the 0.5 isosurface with MeshLib marching
    cubes, smooth, select surface components, and optionally simplify.
-7. Transform vertices into DICOM patient LPS coordinates; validate the mesh in
+6. Transform vertices into DICOM patient LPS coordinates; validate the mesh in
    memory, write and validate a temporary file, then atomically publish it.
 
 The output is normally a closed surface because the mask is padded with
@@ -79,21 +78,21 @@ flat and a warning explains that missing anatomy was not recovered.
 pydicom reads headers for discovery. SimpleITK's GDCM-backed reader loads pixel
 data. The loader is for classic image series, not arbitrary DICOM objects.
 
-| case | behavior |
-|---|---|
-| Classic single-frame stacks | Supported and covered by generated uncompressed CT tests |
-| Enhanced multi-frame objects | Unsupported; one file is counted as one instance and per-frame geometry is not parsed |
-| Compressed transfer syntaxes | Delegated to codecs in the installed SimpleITK/GDCM build; not tested here |
-| `RescaleSlope` / `RescaleIntercept` | Applied by SimpleITK; CT presets rely on calibrated HU |
-| Pixel padding and `MONOCHROME1` | No explicit project handling; untested |
-| Consistent oblique stacks | Supported; slice normal and direction cosines are preserved |
-| Gantry tilt or nonparallel slices | No correction or complete geometry validation; unsupported without independent checks |
-| Irregular spacing | Warned and regularized when moderate; rejected when spread exceeds `max(0.1 mm, 0.5 × median spacing)` |
-| Duplicate positions | Not rejected; unsupported |
-| Missing geometry tags or varying dimensions | May fail or load incorrectly; unsupported |
-| Localizers | Rejected when `ImageType` contains `LOCALIZER`; short stacks are also rejected |
-| Reformats | A consistent classic stack can load; axial data is preferred after voxel-volume ranking |
-| Vendor mosaics | Unsupported |
+| case                                        | behavior                                                                                               |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Classic single-frame stacks                 | Supported and covered by generated uncompressed CT tests                                               |
+| Enhanced multi-frame objects                | Unsupported; one file is counted as one instance and per-frame geometry is not parsed                  |
+| Compressed transfer syntaxes                | Delegated to codecs in the installed SimpleITK/GDCM build; not tested here                             |
+| `RescaleSlope` / `RescaleIntercept`         | Applied by SimpleITK; CT presets rely on calibrated HU                                                 |
+| Pixel padding and `MONOCHROME1`             | No explicit project handling; untested                                                                 |
+| Consistent oblique stacks                   | Supported; slice normal and direction cosines are preserved                                            |
+| Gantry tilt or nonparallel slices           | No correction or complete geometry validation; unsupported without independent checks                  |
+| Irregular spacing                           | Warned and regularized when moderate; rejected when spread exceeds `max(0.1 mm, 0.5 × median spacing)` |
+| Duplicate positions                         | Not rejected; unsupported                                                                              |
+| Missing geometry tags or varying dimensions | May fail or load incorrectly; unsupported                                                              |
+| Localizers                                  | Rejected when `ImageType` contains `LOCALIZER`; short stacks are also rejected                         |
+| Reformats                                   | A consistent classic stack can load; axial data is preferred after voxel-volume ranking                |
+| Vendor mosaics                              | Unsupported                                                                                            |
 
 `FrameOfReferenceUID` is not read. `merge` always registers the moving scan and
 does not assume cross-series coordinates already align.
@@ -111,42 +110,9 @@ Median, opening, and closing parameters are kernel extents in millimetres. Each
 axis is floored to the largest integer radius whose realized `(2r+1) × spacing`
 does not exceed the request. A zero radius is an identity operation on that axis.
 
-Selective print-profile dilation is different: its radius is rounded up so a
-positive request cannot silently become zero. The mask is first resampled to an
-isotropic printability grid when needed to prevent a thick source slice from
-turning the dilation ball into a large ellipsoid.
-
 Fractional occupancy is linearly interpolated and thresholded at 0.5. Resampling
 can erase thin structures or change components, cavities, tunnels, and genus. It
 does not preserve anatomical topology.
-
-## Print-profile behavior
-
-Profiles add a closing target, an island-volume floor, and one minimum-feature
-target:
-
-| profile | closing | island floor | feature target |
-|---|---:|---:|---:|
-| `anatomical` | 0 | 0 | 0 |
-| `resin` | 3.2 mm | 100 mm³ | 0.6 mm |
-| `fdm` | 4.8 mm | 200 mm³ | 1.2 mm |
-
-There is no separate thickening distance. For target `T`, production computes:
-
-```text
-r         = T / 2
-core      = opening(mask, r)
-reachable = dilate(core, r)
-thin      = mask AND NOT reachable
-output    = mask OR dilate(thin, r)
-```
-
-This avoids inflating large solid regions, but it has a known blind spot: a
-short fragile feature inside the thick core's dilation reach is excluded from
-`thin`. Controlled FDM-grid fin and bridge cases remained 0.3 mm thick and did
-not trigger the global 5% thin-material warning. No final-mesh thickness
-measurement exists, so profile values are targets rather than exact STL or
-manufacturing guarantees.
 
 ## Surface extraction and finishing
 
@@ -185,8 +151,7 @@ estimate are reported. Conversion and merging use this same finishing path.
 
 ## Merge registration and gates
 
-Registration uses unmodified anatomical masks even when a print profile is
-requested:
+Registration uses thresholded and morphologically cleaned anatomical masks:
 
 1. Resample each mask onto a separate axis-aligned 2.0 mm world lattice.
 2. Find the best integer 3-D translation with FFT cross-correlation.
@@ -197,23 +162,14 @@ requested:
 Moving vertices are sampled to at most 60,000 with seed 0. ICP uses a 4 mm
 correspondence limit and up to 80 iterations per pass.
 
-| gate | definition | threshold |
-|---|---|---:|
-| Symmetric surface overlap | Weaker of moving→fixed and fixed→moving fractions within the other scan's field of view and 4 mm of a surface vertex | 0.60 |
-| Shared-field Dice | Binary-mask Dice on a 1.5 mm world grid, restricted to common acquired coverage | 0.55 |
-| Shared field of view | Common coverage volume on that 1.5 mm grid | 20,000 mm³ |
+| gate                      | definition                                                                                                           |  threshold |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------: |
+| Symmetric surface overlap | Weaker of moving→fixed and fixed→moving fractions within the other scan's field of view and 4 mm of a surface vertex |       0.60 |
+| Shared-field Dice         | Binary-mask Dice on a 1.5 mm world grid, restricted to common acquired coverage                                      |       0.55 |
+| Shared field of view      | Common coverage volume on that 1.5 mm grid                                                                           | 20,000 mm³ |
 
 Point-to-plane RMS and median are reported but not gated. The thresholds were
 selected on a small exploratory development set, not clinically calibrated.
-
-After registration passes, the current print merge profiles each scan before
-resampling fractional occupancies and taking their maximum. Only dilation
-distributes over union; the whole profile does not. Controlled offset-plate
-cases showed over-thickening, while fusion-first closing could incorrectly seal
-an inter-scan gap. Fusion-first morphology could also operate on a fused grid of
-up to 800 million voxels instead of separate printability grids capped at 300
-million voxels each, increasing peak memory. The production order remains
-unchanged.
 
 ## Patient comparison
 
@@ -279,5 +235,5 @@ behavior; no OpenGL system dependency is required.
 ## Verification
 
 Synthetic regression tests cover series grouping, geometry, segmentation,
-surface extraction, registration, validation, repair, and print-profile
-primitives. Run them with `uv run pytest -q`.
+surface extraction, registration, validation, and repair. Run them with
+`uv run pytest -q`.
