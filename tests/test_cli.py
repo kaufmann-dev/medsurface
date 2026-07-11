@@ -227,6 +227,17 @@ def test_registry_enums_match_presets_exactly():
     assert {choice.value for choice in cli.PresetChoice} == set(cli.PRESETS)
 
 
+def test_removed_bone_detail_preset_is_rejected(tmp_path):
+    result = runner.invoke(
+        cli.app,
+        ["convert", str(tmp_path), "-o", "out.stl", "--preset", "bone-detail"],
+        prog_name="dicom-surface",
+    )
+
+    assert result.exit_code == 2
+    assert "bone-detail" in result.stderr
+
+
 def test_every_validating_command_uses_the_same_quality_status():
     assert cli._quality_status(None) == 0
     assert cli._quality_status({"valid": True}) == 0
@@ -449,7 +460,7 @@ def test_presets_renders_tissue_table_without_ansi():
 
     assert result.exit_code == 0
     assert "Tissue presets (--preset)" in result.stdout
-    assert "bone-detail" in result.stdout
+    assert "bone" in result.stdout
     assert "\x1b" not in result.stdout
 
 
@@ -640,7 +651,7 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
             "--series-b",
             "1",
             "--preset",
-            "bone-detail",
+            "teeth",
             "--threshold",
             "250",
             "--median-mm",
@@ -670,7 +681,7 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
     assert result.exit_code == 0, result.output
     assert captured["series_a"] is fixed
     assert captured["series_b"] is moving
-    assert captured["preset"].name == "bone-detail"
+    assert captured["preset"].name == "teeth"
     assert captured["threshold"] == pytest.approx(250.0)
     assert captured["grid_mm"] == pytest.approx(0.8)
     assert captured["smooth_iters"] == 12

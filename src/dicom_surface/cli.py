@@ -28,7 +28,6 @@ class PresetChoice(str, Enum):
 
     AUTO = "auto"
     BONE = "bone"
-    BONE_DETAIL = "bone-detail"
     SKIN = "skin"
     TEETH = "teeth"
 

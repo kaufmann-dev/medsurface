@@ -60,26 +60,10 @@ PRESETS: dict[str, Preset] = {
         min_island_mm3=50.0,
         smooth_iters=20,
         simplify_error_mm=0.25,
-        # 25, not 12. Measured on a head CT: 12 leaves visible slice terracing,
-        # 25 removes it for 0.03 mm of extra mean displacement -- against a 0.8 mm
-        # slice pitch whose stair-step amplitude is ~0.4 mm. Past 25 the returns
-        # collapse (40 iterations buy 0.9 degrees for another 0.024 mm of RMS).
-        post_smooth_iters=25,
-    ),
-    "bone-detail": Preset(
-        name="bone-detail",
-        description="Bone at full resolution, minimally smoothed. For measurement. Huge files.",
-        modalities=_HU,
-        threshold=300.0,
-        median_mm=0.6,
-        closing_mm=1.2,
-        min_island_mm3=20.0,
-        # Deliberately light. Smoothing displaces the surface, and this preset
-        # exists for people who would rather see the scanner's stair-steps than
-        # have a filter move their geometry: mean displacement here is ~0.02 mm
-        # against ~0.085 mm for the `bone` preset.
-        smooth_iters=8,
-        simplify_error_mm=0.0,
+        # Measured on a head CT: 25 iterations remove most slice terracing; 40
+        # further improves adjacent-normal agreement for about 0.024 mm of extra
+        # RMS movement, still small against the 0.8 mm source slice pitch.
+        post_smooth_iters=40,
     ),
     "teeth": Preset(
         name="teeth",
@@ -116,7 +100,7 @@ PRESETS: dict[str, Preset] = {
         min_island_mm3=50.0,
         smooth_iters=20,
         simplify_error_mm=0.25,
-        post_smooth_iters=25,
+        post_smooth_iters=40,
     ),
 }
 
