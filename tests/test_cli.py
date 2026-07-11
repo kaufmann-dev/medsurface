@@ -127,7 +127,6 @@ heavy_modules = {
     "dicom_surface.surface",
     "dicom_surface.validate",
     "meshlib",
-    "vtk",
 }
 assert heavy_modules.isdisjoint(sys.modules)
 result = CliRunner().invoke(
@@ -280,6 +279,8 @@ def test_progress_display_has_plain_redirected_fallback_and_live_elapsed_time():
         ["merge", ".", ".", "-o", "out.stl", "--target-faces", "100"],
         ["convert", ".", "-o", "out.stl", "--no-validate"],
         ["merge", ".", ".", "-o", "out.stl", "--no-validate"],
+        ["convert", ".", "-o", "out.stl", "--passband", "0.1"],
+        ["merge", ".", ".", "-o", "out.stl", "--passband", "0.1"],
     ],
 )
 def test_removed_self_intersection_flag_is_a_usage_error(argv):
@@ -463,7 +464,7 @@ def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
             "0.8",
             "--smooth-iters",
             "11",
-            "--passband",
+            "--smooth-force",
             "0.12",
             "--simplify-error-mm",
             "0.18",
@@ -629,7 +630,7 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
             "0.8",
             "--smooth-iters",
             "12",
-            "--passband",
+            "--smooth-force",
             "0.1",
             "--simplify-error-mm",
             "0.2",
@@ -650,7 +651,7 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
     assert captured["threshold"] == pytest.approx(250.0)
     assert captured["grid_mm"] == pytest.approx(0.8)
     assert captured["smooth_iters"] == 12
-    assert captured["passband"] == pytest.approx(0.1)
+    assert captured["smooth_force"] == pytest.approx(0.1)
     assert captured["simplify_error_mm"] == pytest.approx(0.2)
     assert captured["post_smooth_iters"] == 8
     assert captured["force"]

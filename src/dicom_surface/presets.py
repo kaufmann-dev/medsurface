@@ -38,7 +38,8 @@ class Preset:
     resample_mm: float = 0.0
     #: Surface stage.
     smooth_iters: int = 20
-    passband: float = 0.1
+    #: MeshLib relaxation strength per iteration.
+    smooth_force: float = 0.1
     #: MeshLib estimated surface-deviation/QEM limit in model millimetres.
     #: This is not a certified Hausdorff bound. 0 disables simplification.
     simplify_error_mm: float = 0.0

@@ -49,7 +49,7 @@ def finish_surface(
     poly,
     *,
     smooth_iters: int,
-    passband: float,
+    smooth_force: float,
     simplify_error_mm: float,
     post_smooth_iters: int,
     keep_largest_component: bool,
@@ -61,7 +61,7 @@ def finish_surface(
 
     poly, initial = step(
         "smooth",
-        lambda: surface.smooth_safely(poly, smooth_iters, passband),
+        lambda: surface.smooth_safely(poly, smooth_iters, smooth_force),
     )
     if initial.initial_self_intersecting_faces:
         warnings.append(
@@ -128,7 +128,7 @@ def finish_surface(
 
     poly, final = step(
         "post-smooth",
-        lambda: surface.smooth_safely(poly, post_smooth_iters, passband),
+        lambda: surface.smooth_safely(poly, post_smooth_iters, smooth_force),
     )
     if final.initial_self_intersecting_faces:
         warnings.append(
@@ -380,17 +380,16 @@ def convert(
         isovalue = 0.5
 
     affine = surface.index_to_physical(grid)
-    vtk_img = surface.to_vtk_image(grid)
-
-    poly = step("marching cubes", lambda: surface.marching_cubes(vtk_img, isovalue))
-    say("  raw triangles: %s" % f"{poly.GetNumberOfPolys():,}")
-    if poly.GetNumberOfPolys() == 0:
+    poly = step("marching cubes", lambda: surface.marching_cubes(grid, isovalue))
+    raw_faces = int(poly.topology.numValidFaces())
+    say("  raw triangles: %s" % f"{raw_faces:,}")
+    if raw_faces == 0:
         raise ValueError("marching cubes produced no triangles")
 
     finished = finish_surface(
         poly,
         smooth_iters=preset.smooth_iters,
-        passband=preset.passband,
+        smooth_force=preset.smooth_force,
         simplify_error_mm=preset.simplify_error_mm,
         post_smooth_iters=preset.post_smooth_iters,
         keep_largest_component=preset.keep_largest_component,
@@ -401,7 +400,6 @@ def convert(
     surface_components = finished.surface_components
     warnings.extend(finished.warnings)
     poly = step("index -> patient space (LPS)", lambda: surface.transform(poly, affine))
-    poly = step("normals", lambda: surface.compute_normals(poly))
 
     quality = step("validate and publish mesh", lambda: surface.write_validated(poly, output_path))
 
@@ -425,8 +423,8 @@ def convert(
 
     return Result(
         output_path=output_path,
-        triangles=int(poly.GetNumberOfPolys()),
-        vertices=int(poly.GetNumberOfPoints()),
+        triangles=int(poly.topology.numValidFaces()),
+        vertices=int(poly.topology.numValidVerts()),
         bounds_mm=surface.bounds_mm(poly),
         threshold_used=value,
         threshold_source=source,

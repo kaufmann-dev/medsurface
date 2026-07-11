@@ -24,7 +24,7 @@ def _mesh(image, cap=True, smooth_iters=0, largest=False):
     if cap:
         image = segment.pad(image, 1)
     affine = surface.index_to_physical(image)
-    poly = surface.marching_cubes(surface.to_vtk_image(image))
+    poly = surface.marching_cubes(image)
     if smooth_iters:
         poly = surface.smooth(poly, smooth_iters, 0.1)
     if largest:
@@ -34,7 +34,7 @@ def _mesh(image, cap=True, smooth_iters=0, largest=False):
 
 def _write(poly, tmp_path, name="m.stl"):
     p = os.path.join(str(tmp_path), name)
-    surface.write(surface.compute_normals(poly), p)
+    surface.write(poly, p)
     return p
 
 
@@ -125,10 +125,7 @@ def test_index_to_physical_matches_simpleitk():
     m = surface.index_to_physical(img)
     for idx in [(0, 0, 0), (5, 4, 3), (2, 1, 0)]:
         expected = img.TransformIndexToPhysicalPoint(idx)
-        got = [
-            sum(m.GetElement(r, c) * idx[c] for c in range(3)) + m.GetElement(r, 3)
-            for r in range(3)
-        ]
+        got = (m[:3, :3] @ np.asarray(idx) + m[:3, 3]).tolist()
         assert got == pytest.approx(list(expected), abs=1e-9)
 
 
@@ -145,23 +142,23 @@ def test_padding_preserves_physical_coordinates(solid_sphere):
 def test_looser_simplification_error_produces_no_more_faces(solid_sphere):
     image, _ = solid_sphere
     poly = _mesh(image, smooth_iters=5)
-    before = poly.GetNumberOfPolys()
+    before = poly.topology.numValidFaces()
     strict = surface.decimate(poly, 0.05)
     loose = surface.decimate(poly, 0.25)
-    assert strict.GetNumberOfPolys() < before
-    assert loose.GetNumberOfPolys() <= strict.GetNumberOfPolys()
+    assert strict.topology.numValidFaces() < before
+    assert loose.topology.numValidFaces() <= strict.topology.numValidFaces()
 
 
 def test_smoothing_trades_roughness_for_displacement(solid_sphere):
     """More iterations means a smoother surface that sits further from the data.
 
-    Guards the one knob users actually feel. Windowed-sinc must not shrink the
-    surface either -- a plain Laplacian would contract it toward the centroid.
+    Guards the smoothing knob users actually feel. Volume-preserving relaxation
+    must not contract the surface toward its centroid.
     """
     image, radius = solid_sphere
     padded = segment.pad(image, 1)
     affine = surface.index_to_physical(padded)
-    raw = surface.transform(surface.marching_cubes(surface.to_vtk_image(padded)), affine)
+    raw = surface.transform(surface.marching_cubes(padded), affine)
 
     exact = 4.0 / 3.0 * math.pi * radius**3
 
@@ -234,9 +231,9 @@ def test_count_defects_matches_validate(clipped_sphere, solid_sphere):
     assert surface.count_defects(closed) == (0, 0)
 
     opened = _mesh(clipped_sphere, cap=False)
-    boundary, nonmanifold = surface.count_defects(opened)
+    boundary, holes = surface.count_defects(opened)
     assert boundary > 0
-    assert nonmanifold == 0
+    assert holes > 0
 
 
 @pytest.mark.parametrize("mm", [0.6, 1.0, 1.5])
@@ -246,7 +243,7 @@ def test_isotropic_resampling_stays_watertight(solid_sphere, tmp_path, mm):
     padded = segment.pad(image, 1)
     grid = segment.resample_isotropic(padded, mm)
 
-    poly = surface.marching_cubes(surface.to_vtk_image(grid), segment.ISO_OCCUPANCY)
+    poly = surface.marching_cubes(grid, segment.ISO_OCCUPANCY)
     poly = surface.smooth(poly, 10, 0.1)
     poly = surface.transform(poly, surface.index_to_physical(grid))
 
@@ -264,8 +261,8 @@ def test_coarser_resampling_yields_fewer_triangles(solid_sphere):
     counts = []
     for mm in (0.5, 1.0, 2.0):
         grid = segment.resample_isotropic(padded, mm)
-        poly = surface.marching_cubes(surface.to_vtk_image(grid), segment.ISO_OCCUPANCY)
-        counts.append(poly.GetNumberOfPolys())
+        poly = surface.marching_cubes(grid, segment.ISO_OCCUPANCY)
+        counts.append(poly.topology.numValidFaces())
     assert counts[0] > counts[1] > counts[2]
 
 
@@ -281,13 +278,7 @@ def test_resampling_preserves_physical_placement(solid_sphere):
 
 @pytest.mark.parametrize("error_mm", [0.05, 0.1, 0.25])
 def test_simplification_never_opens_a_closed_mesh(solid_sphere, tmp_path, error_mm):
-    """Regression: both of VTK's decimators tear a closed surface.
-
-    vtkQuadricDecimation leaks boundary edges at every reduction (6 at 50%, 90 at
-    85% on a real skull); vtkDecimatePro with PreserveTopologyOn misses the target
-    and still emits non-manifold edges. The MeshLib decimator holds topology, so a
-    watertight mesh stays watertight and its volume barely moves.
-    """
+    """MeshLib simplification must keep a closed surface watertight."""
     image, radius = solid_sphere
     poly = _mesh(image, smooth_iters=10)
     assert surface.count_defects(poly) == (0, 0)
@@ -307,21 +298,17 @@ def test_simplification_never_opens_a_closed_mesh(solid_sphere, tmp_path, error_
 def test_zero_simplification_error_is_a_noop(solid_sphere):
     image, _ = solid_sphere
     poly = _mesh(image, smooth_iters=5)
-    assert surface.decimate(poly, 0).GetNumberOfPolys() == poly.GetNumberOfPolys()
+    assert surface.decimate(poly, 0).topology.numValidFaces() == poly.topology.numValidFaces()
 
 
 def test_decimation_preserves_genus(tmp_path):
     """A skull has genus >1000. Decimation must not close its tunnels."""
-    import vtk as _vtk
-
     p = os.path.join(str(tmp_path), "torus.stl")
-    write(p, torus(10.0, 3.0, 192, 96))
+    torus_mesh = torus(10.0, 3.0, 192, 96)
+    write(p, torus_mesh)
     assert validate.validate(p)["genus"] == 1
 
-    reader = _vtk.vtkSTLReader()
-    reader.SetFileName(p)
-    reader.Update()
-    poly = reader.GetOutput()
+    poly = surface.from_arrays(*torus_mesh)
 
     smaller = surface.decimate(poly, 0.25)
     after = validate.validate(_write(smaller, tmp_path, "torus_dec.stl"))
@@ -423,8 +410,8 @@ def test_resampling_erases_structures_thinner_than_the_target_voxel():
 def test_simplification_with_zero_error_is_a_noop(solid_sphere):
     image, _ = solid_sphere
     poly = _mesh(image)
-    n = poly.GetNumberOfPolys()
-    assert surface.decimate(poly, 0).GetNumberOfPolys() == n
+    n = poly.topology.numValidFaces()
+    assert surface.decimate(poly, 0).topology.numValidFaces() == n
 
 
 def test_unsupported_extension_is_rejected(solid_sphere, tmp_path):
@@ -451,7 +438,7 @@ def test_invalid_serialized_output_does_not_replace_destination(solid_sphere, tm
     assert not list(tmp_path.glob(".mesh.stl.*"))
 
 
-@pytest.mark.parametrize("ext", [".stl", ".ply", ".obj", ".vtp"])
+@pytest.mark.parametrize("ext", [".stl", ".ply", ".obj"])
 def test_roundtrip_formats(solid_sphere, tmp_path, ext):
     image, _ = solid_sphere
     poly = _mesh(image, smooth_iters=5)
@@ -462,11 +449,15 @@ def test_roundtrip_formats(solid_sphere, tmp_path, ext):
     assert report["valid"], report["problems"]
 
 
-def test_vtp_self_intersection_check(solid_sphere, tmp_path):
+def test_vtp_is_not_supported(solid_sphere, tmp_path):
     image, _ = solid_sphere
-    path = _write(_mesh(image, smooth_iters=5), tmp_path, "m.vtp")
-    report = validate.validate(path)
-    assert report["self_intersecting_faces"] == 0
+    with pytest.raises(ValueError, match="unsupported output extension"):
+        _write(_mesh(image, smooth_iters=5), tmp_path, "m.vtp")
+
+    input_path = tmp_path / "input.vtp"
+    input_path.write_text("<VTKFile />")
+    with pytest.raises(ValueError, match="unsupported mesh extension"):
+        validate.validate(str(input_path))
 
 
 def test_disjoint_closed_shells_are_valid(tmp_path):

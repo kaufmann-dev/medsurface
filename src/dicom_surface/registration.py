@@ -34,7 +34,6 @@ import numpy as np
 import SimpleITK as sitk
 from scipy.signal import fftconvolve
 from scipy.spatial import cKDTree
-from vtk.util import numpy_support  # noqa: N813
 
 from . import segment, surface
 
@@ -189,16 +188,12 @@ def _icp_point_to_plane(src, tgt, tgt_normals, tgt_tree, transform,
 def surface_points(mask: sitk.Image, smooth_iters: int = 10):
     """Vertices and vertex normals of a mask's surface, in patient coordinates."""
     padded = segment.pad(mask, 1)
-    poly = surface.marching_cubes(surface.to_vtk_image(padded), 0.5)
-    if poly.GetNumberOfPolys() == 0:
+    poly = surface.marching_cubes(padded, 0.5)
+    if poly.topology.numValidFaces() == 0:
         raise RegistrationError("mask has no surface; the threshold left no foreground")
     poly = surface.smooth(poly, smooth_iters, 0.1)
     poly = surface.transform(poly, surface.index_to_physical(padded))
-    poly = surface.compute_normals(poly)
-
-    pts = numpy_support.vtk_to_numpy(poly.GetPoints().GetData()).astype(np.float64)
-    normals = numpy_support.vtk_to_numpy(poly.GetPointData().GetNormals()).astype(np.float64)
-    return pts, normals
+    return surface.vertex_normals(poly)
 
 
 def _inside_fov(image: sitk.Image, points: np.ndarray) -> np.ndarray:

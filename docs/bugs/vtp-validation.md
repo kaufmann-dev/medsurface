@@ -27,5 +27,6 @@ Validation loads VTP through `vtkXMLPolyDataReader`, triangulates it with
 `vtkTriangleFilter`, and converts the resulting arrays into the same MeshLib
 representation used for every quality metric and self-intersection check.
 
-Regression tests cover ordinary VTP validation and the VTP self-intersection
-path. STL, PLY, and OBJ continue to use their existing Trimesh loaders.
+Regression tests covered ordinary VTP validation and its self-intersection path.
+VTP support was subsequently removed when the surface pipeline moved from VTK
+to MeshLib; STL, PLY, and OBJ remain supported.

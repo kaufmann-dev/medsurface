@@ -80,7 +80,7 @@ def test_every_preset_is_self_consistent():
         assert p.name == name
         assert p.description
         assert p.median_mm >= 0 and p.closing_mm >= 0 and p.opening_mm >= 0
-        assert 0.0 < p.passband <= 2.0
+        assert 0.0 < p.smooth_force <= 0.5
         assert p.simplify_error_mm >= 0
         if isinstance(p.threshold, str):
             assert p.threshold == "auto"

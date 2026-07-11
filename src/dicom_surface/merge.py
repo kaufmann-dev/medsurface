@@ -297,7 +297,7 @@ def merge(
     threshold: float | None = None,
     grid_mm: float = DEFAULT_MERGE_GRID_MM,
     smooth_iters: int | None = None,
-    passband: float | None = None,
+    smooth_force: float | None = None,
     simplify_error_mm: float | None = None,
     post_smooth_iters: int | None = None,
     print_profile: PrintProfile = ANATOMICAL,
@@ -309,7 +309,7 @@ def merge(
     # Fall back to the preset, so a fused surface is finished exactly as a
     # single-scan one is.
     smooth_iters = preset.smooth_iters if smooth_iters is None else smooth_iters
-    passband = preset.passband if passband is None else passband
+    smooth_force = preset.smooth_force if smooth_force is None else smooth_force
     simplify_error_mm = (preset.simplify_error_mm if simplify_error_mm is None
                          else simplify_error_mm)
     post_smooth_iters = (preset.post_smooth_iters if post_smooth_iters is None
@@ -442,17 +442,18 @@ def merge(
     fused = segment.pad(fused, 1)
 
     affine = surface.index_to_physical(fused)
-    poly = step("marching cubes",
-                lambda: surface.marching_cubes(surface.to_vtk_image(fused),
-                                               segment.ISO_OCCUPANCY))
-    if poly.GetNumberOfPolys() == 0:
+    poly = step(
+        "marching cubes",
+        lambda: surface.marching_cubes(fused, segment.ISO_OCCUPANCY),
+    )
+    if poly.topology.numValidFaces() == 0:
         raise MergeError("the fused volume produced no surface")
-    say("  raw triangles %s" % f"{poly.GetNumberOfPolys():,}")
+    say("  raw triangles %s" % f"{poly.topology.numValidFaces():,}")
 
     finished = pipeline.finish_surface(
         poly,
         smooth_iters=smooth_iters,
-        passband=passband,
+        smooth_force=smooth_force,
         simplify_error_mm=simplify_error_mm,
         post_smooth_iters=post_smooth_iters,
         keep_largest_component=True,
@@ -463,12 +464,12 @@ def merge(
     shells = finished.surface_components
     warnings.extend(finished.warnings)
     poly = step("index -> patient space (LPS)", lambda: surface.transform(poly, affine))
-    poly = step("normals", lambda: surface.compute_normals(poly))
 
-    boundary, nonmanifold = step("check surface defects", lambda: surface.count_defects(poly))
-    if boundary or nonmanifold:
-        warnings.append("fused surface has %d boundary and %d non-manifold edge(s)"
-                        % (boundary, nonmanifold))
+    boundary, holes = step("check surface defects", lambda: surface.count_defects(poly))
+    if boundary or holes:
+        warnings.append(
+            "fused surface has %d boundary edge(s) and %d hole(s)" % (boundary, holes)
+        )
 
     quality = step("validate and publish mesh", lambda: surface.write_validated(poly, output_path))
 
@@ -499,8 +500,8 @@ def merge(
 
     return MergeResult(
         output_path=output_path,
-        triangles=int(poly.GetNumberOfPolys()),
-        vertices=int(poly.GetNumberOfPoints()),
+        triangles=int(poly.topology.numValidFaces()),
+        vertices=int(poly.topology.numValidVerts()),
         bounds_mm=surface.bounds_mm(poly),
         grid_mm=grid_mm,
         grid_size=size,

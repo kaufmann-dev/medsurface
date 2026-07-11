@@ -23,7 +23,6 @@ dependencies = [
   "numpy>=1.24,<2.5",
   "pydicom>=2.4",
   "SimpleITK>=2.3",
-  "vtk>=9.2",
   # FFT correlation and nearest-neighbor registration.
   "scipy>=1.10",
   # Topology-constrained decimation and self-intersection counting.
