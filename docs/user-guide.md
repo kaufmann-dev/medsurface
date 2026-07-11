@@ -171,11 +171,12 @@ in the destination directory, validate that serialized file, and atomically
 publish it only when both checks pass. `repair` validates the file it writes;
 `validate` runs the same checks without changing its input.
 
-A report is valid only when the mesh is watertight, consistently wound, an
-enclosed volume, and has no boundary edges, non-manifold edge uses, degenerate
-faces, or self-intersecting faces. Multiple closed components are allowed. A
-failed or unavailable self-intersection measurement makes the result incomplete
-and therefore invalid.
+A report is valid only when MeshLib imports the mesh as watertight, consistently
+wound, and enclosing a volume, with no holes, boundary edges, disoriented faces,
+or self-intersecting faces. Multiple closed components are allowed. MeshLib may
+normalize unsupported raw face configurations while loading; the report describes
+the imported mesh rather than exposing separate raw non-manifold or degenerate
+face counters. A failed self-intersection measurement is invalid.
 
 Before writing, conversion and merging also guard both smoothing stages and
 simplification against self-intersections. Smoothing still runs every requested

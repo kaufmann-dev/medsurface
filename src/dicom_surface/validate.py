@@ -1,28 +1,21 @@
-"""Mesh quality metrics.
-
-STL stores triangle facets without an explicit shared-vertex graph. "Watertight",
-"manifold", and "hole" therefore depend on welding coincident positions first.
-Trimesh processing performs an approximate, tolerance-derived weld before the
-metrics below are calculated.
-"""
+"""Mesh quality metrics measured with MeshLib."""
 
 from __future__ import annotations
 
 import os
 from typing import Any
 
-import numpy as np
-import trimesh
-import vtk
 import meshlib.mrmeshnumpy as mrmeshnumpy
 import meshlib.mrmeshpy as mrmeshpy
+import numpy as np
+import vtk
 from vtk.util import numpy_support
 
 
-def _load_mesh(path: str) -> trimesh.Trimesh:
-    """Load a triangle mesh without limiting validation to Trimesh formats."""
+def _load_mesh(path: str) -> mrmeshpy.Mesh:
+    """Load supported triangle meshes, retaining VTK only for VTP."""
     if os.path.splitext(path)[1].lower() != ".vtp":
-        return trimesh.load_mesh(path, process=True)
+        return mrmeshpy.loadMesh(path)
 
     reader = vtk.vtkXMLPolyDataReader()
     if not reader.CanReadFile(path):
@@ -40,17 +33,14 @@ def _load_mesh(path: str) -> trimesh.Trimesh:
 
     vertices = numpy_support.vtk_to_numpy(poly.GetPoints().GetData()).astype(np.float64)
     connectivity = numpy_support.vtk_to_numpy(poly.GetPolys().GetConnectivityArray())
-    faces = connectivity.reshape(-1, 3).astype(np.int64)
-    return trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
+    faces = connectivity.reshape(-1, 3).astype(np.int32)
+    return mrmeshnumpy.meshFromFacesVerts(faces, vertices)
 
 
-def _self_intersections(_path: str | None, mesh: trimesh.Trimesh) -> int | str:
+def _self_intersections(mesh: mrmeshpy.Mesh) -> int | str:
     """Count unique faces in MeshLib self-collision pairs."""
     try:
-        vertices = np.ascontiguousarray(mesh.vertices, dtype=np.float64)
-        faces = np.ascontiguousarray(mesh.faces, dtype=np.int32)
-        mr_mesh = mrmeshnumpy.meshFromFacesVerts(faces, vertices)
-        pairs = mrmeshpy.findSelfCollidingTriangles(mrmeshpy.MeshPart(mr_mesh))
+        pairs = mrmeshpy.findSelfCollidingTriangles(mrmeshpy.MeshPart(mesh))
         selected = set()
         for pair in pairs:
             selected.add(int(pair.aFace))
@@ -60,42 +50,19 @@ def _self_intersections(_path: str | None, mesh: trimesh.Trimesh) -> int | str:
         return "error: %s" % type(exc).__name__
 
 
-def _component_count(mesh: trimesh.Trimesh) -> int:
-    """Number of connected surface shells.
-
-    Counted straight from face adjacency. ``Trimesh.split()`` would be the obvious
-    call, but it builds a submesh per component with ``repair=True``, i.e. it
-    *fills holes while measuring them*. A validator must not mutate what it
-    reports on.
-
-    Faces are adjacent only across edges shared by exactly two faces, so a
-    non-manifold edge severs adjacency and inflates this count. Treat it as an
-    upper bound on a non-manifold mesh.
-    """
-    n_faces = len(mesh.faces)
-    if n_faces == 0:
-        return 0
-    components = trimesh.graph.connected_components(
-        mesh.face_adjacency, nodes=np.arange(n_faces)
-    )
-    return int(len(components))
-
-
 def _problems(report: dict[str, Any]) -> list[str]:
-    """Reasons a measured mesh does not satisfy the CLI validity contract."""
+    """Reasons a MeshLib-loaded mesh does not satisfy the validity contract."""
     problems = []
     if not report["watertight"]:
         problems.append("mesh is not watertight")
-    if not report["winding_consistent"]:
-        problems.append("face winding is inconsistent")
-    if not report["is_volume"]:
-        problems.append("mesh is not a valid enclosed volume")
+    if report["holes"]:
+        problems.append("%d hole(s)" % report["holes"])
     if report["boundary_edges"]:
         problems.append("%d boundary edge(s)" % report["boundary_edges"])
-    if report["nonmanifold_edge_uses"]:
-        problems.append("%d non-manifold edge use(s)" % report["nonmanifold_edge_uses"])
-    if report["degenerate_faces"]:
-        problems.append("%d degenerate face(s)" % report["degenerate_faces"])
+    if not report["winding_consistent"]:
+        problems.append("%d disoriented face(s)" % report["disoriented_faces"])
+    if not report["is_volume"]:
+        problems.append("mesh is not a valid enclosed volume")
 
     intersections = report["self_intersecting_faces"]
     if isinstance(intersections, int):
@@ -106,50 +73,65 @@ def _problems(report: dict[str, Any]) -> list[str]:
     return problems
 
 
-def _validate_mesh(mesh: trimesh.Trimesh, *, file: str, bytes: int) -> dict[str, Any]:
-    """Full quality report and a single validity result for one triangle mesh."""
+def _vector(vector: mrmeshpy.Vector3f) -> list[float]:
+    return [float(vector.x), float(vector.y), float(vector.z)]
 
-    edges = np.sort(mesh.edges_sorted, axis=1)
-    _uniq, inverse, counts = np.unique(edges, axis=0, return_inverse=True, return_counts=True)
-    per_edge = counts[inverse]
 
-    areas = mesh.area_faces
-    watertight = bool(mesh.is_watertight)
+def _validate_mesh(mesh: mrmeshpy.Mesh, *, file: str, bytes: int) -> dict[str, Any]:
+    """Return MeshLib-native metrics for one imported triangle mesh."""
+    topology = mesh.topology
+    triangles = int(topology.numValidFaces())
+    vertices = int(topology.numValidVerts())
+    components = int(len(mrmeshpy.getAllComponents(mrmeshpy.MeshPart(mesh))))
+    holes = int(topology.findNumHoles())
+    boundary_edges = int(topology.findLeftBdEdges().count())
+    disoriented_faces = int(mrmeshpy.findDisorientedFaces(mesh).count())
+    watertight = bool(topology.isClosed())
+    winding_consistent = disoriented_faces == 0
+    volume = float(mesh.volume())
+    is_volume = bool(watertight and winding_consistent and abs(volume) > 1e-12)
+    euler = int(
+        vertices - topology.computeNotLoneUndirectedEdges() + triangles
+    )
+    bounds = mesh.computeBoundingBox()
+    bbox_min = _vector(bounds.min)
+    bbox_max = _vector(bounds.max)
 
     report: dict[str, Any] = {
         "file": file,
         "bytes": bytes,
-        "triangles": int(len(mesh.faces)),
-        "vertices": int(len(mesh.vertices)),
-        "components": _component_count(mesh),
+        "triangles": triangles,
+        "vertices": vertices,
+        "components": components,
         "watertight": watertight,
-        "winding_consistent": bool(mesh.is_winding_consistent),
-        "is_volume": bool(mesh.is_volume),
-        "euler_number": int(mesh.euler_number),
-        "boundary_edges": int(np.count_nonzero(per_edge == 1)),
-        "nonmanifold_edge_uses": int(np.count_nonzero(per_edge > 2)),
-        "degenerate_faces": int(np.count_nonzero(areas <= 1e-12)),
-        "area_mm2": float(areas.sum()),
-        "volume_mm3": float(mesh.volume) if watertight else None,
-        "bbox_min": [float(v) for v in mesh.bounds[0]],
-        "bbox_max": [float(v) for v in mesh.bounds[1]],
-        "bbox_extents_mm": [float(v) for v in mesh.extents],
+        "winding_consistent": winding_consistent,
+        "disoriented_faces": disoriented_faces,
+        "is_volume": is_volume,
+        "euler_number": euler,
+        "holes": holes,
+        "boundary_edges": boundary_edges,
+        "area_mm2": float(mesh.area()),
+        "volume_mm3": abs(volume) if watertight else None,
+        "bbox_min": bbox_min,
+        "bbox_max": bbox_max,
+        "bbox_extents_mm": [hi - lo for lo, hi in zip(bbox_min, bbox_max)],
     }
 
-    if watertight and report["components"] == 1:
-        # genus = (2 - euler) / 2 for a closed orientable surface
-        report["genus"] = int((2 - report["euler_number"]) // 2)
+    if watertight and components == 1:
+        report["genus"] = int((2 - euler) // 2)
 
-    report["self_intersecting_faces"] = _self_intersections(None, mesh)
+    report["self_intersecting_faces"] = _self_intersections(mesh)
     report["problems"] = _problems(report)
     report["valid"] = not report["problems"]
-
     return report
 
 
 def validate_arrays(vertices: np.ndarray, faces: np.ndarray) -> dict[str, Any]:
-    """Apply the complete validation contract before serialization."""
-    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
+    """Apply the complete MeshLib validation contract before serialization."""
+    mesh = mrmeshnumpy.meshFromFacesVerts(
+        np.ascontiguousarray(faces, dtype=np.int32),
+        np.ascontiguousarray(vertices, dtype=np.float64),
+    )
     return _validate_mesh(mesh, file="<in-memory>", bytes=0)
 
 
@@ -163,17 +145,16 @@ def validate(path: str) -> dict[str, Any]:
 
 
 def summarise(report: dict[str, Any]) -> str:
-    ok = "yes" if report["watertight"] else "NO"
     lines = [
         "  valid               %s" % ("yes" if report["valid"] else "NO"),
         "  triangles           %s" % f"{report['triangles']:,}",
         "  vertices            %s" % f"{report['vertices']:,}",
         "  components          %s" % f"{report['components']:,}",
-        "  watertight          %s" % ok,
+        "  watertight          %s" % ("yes" if report["watertight"] else "NO"),
         "  winding consistent  %s" % ("yes" if report["winding_consistent"] else "NO"),
+        "  disoriented faces   %s" % f"{report['disoriented_faces']:,}",
+        "  holes               %s" % f"{report['holes']:,}",
         "  boundary edges      %s" % f"{report['boundary_edges']:,}",
-        "  non-manifold edges  %s" % f"{report['nonmanifold_edge_uses']:,}",
-        "  degenerate faces    %s" % f"{report['degenerate_faces']:,}",
     ]
     if "genus" in report:
         lines.append("  genus               %d" % report["genus"])

@@ -308,10 +308,13 @@ def _quality_table(report: dict[str, Any]) -> Table:
     )
     table.add_row(_plain("Boundary edges"), _plain(f"{report['boundary_edges']:,}"))
     table.add_row(
-        _plain("Non-manifold edges"),
-        _plain(f"{report['nonmanifold_edge_uses']:,}"),
+        _plain("Holes"),
+        _plain(f"{report['holes']:,}"),
     )
-    table.add_row(_plain("Degenerate faces"), _plain(f"{report['degenerate_faces']:,}"))
+    table.add_row(
+        _plain("Disoriented faces"),
+        _plain(f"{report['disoriented_faces']:,}"),
+    )
     if "genus" in report:
         table.add_row(_plain("Genus"), _plain(report["genus"]))
     if report.get("volume_mm3") is None:

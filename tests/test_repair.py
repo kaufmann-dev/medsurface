@@ -4,19 +4,18 @@ import json
 import os
 
 import pytest
-import trimesh
 from typer.testing import CliRunner
 
 from dicom_surface import cli, repair, validate
+from tests.mesh_helpers import box, write
 
 
 def test_repair_closes_an_open_mesh(tmp_path):
-    box = trimesh.creation.box()
-    box.update_faces([False, False] + [True] * (len(box.faces) - 2))
+    vertices, faces = box()
 
     source = str(tmp_path / "open.stl")
     output = str(tmp_path / "repaired.stl")
-    box.export(source)
+    write(source, (vertices, faces[2:]))
 
     before = validate.validate(source)
     assert not before["watertight"]
@@ -33,7 +32,7 @@ def test_repair_closes_an_open_mesh(tmp_path):
 def test_repair_refuses_to_overwrite_its_input_or_a_hard_link(tmp_path):
     source = tmp_path / "source.stl"
     alias = tmp_path / "alias.stl"
-    trimesh.creation.box().export(source)
+    write(source, box())
     original = source.read_bytes()
 
     with pytest.raises(ValueError, match="not in-place"):
@@ -62,11 +61,10 @@ def test_repair_announces_mesh_loading_before_it_starts(monkeypatch):
 
 
 def test_repair_json_mode_writes_only_json(tmp_path):
-    box = trimesh.creation.box()
-    box.update_faces([False, False] + [True] * (len(box.faces) - 2))
+    vertices, faces = box()
     source = tmp_path / "open.stl"
     output = tmp_path / "fixed.stl"
-    box.export(source)
+    write(source, (vertices, faces[2:]))
 
     result = CliRunner().invoke(
         cli.app,
