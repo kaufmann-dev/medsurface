@@ -8,33 +8,16 @@ from typing import Any
 import meshlib.mrmeshnumpy as mrmeshnumpy
 import meshlib.mrmeshpy as mrmeshpy
 import numpy as np
-import vtk
-from vtk.util import numpy_support
 
 
 def _load_mesh(path: str) -> mrmeshpy.Mesh:
-    """Load supported triangle meshes, retaining VTK only for VTP."""
-    if os.path.splitext(path)[1].lower() != ".vtp":
-        return mrmeshpy.loadMesh(path)
-
-    reader = vtk.vtkXMLPolyDataReader()
-    if not reader.CanReadFile(path):
-        raise ValueError("invalid VTP file: %s" % path)
-    reader.SetFileName(path)
-
-    triangles = vtk.vtkTriangleFilter()
-    triangles.SetInputConnection(reader.GetOutputPort())
-    triangles.PassLinesOff()
-    triangles.PassVertsOff()
-    triangles.Update()
-    poly = triangles.GetOutput()
-    if poly.GetPoints() is None or poly.GetNumberOfPolys() == 0:
-        raise ValueError("VTP file contains no surface triangles: %s" % path)
-
-    vertices = numpy_support.vtk_to_numpy(poly.GetPoints().GetData()).astype(np.float64)
-    connectivity = numpy_support.vtk_to_numpy(poly.GetPolys().GetConnectivityArray())
-    faces = connectivity.reshape(-1, 3).astype(np.int32)
-    return mrmeshnumpy.meshFromFacesVerts(faces, vertices)
+    """Load a supported triangle mesh with MeshLib."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in (".obj", ".ply", ".stl"):
+        raise ValueError(
+            "unsupported mesh extension %r; supported: .obj, .ply, .stl" % ext
+        )
+    return mrmeshpy.loadMesh(path)
 
 
 def _self_intersections(mesh: mrmeshpy.Mesh) -> int | str:

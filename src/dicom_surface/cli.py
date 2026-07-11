@@ -435,10 +435,11 @@ def presets() -> None:
         modality = ", ".join(preset.modalities) if preset.modalities else "any"
         threshold = preset.threshold if isinstance(preset.threshold, str) else "%g" % preset.threshold
         simplify = "off" if preset.simplify_error_mm == 0 else "%.2f mm" % preset.simplify_error_mm
-        processing = "median %.1f mm; closing %.1f mm; smooth %d; simplify %s" % (
+        processing = "median %.1f mm; closing %.1f mm; smooth %d @ %.2f; simplify %s" % (
             preset.median_mm,
             preset.closing_mm,
             preset.smooth_iters,
+            preset.smooth_force,
             simplify,
         )
         tissue.add_row(
@@ -478,7 +479,7 @@ def convert(
         readable=True,
         help="Directory tree containing the source DICOM series.",
     ),
-    output: Path = typer.Option(..., "-o", "--output", help="Output .stl/.ply/.obj/.vtp file."),
+    output: Path = typer.Option(..., "-o", "--output", help="Output .stl/.ply/.obj file."),
     series: str | None = typer.Option(
         None,
         "--series",
@@ -511,8 +512,10 @@ def convert(
         "--resample-mm",
         help="Isotropic surface-grid voxel size in mm (0 = native).",
     ),
-    smooth_iters: int | None = typer.Option(None, "--smooth-iters", help="Windowed-sinc iterations."),
-    passband: float | None = typer.Option(None, "--passband", help="Windowed-sinc passband."),
+    smooth_iters: int | None = typer.Option(None, "--smooth-iters", help="MeshLib relaxation iterations."),
+    smooth_force: float | None = typer.Option(
+        None, "--smooth-force", help="MeshLib relaxation strength per iteration."
+    ),
     simplify_error_mm: float | None = typer.Option(
         None,
         "--simplify-error-mm",
@@ -550,7 +553,7 @@ def convert(
             min_island_mm3=min_island_mm3,
             resample_mm=resample_mm,
             smooth_iters=smooth_iters,
-            passband=passband,
+            smooth_force=smooth_force,
             simplify_error_mm=simplify_error_mm,
             post_smooth_iters=post_smooth_iters,
             keep_largest_island=False if all_islands else None,
@@ -633,7 +636,7 @@ def merge(
         readable=True,
         help="Fixed scan; defines the output coordinate frame.",
     ),
-    output: Path = typer.Option(..., "-o", "--output", help="Output .stl/.ply/.obj/.vtp file."),
+    output: Path = typer.Option(..., "-o", "--output", help="Output .stl/.ply/.obj file."),
     dicom_dir_b: Path | None = typer.Argument(
         None,
         exists=True,
@@ -673,7 +676,9 @@ def merge(
         help="Isotropic fused-grid voxel size in mm.",
     ),
     smooth_iters: int | None = typer.Option(None, "--smooth-iters", help="Default: from the preset."),
-    passband: float | None = typer.Option(None, "--passband", help="Default: from the preset."),
+    smooth_force: float | None = typer.Option(
+        None, "--smooth-force", help="Default: from the preset."
+    ),
     simplify_error_mm: float | None = typer.Option(
         None,
         "--simplify-error-mm",
@@ -734,7 +739,7 @@ def merge(
                 threshold=threshold_value,
                 grid_mm=grid_mm,
                 smooth_iters=smooth_iters,
-                passband=passband,
+                smooth_force=smooth_force,
                 simplify_error_mm=simplify_error_mm,
                 post_smooth_iters=post_smooth_iters,
                 print_profile=_resolve_print_profile(

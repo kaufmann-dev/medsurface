@@ -3,7 +3,7 @@
 [Install](#install) · [Quick start](#quick-start) · [Commands](#commands) ·
 [User guide][user-guide] · [Technical reference][technical-reference]
 
-Turn a DICOM image series into an STL, PLY, OBJ, or VTP surface mesh from the
+Turn a DICOM image series into an STL, PLY, or OBJ surface mesh from the
 command line.
 
 > **Safety:** `dicom-surface` is not validated for diagnosis, treatment
@@ -59,7 +59,7 @@ data. For a printable model, also read [Print profiles][profiles].
 | `dicom-surface repair MODEL.stl -o FIXED.stl`  | Repair an open or non-manifold mesh                 |
 
 Run `dicom-surface COMMAND --help` for every option. Output format follows the
-extension: `.stl`, `.ply`, `.obj`, or `.vtp`.
+extension: `.stl`, `.ply`, or `.obj`.
 
 ## Common workflows
 

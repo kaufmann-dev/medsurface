@@ -23,8 +23,9 @@ the MeshLib-validated candidates, and it added an OpenGL runtime dependency.
 
 The restored `248e35f0` smoothing and source-neighborhood protection flow is
 retained. MeshLib `findSelfCollidingTriangles` is now the sole collision
-predicate in smoothing, simplification, file validation, and VTP's in-memory
-path; both faces of every colliding pair are counted.
+predicate in smoothing, simplification, and file validation; both faces of
+every colliding pair are counted. VTP support was subsequently removed with the
+VTK dependency.
 
 MeshLib simplification now uses `MinimizeError` with an estimated QEM
 surface-deviation limit in millimetres rather than an exact face budget. It
@@ -37,6 +38,6 @@ Conversion and merge validate the in-memory mesh, serialize to a temporary file
 in the destination directory, validate the file, then atomically replace the
 requested destination. An invalid result cannot overwrite an existing output.
 
-Regression coverage verifies collision-pair counting, clean and VTP validation,
+Regression coverage verifies collision-pair counting, clean validation,
 error-limited simplification, zero-error no-op behavior, protection retries,
 and atomic failure handling.

@@ -1,4 +1,4 @@
-"""Surface extraction: label volume -> triangle mesh, in DICOM patient space."""
+"""Surface extraction and finishing with MeshLib."""
 
 from __future__ import annotations
 
@@ -10,15 +10,8 @@ import meshlib.mrmeshnumpy as mrmeshnumpy
 import meshlib.mrmeshpy as mrmeshpy
 import numpy as np
 import SimpleITK as sitk
-import vtk
-from vtk.util import numpy_support  # noqa: N813
 
-_EXT_WRITERS = {
-    ".stl": vtk.vtkSTLWriter,
-    ".ply": vtk.vtkPLYWriter,
-    ".obj": vtk.vtkOBJWriter,
-    ".vtp": vtk.vtkXMLPolyDataWriter,
-}
+_SUPPORTED_EXTENSIONS = (".obj", ".ply", ".stl")
 
 
 @dataclass(frozen=True)
@@ -50,98 +43,59 @@ _DECIMATION_PROTECTION_RINGS = 4
 _MAX_DECIMATION_REPAIR_ATTEMPTS = 8
 
 
-def to_vtk_image(image: sitk.Image) -> vtk.vtkImageData:
-    """Copy a SimpleITK image into vtkImageData in *index* space.
-
-    Spacing and origin are deliberately left at identity: the image's true
-    physical placement (including any oblique orientation) is applied later as a
-    single affine, which handles direction cosines that vtkImageData cannot
-    represent.
-
-    Integer volumes are carried as uint8 (label volumes), floating-point volumes
-    as float32 (distance fields).
-    """
-    arr = sitk.GetArrayFromImage(image)  # (z, y, x)
-    if np.issubdtype(arr.dtype, np.floating):
-        arr = np.ascontiguousarray(arr, dtype=np.float32)
-        vtk_type = vtk.VTK_FLOAT
-    else:
-        arr = np.ascontiguousarray(arr, dtype=np.uint8)
-        vtk_type = vtk.VTK_UNSIGNED_CHAR
-
-    vtk_arr = numpy_support.numpy_to_vtk(arr.ravel(order="C"), deep=True, array_type=vtk_type)
-    img = vtk.vtkImageData()
-    sx, sy, sz = image.GetSize()
-    img.SetDimensions(sx, sy, sz)
-    img.SetSpacing(1.0, 1.0, 1.0)
-    img.SetOrigin(0.0, 0.0, 0.0)
-    img.GetPointData().SetScalars(vtk_arr)
-    return img
+def index_to_physical(image: sitk.Image) -> np.ndarray:
+    """Affine mapping voxel index coordinates to DICOM LPS millimetres."""
+    direction = np.asarray(image.GetDirection(), dtype=float).reshape(3, 3)
+    spacing = np.asarray(image.GetSpacing(), dtype=float)
+    origin = np.asarray(image.GetOrigin(), dtype=float)
+    affine = np.eye(4, dtype=float)
+    affine[:3, :3] = direction @ np.diag(spacing)
+    affine[:3, 3] = origin
+    return affine
 
 
-def index_to_physical(image: sitk.Image) -> vtk.vtkMatrix4x4:
-    """Affine mapping voxel index -> physical (LPS) millimetres.
+def marching_cubes(image: sitk.Image, isovalue: float = 0.5) -> mrmeshpy.Mesh:
+    """Extract an isosurface in voxel-index coordinates with MeshLib."""
+    values_zyx = sitk.GetArrayViewFromImage(image)
+    values_xyz = np.ascontiguousarray(values_zyx.transpose(2, 1, 0), dtype=np.float32)
+    volume = mrmeshnumpy.simpleVolumeFrom3Darray(values_xyz)
+    volume.voxelSize = mrmeshpy.Vector3f(1.0, 1.0, 1.0)
+    params = mrmeshpy.MarchingCubesParams()
+    params.iso = float(isovalue)
+    params.lessInside = False
+    mesh = mrmeshpy.marchingCubes(volume, params)
 
-    ``p = origin + Direction @ diag(spacing) @ index``
-    """
-    d = np.asarray(image.GetDirection(), dtype=float).reshape(3, 3)
-    s = np.asarray(image.GetSpacing(), dtype=float)
-    o = np.asarray(image.GetOrigin(), dtype=float)
-
-    m = vtk.vtkMatrix4x4()
-    m.Identity()
-    linear = d @ np.diag(s)
-    for i in range(3):
-        for j in range(3):
-            m.SetElement(i, j, float(linear[i, j]))
-        m.SetElement(i, 3, float(o[i]))
-    return m
-
-
-def marching_cubes(img: vtk.vtkImageData, isovalue: float = 0.5) -> vtk.vtkPolyData:
-    fe = vtk.vtkFlyingEdges3D()
-    fe.SetInputData(img)
-    fe.SetValue(0, isovalue)
-    fe.ComputeNormalsOff()
-    fe.ComputeGradientsOff()
-    fe.Update()
-    return fe.GetOutput()
+    # MeshLib places samples at voxel-cell centers [i, i+1], while SimpleITK
+    # treats array values as samples at integer indices. The half-voxel shift
+    # preserves the established index-space convention before the LPS affine.
+    vertices, faces = to_arrays(mesh)
+    vertices -= 0.5
+    return from_arrays(vertices, faces)
 
 
-def transform(poly: vtk.vtkPolyData, matrix: vtk.vtkMatrix4x4) -> vtk.vtkPolyData:
-    t = vtk.vtkTransform()
-    t.SetMatrix(matrix)
-    f = vtk.vtkTransformPolyDataFilter()
-    f.SetInputData(poly)
-    f.SetTransform(t)
-    f.Update()
-    return f.GetOutput()
+def transform(mesh: mrmeshpy.Mesh, matrix: np.ndarray) -> mrmeshpy.Mesh:
+    vertices, faces = to_arrays(mesh)
+    transformed = vertices @ np.asarray(matrix[:3, :3], dtype=float).T
+    transformed += np.asarray(matrix[:3, 3], dtype=float)
+    return from_arrays(transformed, faces)
 
 
-def smooth(poly: vtk.vtkPolyData, iterations: int, passband: float) -> vtk.vtkPolyData:
-    """Windowed-sinc (Taubin-family) smoothing: no volumetric shrinkage.
-
-    A plain Laplacian smoother would contract a closed surface toward its
-    centroid, quietly shrinking the anatomy with every iteration.
-    """
+def smooth(mesh: mrmeshpy.Mesh, iterations: int, force: float) -> mrmeshpy.Mesh:
+    """Apply MeshLib relaxation while approximately preserving volume."""
     if iterations <= 0:
-        return poly
-    f = vtk.vtkWindowedSincPolyDataFilter()
-    f.SetInputData(poly)
-    f.SetNumberOfIterations(int(iterations))
-    f.SetPassBand(float(passband))
-    f.BoundarySmoothingOn()
-    f.NonManifoldSmoothingOn()
-    f.NormalizeCoordinatesOn()
-    f.FeatureEdgeSmoothingOff()
-    f.Update()
-    return f.GetOutput()
+        return mesh
+    result = mrmeshpy.Mesh(mesh)
+    params = mrmeshpy.MeshRelaxParams()
+    params.iterations = int(iterations)
+    params.force = float(force)
+    if not mrmeshpy.relaxKeepVolume(result, params):
+        raise RuntimeError("MeshLib smoothing was interrupted")
+    return result
 
 
-def selected_self_intersecting_faces(poly: vtk.vtkPolyData) -> np.ndarray:
+def selected_self_intersecting_faces(mesh: mrmeshpy.Mesh) -> np.ndarray:
     """Mark both faces in each MeshLib self-collision pair."""
-    verts, faces = to_arrays(poly)
-    mesh = mrmeshnumpy.meshFromFacesVerts(faces, verts)
+    faces = to_arrays(mesh)[1]
     pairs = mrmeshpy.findSelfCollidingTriangles(mrmeshpy.MeshPart(mesh))
     selected = np.zeros(len(faces), dtype=bool)
     for pair in pairs:
@@ -151,16 +105,11 @@ def selected_self_intersecting_faces(poly: vtk.vtkPolyData) -> np.ndarray:
 
 
 def protect_smoothed_surface(
-    original: vtk.vtkPolyData,
-    smoothed: vtk.vtkPolyData,
+    original: mrmeshpy.Mesh,
+    smoothed: mrmeshpy.Mesh,
     requested_iterations: int,
-) -> tuple[vtk.vtkPolyData, SmoothingSafeguard]:
-    """Keep full smoothing except where it makes non-adjacent faces collide.
-
-    Intersecting vertices return to their known-valid pre-smooth positions. If
-    that is not enough, the protected set grows one topological ring at a time.
-    The process is deterministic and must terminate at the original geometry.
-    """
+) -> tuple[mrmeshpy.Mesh, SmoothingSafeguard]:
+    """Keep full smoothing except where it makes non-adjacent faces collide."""
     original_verts, original_faces = to_arrays(original)
     smoothed_verts, smoothed_faces = to_arrays(smoothed)
     if not np.array_equal(original_faces, smoothed_faces):
@@ -180,7 +129,6 @@ def protect_smoothed_surface(
     protected = np.zeros(len(original_verts), dtype=bool)
     protected[np.unique(original_faces[selected])] = True
     rings = 0
-
     while True:
         candidate_verts = smoothed_verts.copy()
         candidate_verts[protected] = original_verts[protected]
@@ -205,86 +153,48 @@ def protect_smoothed_surface(
 
 
 def smooth_safely(
-    poly: vtk.vtkPolyData,
+    mesh: mrmeshpy.Mesh,
     iterations: int,
-    passband: float,
-) -> tuple[vtk.vtkPolyData, SmoothingSafeguard]:
-    """Run every requested smoothing iteration, then protect collision patches."""
+    force: float,
+) -> tuple[mrmeshpy.Mesh, SmoothingSafeguard]:
     if iterations <= 0:
-        return poly, SmoothingSafeguard(
+        return mesh, SmoothingSafeguard(
             requested_iterations=int(iterations),
             initial_self_intersecting_faces=0,
             protected_vertices=0,
             protected_vertex_fraction=0.0,
             expanded_rings=0,
         )
-    return protect_smoothed_surface(poly, smooth(poly, iterations, passband), iterations)
+    return protect_smoothed_surface(mesh, smooth(mesh, iterations, force), iterations)
 
 
-def largest_component(poly: vtk.vtkPolyData) -> tuple[vtk.vtkPolyData, int]:
-    """Keep only the biggest connected surface.
-
-    This is what removes enclosed internal cavities (sinuses, trabecular air
-    cells, marrow space). Each cavity is a closed shell disconnected from the
-    outer surface, so it survives every labelmap-level cleanup and only
-    disappears here.
-    """
-    conn = vtk.vtkPolyDataConnectivityFilter()
-    conn.SetInputData(poly)
-    conn.SetExtractionModeToAllRegions()
-    conn.Update()
-    n = conn.GetNumberOfExtractedRegions()
-
-    conn.SetExtractionModeToLargestRegion()
-    conn.Update()
-
-    clean = vtk.vtkCleanPolyData()
-    clean.SetInputConnection(conn.GetOutputPort())
-    clean.Update()
-    return clean.GetOutput(), n
+def largest_component(mesh: mrmeshpy.Mesh) -> tuple[mrmeshpy.Mesh, int]:
+    components = mrmeshpy.getAllComponents(mrmeshpy.MeshPart(mesh))
+    count = len(components)
+    if not count:
+        return mesh, 0
+    largest = max(components, key=lambda region: region.count())
+    return mesh.cloneRegion(largest), count
 
 
-def count_defects(poly: vtk.vtkPolyData) -> tuple[int, int]:
-    """(boundary edges, non-manifold edges). Cheap: no file IO, no welding."""
-    counts = []
-    for boundary, nonmanifold in ((True, False), (False, True)):
-        fe = vtk.vtkFeatureEdges()
-        fe.SetInputData(poly)
-        fe.SetBoundaryEdges(boundary)
-        fe.SetNonManifoldEdges(nonmanifold)
-        fe.FeatureEdgesOff()
-        fe.ManifoldEdgesOff()
-        fe.Update()
-        counts.append(int(fe.GetOutput().GetNumberOfCells()))
-    return counts[0], counts[1]
+def count_defects(mesh: mrmeshpy.Mesh) -> tuple[int, int]:
+    """Return boundary-edge and hole counts from MeshLib topology."""
+    topology = mesh.topology
+    return int(topology.findLeftBdEdges().count()), int(topology.findNumHoles())
 
 
-def to_arrays(poly: vtk.vtkPolyData) -> tuple[np.ndarray, np.ndarray]:
-    """(vertices, triangles) as numpy arrays. Input must be triangulated."""
-    verts = numpy_support.vtk_to_numpy(poly.GetPoints().GetData()).astype(np.float64)
-    conn = numpy_support.vtk_to_numpy(poly.GetPolys().GetConnectivityArray())
-    faces = conn.reshape(-1, 3).astype(np.int32)
-    return verts, faces
-
-
-def from_arrays(verts: np.ndarray, faces: np.ndarray) -> vtk.vtkPolyData:
-    points = vtk.vtkPoints()
-    points.SetData(numpy_support.numpy_to_vtk(np.ascontiguousarray(verts, dtype=np.float64),
-                                              deep=True))
-    n = len(faces)
-    offsets = np.arange(0, 3 * (n + 1), 3, dtype=np.int64)
-    connectivity = np.ascontiguousarray(faces, dtype=np.int64).ravel()
-
-    cells = vtk.vtkCellArray()
-    cells.SetData(
-        numpy_support.numpy_to_vtkIdTypeArray(offsets, deep=True),
-        numpy_support.numpy_to_vtkIdTypeArray(connectivity, deep=True),
+def to_arrays(mesh: mrmeshpy.Mesh) -> tuple[np.ndarray, np.ndarray]:
+    return (
+        np.asarray(mrmeshnumpy.getNumpyVerts(mesh), dtype=np.float64).copy(),
+        np.asarray(mrmeshnumpy.getNumpyFaces(mesh.topology), dtype=np.int32).copy(),
     )
 
-    poly = vtk.vtkPolyData()
-    poly.SetPoints(points)
-    poly.SetPolys(cells)
-    return poly
+
+def from_arrays(vertices: np.ndarray, faces: np.ndarray) -> mrmeshpy.Mesh:
+    return mrmeshnumpy.meshFromFacesVerts(
+        np.ascontiguousarray(faces, dtype=np.int32),
+        np.ascontiguousarray(vertices, dtype=np.float64),
+    )
 
 
 def _meshlib_topology_signature(mesh: mrmeshpy.Mesh) -> tuple[int, int, int]:
@@ -299,84 +209,62 @@ def _meshlib_topology_signature(mesh: mrmeshpy.Mesh) -> tuple[int, int, int]:
 
 
 def _decimate_candidate(
-    poly: vtk.vtkPolyData,
+    mesh: mrmeshpy.Mesh,
     simplify_error_mm: float,
     protected_faces: mrmeshpy.FaceBitSet | None = None,
-) -> tuple[vtk.vtkPolyData, tuple[int, int, int], tuple[int, int, int], float]:
-    tri = vtk.vtkTriangleFilter()
-    tri.SetInputData(poly)
-    tri.Update()
-
-    verts, faces = to_arrays(tri.GetOutput())
-    mesh = mrmeshnumpy.meshFromFacesVerts(faces, verts)
-    before = _meshlib_topology_signature(mesh)
-
+) -> tuple[mrmeshpy.Mesh, tuple[int, int, int], tuple[int, int, int], float]:
+    candidate = mrmeshpy.Mesh(mesh)
+    before = _meshlib_topology_signature(candidate)
     settings = mrmeshpy.DecimateSettings()
     settings.strategy = mrmeshpy.DecimateStrategy.MinimizeError
     settings.maxDeletedFaces = 2**31 - 1
     settings.maxDeletedVertices = 2**31 - 1
     settings.maxError = float(simplify_error_mm)
-    # Partitioned decimation trades quality for speed and can make the result
-    # depend on CPU count. One part is already much faster than the old backend.
     settings.subdivideParts = 1
     settings.packMesh = True
-    region = None
     if protected_faces is not None and protected_faces.any():
-        region = mesh.topology.getValidFaces()
+        region = candidate.topology.getValidFaces()
         region.subtract(protected_faces, 0)
         settings.region = region
-    result = mrmeshpy.decimateMesh(mesh, settings)
-
-    after = _meshlib_topology_signature(mesh)
-    out_verts = mrmeshnumpy.getNumpyVerts(mesh)
-    out_faces = mrmeshnumpy.getNumpyFaces(mesh.topology)
-    return from_arrays(out_verts, out_faces), before, after, float(result.errorIntroduced)
+    result = mrmeshpy.decimateMesh(candidate, settings)
+    after = _meshlib_topology_signature(candidate)
+    return candidate, before, after, float(result.errorIntroduced)
 
 
-def _meshlib_self_intersecting_face_ids(poly: vtk.vtkPolyData) -> np.ndarray:
-    """Return every face participating in a MeshLib collision pair."""
-    return np.flatnonzero(selected_self_intersecting_faces(poly))
+def _meshlib_self_intersecting_face_ids(mesh: mrmeshpy.Mesh) -> np.ndarray:
+    return np.flatnonzero(selected_self_intersecting_faces(mesh))
 
 
 def _protect_decimation_collision_neighborhood(
     reference_mesh: mrmeshpy.Mesh,
     protected_faces: mrmeshpy.FaceBitSet,
-    candidate: vtk.vtkPolyData,
+    candidate: mrmeshpy.Mesh,
     colliding_face_ids: np.ndarray,
 ) -> None:
-    """Map collision patches back to source faces and exclude their collapse."""
     candidate_verts, candidate_faces = to_arrays(candidate)
     reference = mrmeshpy.MeshPart(reference_mesh)
-
     for face_id in colliding_face_ids:
         triangle = candidate_verts[candidate_faces[int(face_id)]]
-        sample_points = (triangle.mean(axis=0), *triangle)
-        for point in sample_points:
+        for point in (triangle.mean(axis=0), *triangle):
             projection = mrmeshpy.findProjection(
                 mrmeshpy.Vector3f(*map(float, point)),
                 reference,
             )
             if projection.valid():
                 protected_faces.set(projection.proj.face)
-
-    mrmeshpy.expand(
-        reference_mesh.topology,
-        protected_faces,
-        _DECIMATION_PROTECTION_RINGS,
-    )
+    mrmeshpy.expand(reference_mesh.topology, protected_faces, _DECIMATION_PROTECTION_RINGS)
 
 
 def decimate_safely(
-    poly: vtk.vtkPolyData,
+    mesh: mrmeshpy.Mesh,
     simplify_error_mm: float,
-) -> tuple[vtk.vtkPolyData, DecimationSafeguard]:
-    """Simplify without accepting changed topology or intersecting faces."""
-    current = poly.GetNumberOfPolys()
+) -> tuple[mrmeshpy.Mesh, DecimationSafeguard]:
+    current = int(mesh.topology.numValidFaces())
     if simplify_error_mm <= 0:
-        return poly, DecimationSafeguard(
+        return mesh, DecimationSafeguard(
             simplify_error_mm=float(simplify_error_mm),
-            input_faces=int(current),
-            actual_faces=int(current),
+            input_faces=current,
+            actual_faces=current,
             attempted=False,
             accepted=True,
             error_introduced_mm=0.0,
@@ -388,22 +276,19 @@ def decimate_safely(
             rejection_reason=None,
         )
 
-    before_defects = count_defects(poly)
-    source_verts, source_faces = to_arrays(poly)
-    reference_mesh = mrmeshnumpy.meshFromFacesVerts(source_faces, source_verts)
-    protected_faces = mrmeshpy.FaceBitSet(len(source_faces))
+    before_defects = count_defects(mesh)
+    reference_mesh = mrmeshpy.Mesh(mesh)
+    protected_faces = mrmeshpy.FaceBitSet(current)
     initial_intersections = 0
     remaining_intersections = 0
     repair_attempts = 0
     error_introduced_mm = 0.0
     reasons: list[str] = []
-    candidate = poly
+    candidate = mesh
 
     for attempt in range(_MAX_DECIMATION_REPAIR_ATTEMPTS + 1):
         candidate, topology_before, topology_after, error_introduced_mm = _decimate_candidate(
-            poly,
-            simplify_error_mm,
-            protected_faces,
+            mesh, simplify_error_mm, protected_faces
         )
         after_defects = count_defects(candidate)
         reasons = []
@@ -414,7 +299,7 @@ def decimate_safely(
             )
         if any(after > before for before, after in zip(before_defects, after_defects)):
             reasons.append(
-                "boundary/non-manifold defects changed from %s to %s"
+                "boundary/hole defects changed from %s to %s"
                 % (before_defects, after_defects)
             )
         if reasons:
@@ -435,10 +320,7 @@ def decimate_safely(
 
         protected_before = protected_faces.count()
         _protect_decimation_collision_neighborhood(
-            reference_mesh,
-            protected_faces,
-            candidate,
-            colliding_ids,
+            reference_mesh, protected_faces, candidate, colliding_ids
         )
         if protected_faces.count() == protected_before:
             reasons.append(
@@ -449,12 +331,12 @@ def decimate_safely(
         repair_attempts += 1
 
     accepted = not reasons and remaining_intersections == 0
-    result = candidate if accepted else poly
+    result = candidate if accepted else mesh
     protected_count = int(protected_faces.count())
     return result, DecimationSafeguard(
         simplify_error_mm=float(simplify_error_mm),
-        input_faces=int(current),
-        actual_faces=int(result.GetNumberOfPolys()),
+        input_faces=current,
+        actual_faces=int(result.topology.numValidFaces()),
         attempted=True,
         accepted=accepted,
         error_introduced_mm=error_introduced_mm if accepted else 0.0,
@@ -467,49 +349,43 @@ def decimate_safely(
     )
 
 
-def decimate(poly: vtk.vtkPolyData, simplify_error_mm: float) -> vtk.vtkPolyData:
-    """Return the safely decimated mesh, or the valid input if safeguards fail."""
-    return decimate_safely(poly, simplify_error_mm)[0]
+def decimate(mesh: mrmeshpy.Mesh, simplify_error_mm: float) -> mrmeshpy.Mesh:
+    return decimate_safely(mesh, simplify_error_mm)[0]
 
 
-def compute_normals(poly: vtk.vtkPolyData) -> vtk.vtkPolyData:
-    n = vtk.vtkPolyDataNormals()
-    n.SetInputData(poly)
-    n.ConsistencyOn()
-    n.SplittingOff()
-    n.AutoOrientNormalsOn()
-    n.Update()
-    return n.GetOutput()
+def vertex_normals(mesh: mrmeshpy.Mesh) -> tuple[np.ndarray, np.ndarray]:
+    """Return packed vertices and area-weighted unit vertex normals."""
+    vertices, faces = to_arrays(mesh)
+    triangles = vertices[faces]
+    face_normals = np.cross(
+        triangles[:, 1] - triangles[:, 0],
+        triangles[:, 2] - triangles[:, 0],
+    )
+    normals = np.zeros_like(vertices)
+    for corner in range(3):
+        np.add.at(normals, faces[:, corner], face_normals)
+    lengths = np.linalg.norm(normals, axis=1)
+    normals[lengths > 0] /= lengths[lengths > 0, None]
+    return vertices, normals
 
 
-def write(poly: vtk.vtkPolyData, path: str) -> None:
+def write(mesh: mrmeshpy.Mesh, path: str) -> None:
     ext = os.path.splitext(path)[1].lower()
-    try:
-        writer_cls = _EXT_WRITERS[ext]
-    except KeyError:
+    if ext not in _SUPPORTED_EXTENSIONS:
         raise ValueError(
             "unsupported output extension %r; supported: %s"
-            % (ext, ", ".join(sorted(_EXT_WRITERS)))
-        ) from None
-
+            % (ext, ", ".join(_SUPPORTED_EXTENSIONS))
+        )
     parent = os.path.dirname(os.path.abspath(path))
     os.makedirs(parent, exist_ok=True)
-
-    w = writer_cls()
-    w.SetFileName(path)
-    w.SetInputData(poly)
-    if hasattr(w, "SetFileTypeToBinary"):
-        w.SetFileTypeToBinary()
-    if not w.Write():
-        raise IOError("failed to write %s" % path)
+    mrmeshpy.saveMesh(mesh, path)
 
 
-def write_validated(poly: vtk.vtkPolyData, path: str) -> dict:
-    """Validate memory and serialized output before atomically publishing it."""
+def write_validated(mesh: mrmeshpy.Mesh, path: str) -> dict:
     from . import validate
 
-    verts, faces = to_arrays(poly)
-    in_memory = validate.validate_arrays(verts, faces)
+    vertices, faces = to_arrays(mesh)
+    in_memory = validate.validate_arrays(vertices, faces)
     if not in_memory["valid"]:
         raise ValueError("in-memory output mesh is invalid: %s" % "; ".join(in_memory["problems"]))
 
@@ -517,13 +393,17 @@ def write_validated(poly: vtk.vtkPolyData, path: str) -> dict:
     parent = os.path.dirname(destination)
     os.makedirs(parent, exist_ok=True)
     ext = os.path.splitext(destination)[1]
-    fd, temporary = tempfile.mkstemp(prefix=".%s." % os.path.basename(destination), suffix=ext, dir=parent)
+    fd, temporary = tempfile.mkstemp(
+        prefix=".%s." % os.path.basename(destination), suffix=ext, dir=parent
+    )
     os.close(fd)
     try:
-        write(poly, temporary)
+        write(mesh, temporary)
         report = validate.validate(temporary)
         if not report["valid"]:
-            raise ValueError("serialized output mesh is invalid: %s" % "; ".join(report["problems"]))
+            raise ValueError(
+                "serialized output mesh is invalid: %s" % "; ".join(report["problems"])
+            )
         os.replace(temporary, destination)
         report["file"] = os.path.basename(destination)
         return report
@@ -532,5 +412,10 @@ def write_validated(poly: vtk.vtkPolyData, path: str) -> dict:
             os.unlink(temporary)
 
 
-def bounds_mm(poly: vtk.vtkPolyData) -> tuple[float, ...]:
-    return tuple(poly.GetBounds())
+def bounds_mm(mesh: mrmeshpy.Mesh) -> tuple[float, ...]:
+    bounds = mesh.computeBoundingBox()
+    return (
+        float(bounds.min.x), float(bounds.max.x),
+        float(bounds.min.y), float(bounds.max.y),
+        float(bounds.min.z), float(bounds.max.z),
+    )

@@ -14,7 +14,7 @@ returns success when no command is supplied. Shell completion options are not
 installed by the application.
 
 The CLI module imports only Typer, Rich, defaults, and preset registries while
-constructing commands. VTK, MeshLib, registration, validation, and processing
+constructing commands. MeshLib, registration, validation, and processing
 modules are imported inside the command that needs them. Root help, command
 help, and malformed invocations therefore finish without loading the processing
 pipeline. Expected selection, modality, file, and safety failures are concise;
@@ -63,8 +63,8 @@ IDs that disambiguate it.
 3. Load the ordered stack with SimpleITK and resolve the intensity threshold.
 4. Apply island filtering, median filtering, optional opening, and closing.
 5. Optionally apply a print profile on a selected isotropic mask grid.
-6. Pad field-of-view boundaries, extract the 0.5 isosurface with VTK Flying
-   Edges, smooth, select surface components, and optionally simplify.
+6. Pad field-of-view boundaries, extract the 0.5 isosurface with MeshLib marching
+   cubes, smooth, select surface components, and optionally simplify.
 7. Transform vertices into DICOM patient LPS coordinates; validate the mesh in
    memory, write and validate a temporary file, then atomically publish it.
 
@@ -148,13 +148,15 @@ manufacturing guarantees.
 
 ## Surface extraction and finishing
 
-The isosurface implementation is `vtkFlyingEdges3D` at 0.5. Padding normally
-closes the volume boundary, but Flying Edges can emit degenerate triangles and
-mesh validity is measured rather than assumed.
+The isosurface implementation is MeshLib `marchingCubes` at 0.5. SimpleITK arrays
+are transposed from z/y/x to x/y/z before extraction, then shifted half a voxel
+to preserve the established sample-coordinate convention. Mesh validity is
+measured rather than assumed.
 
-Smoothing uses `vtkWindowedSincPolyDataFilter`. The preset controls initial
-iterations, passband, and post-simplification iterations. Smoothing moves surfaces,
-and the project does not provide a general deviation bound. Every requested
+Smoothing uses MeshLib `relaxKeepVolume`. The preset controls initial iterations,
+relaxation force, and post-simplification iterations. The `--smooth-force` option
+replaces the former backend-specific passband. Smoothing moves surfaces, and the
+project does not provide a general deviation bound. Every requested
 iteration runs before self-intersection detection. If smoothing makes
 non-adjacent faces collide, vertices in those collision patches return to their
 pre-smooth positions. The protected set grows by topological rings until the
@@ -247,10 +249,9 @@ validation bypass: they validate both the
 in-memory mesh and the serialized temporary file, then atomically replace the
 requested destination only with a valid output.
 
-STL, PLY, and OBJ are loaded directly by MeshLib. VTP is loaded and triangulated
-with VTK, then converted to the same MeshLib representation. All metrics describe
-that imported representation, and self-intersections count the unique faces in
-MeshLib collision pairs.
+STL, PLY, and OBJ are loaded directly by MeshLib. VTP is not supported. All
+metrics describe the MeshLib-imported representation, and self-intersections
+count the unique faces in MeshLib collision pairs.
 
 `repair` uses MeshLib to unite vertices within 1e-6, fix multiple edges,
 decimate degeneracies, and fill holes. It writes a new file; validation never
@@ -276,5 +277,5 @@ behavior; no OpenGL system dependency is required.
 ## Verification
 
 Synthetic regression tests cover series grouping, geometry, segmentation,
-surface extraction, registration, validation, VTP, repair, and print-profile
+surface extraction, registration, validation, repair, and print-profile
 primitives. Run them with `uv run pytest -q`.

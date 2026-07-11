@@ -234,13 +234,13 @@ def test_surface_stage_comes_from_the_preset():
     from dicom_surface import presets
 
     signature = inspect.signature(merge_mod.merge)
-    for name in ("smooth_iters", "passband", "simplify_error_mm", "post_smooth_iters"):
+    for name in ("smooth_iters", "smooth_force", "simplify_error_mm", "post_smooth_iters"):
         assert signature.parameters[name].default is None, (
             "%s must default to the preset, not to a merge-specific constant" % name
         )
 
     bone = presets.get("bone")
-    assert (bone.smooth_iters, bone.passband, bone.post_smooth_iters) == (20, 0.1, 25)
+    assert (bone.smooth_iters, bone.smooth_force, bone.post_smooth_iters) == (20, 0.1, 25)
 
 
 def test_force_overrides_the_gates():

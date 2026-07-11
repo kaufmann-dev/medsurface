@@ -78,6 +78,11 @@ threshold from the scan instead of assuming calibrated Hounsfield units. CT
 presets with HU thresholds are refused on non-CT data unless you supply an
 explicit `--threshold`.
 
+MeshLib smoothing uses the preset's iteration count and relaxation force. Use
+`--smooth-iters` and `--smooth-force` to override them; the built-in presets use
+force `0.1`, selected to match the preceding surface finish on the two reference
+CT studies.
+
 `teeth` keeps every mask island and surface component that survives its size
 floor. The other presets keep only the largest component. `--simplify-error-mm`
 sets MeshLib's estimated surface-deviation/QEM limit in model millimetres; it is

@@ -3,7 +3,7 @@
 Doing this on the mask, rather than on the finished STL, is the whole point.
 A mesh -> voxel -> mesh round trip costs fidelity before any morphology runs at
 all: re-rasterising a good surface onto a hard binary grid, then running marching
-cubes, windowed-sinc smoothing and quadric decimation a second time. Measured on a
+cubes, volume-preserving relaxation and quadric simplification a second time. Measured on a
 600k-triangle skull, with the morphology switched off entirely, the round trip
 still moved the surface by up to 0.40 mm and dropped the mean dihedral angle from
 11.90 to 10.22 degrees.
