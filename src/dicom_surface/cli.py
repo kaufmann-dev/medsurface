@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import warnings
 from collections import Counter
 from dataclasses import replace
@@ -86,11 +88,42 @@ class _ProgressDisplay:
         self.interactive = enabled and console.is_terminal and console.is_interactive
         self.progress: Progress | None = None
         self.task_id: int | None = None
+        self.renderer: subprocess.Popen[str] | None = None
+
+    def _start_renderer(self) -> bool:
+        """Start a renderer process when the console has a real output descriptor."""
+        try:
+            self.console.file.fileno()
+        except (AttributeError, OSError, ValueError):
+            return False
+        try:
+            self.renderer = subprocess.Popen(
+                [sys.executable, "-m", "dicom_surface.progress_renderer", self.initial],
+                stdin=subprocess.PIPE,
+                stdout=self.console.file,
+                text=True,
+                bufsize=1,
+            )
+        except OSError:
+            self.renderer = None
+            return False
+        return True
+
+    def _send(self, kind: str, message: str = "") -> None:
+        if self.renderer is None or self.renderer.stdin is None:
+            return
+        try:
+            self.renderer.stdin.write(json.dumps({"kind": kind, "message": message}) + "\n")
+            self.renderer.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
 
     def __enter__(self):
         if not self.enabled:
             return self
         if self.interactive:
+            if self._start_renderer():
+                return self
             self.progress = Progress(
                 SpinnerColumn(style="cyan"),
                 TextColumn("{task.description}", markup=False),
@@ -105,6 +138,15 @@ class _ProgressDisplay:
         return self
 
     def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        if self.renderer is not None:
+            self._send("stop")
+            if self.renderer.stdin is not None:
+                self.renderer.stdin.close()
+            try:
+                self.renderer.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.renderer.terminate()
+                self.renderer.wait(timeout=2)
         if self.progress is not None:
             self.progress.stop()
 
@@ -116,6 +158,9 @@ class _ProgressDisplay:
         if not self.enabled:
             return
         message = str(message).strip()
+        if self.renderer is not None:
+            self._send("update", message)
+            return
         if self.progress is not None and self.task_id is not None:
             self.progress.reset(self.task_id, description=message, total=None)
             self.progress.refresh()
@@ -129,6 +174,8 @@ class _ProgressDisplay:
         rendered = str(message)
         if rendered.strip().endswith("..."):
             self.update(rendered)
+        elif self.renderer is not None:
+            self._send("log", rendered)
         elif self.progress is not None:
             self.progress.console.print(Text(rendered, style="cyan"))
         else:

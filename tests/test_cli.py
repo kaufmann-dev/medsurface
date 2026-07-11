@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import io
+import os
+import pty
+import select
+import time
 import json
 import os
 import subprocess
@@ -266,6 +270,35 @@ def test_progress_display_has_plain_redirected_fallback_and_live_elapsed_time():
         assert progress.progress is not None
         assert any(isinstance(column, cli.TimeElapsedColumn) for column in progress.progress.columns)
         assert progress.progress.tasks[0].description == "marching cubes ..."
+
+
+def test_interactive_progress_renderer_runs_in_an_independent_process():
+    master, slave = pty.openpty()
+    output = os.fdopen(slave, "w", buffering=1, closefd=True)
+    terminal_console = Console(
+        file=output,
+        width=100,
+        color_system="standard",
+        force_terminal=True,
+        force_interactive=True,
+        highlight=False,
+        markup=False,
+    )
+    try:
+        with cli._ProgressDisplay(True, "Starting ...", terminal_console) as progress:
+            assert progress.renderer is not None
+            progress.update("simplify ...")
+            time.sleep(1.2)
+        rendered = bytearray()
+        while select.select([master], [], [], 0.1)[0]:
+            rendered.extend(os.read(master, 65536))
+    finally:
+        output.close()
+        os.close(master)
+
+    text = rendered.decode(errors="replace")
+    assert "simplify ..." in text
+    assert "0:00:01" in text
 
 
 @pytest.mark.parametrize(
