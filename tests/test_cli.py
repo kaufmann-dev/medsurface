@@ -374,6 +374,42 @@ def test_interactive_progress_renderer_runs_in_an_independent_process():
     assert "0:00:01" in text
 
 
+def test_interactive_diagnostic_clears_live_progress_line():
+    master, slave = pty.openpty()
+    output = os.fdopen(slave, "w", buffering=1, closefd=True)
+    terminal_console = Console(
+        file=output,
+        width=100,
+        color_system="standard",
+        force_terminal=True,
+        force_interactive=True,
+        highlight=False,
+        markup=False,
+    )
+    try:
+        with cli._ProgressDisplay(
+            True,
+            "load volume ...",
+            terminal_console,
+            terminal_console,
+        ):
+            time.sleep(0.2)
+            cli._warn("voxels are strongly anisotropic")
+            time.sleep(0.2)
+        rendered = bytearray()
+        while select.select([master], [], [], 0.1)[0]:
+            rendered.extend(os.read(master, 65536))
+    finally:
+        output.close()
+        os.close(master)
+
+    text = rendered.decode(errors="replace")
+    warning_at = text.index("Warning:")
+    active_line = text[text.rfind("\r", 0, warning_at) + 1 : warning_at]
+    assert "0:00:" not in active_line
+    assert "voxels are strongly anisotropic" in text
+
+
 @pytest.mark.parametrize(
     "argv",
     [
@@ -674,8 +710,26 @@ def test_convert_defaults_quality_output_and_invalid_exit(tmp_path, monkeypatch)
     assert "Success: wrote" in result.stdout
     assert "Mesh quality" in result.stdout
     assert "invalid" in result.stdout
-    assert "Problems" in result.stdout
+    assert "Mesh problems" in result.stdout
     assert "failed validation" in result.stderr
+
+
+def test_valid_quality_output_omits_empty_problems_panel():
+    stream = io.StringIO()
+    console = Console(
+        file=stream,
+        width=240,
+        color_system=None,
+        force_terminal=False,
+        highlight=False,
+        markup=False,
+    )
+
+    cli._print_quality(_quality(), console)
+
+    rendered = stream.getvalue()
+    assert "Mesh quality" in rendered
+    assert "problems" not in rendered.casefold()
 
 
 def test_convert_without_selector_keeps_dicom_best_stack_selection(tmp_path, monkeypatch):

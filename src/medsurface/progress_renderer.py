@@ -27,6 +27,12 @@ def main() -> None:
         force_terminal=sys.stdout.isatty(),
         force_interactive=sys.stdout.isatty(),
     )
+    diagnostic_console = Console(
+        stderr=True,
+        highlight=False,
+        markup=False,
+        force_terminal=sys.stderr.isatty(),
+    )
     messages: queue.SimpleQueue[dict[str, str]] = queue.SimpleQueue()
     input_closed = threading.Event()
 
@@ -62,6 +68,17 @@ def main() -> None:
                     progress.reset(task_id, description=text, total=None)
                 elif kind == "log":
                     progress.console.print(Text(text, style="cyan"))
+                elif kind in {"warning", "error"}:
+                    prefix, style = {
+                        "warning": ("Warning: ", "bold yellow"),
+                        "error": ("Error: ", "bold red"),
+                    }[kind]
+                    diagnostic = Text()
+                    diagnostic.append(prefix, style=style)
+                    diagnostic.append(text)
+                    progress.stop()
+                    diagnostic_console.print(diagnostic)
+                    progress.start()
                 elif kind == "stop":
                     stopping = True
             progress.refresh()

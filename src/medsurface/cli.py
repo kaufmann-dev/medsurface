@@ -10,6 +10,7 @@ import sys
 import tempfile
 import warnings
 from collections import Counter
+from contextvars import ContextVar, Token
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -82,6 +83,9 @@ def _log(message: str) -> None:
     stdout_console.print(Text(str(message), style="cyan"))
 
 
+_active_progress: ContextVar[Any] = ContextVar("active_progress", default=None)
+
+
 class _ProgressDisplay:
     """Indeterminate stage progress with a plain-text redirected fallback."""
 
@@ -90,19 +94,23 @@ class _ProgressDisplay:
         enabled: bool,
         initial: str,
         console: Console = stdout_console,
+        diagnostic_console: Console = stderr_console,
     ) -> None:
         self.enabled = enabled
         self.initial = initial
         self.console = console
+        self.diagnostic_console = diagnostic_console
         self.interactive = enabled and console.is_terminal and console.is_interactive
         self.progress: Progress | None = None
         self.task_id: TaskID | None = None
         self.renderer: subprocess.Popen[str] | None = None
+        self._context_token: Token[Any] | None = None
 
     def _start_renderer(self) -> bool:
         """Start a renderer process when the console has a real output descriptor."""
         try:
             self.console.file.fileno()
+            self.diagnostic_console.file.fileno()
         except (AttributeError, OSError, ValueError):
             return False
         try:
@@ -110,6 +118,7 @@ class _ProgressDisplay:
                 [sys.executable, "-m", "medsurface.progress_renderer", self.initial],
                 stdin=subprocess.PIPE,
                 stdout=self.console.file,
+                stderr=self.diagnostic_console.file,
                 text=True,
                 bufsize=1,
             )
@@ -118,16 +127,18 @@ class _ProgressDisplay:
             return False
         return True
 
-    def _send(self, kind: str, message: str = "") -> None:
+    def _send(self, kind: str, message: str = "") -> bool:
         if self.renderer is None or self.renderer.stdin is None:
-            return
+            return False
         try:
             self.renderer.stdin.write(json.dumps({"kind": kind, "message": message}) + "\n")
             self.renderer.stdin.flush()
         except (BrokenPipeError, OSError):
-            pass
+            return False
+        return True
 
     def __enter__(self):
+        self._context_token = _active_progress.set(self)
         if not self.enabled:
             return self
         if self.interactive:
@@ -147,17 +158,22 @@ class _ProgressDisplay:
         return self
 
     def __exit__(self, _exc_type, _exc, _traceback) -> None:
-        if self.renderer is not None:
-            self._send("stop")
-            if self.renderer.stdin is not None:
-                self.renderer.stdin.close()
-            try:
-                self.renderer.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.renderer.terminate()
-                self.renderer.wait(timeout=2)
-        if self.progress is not None:
-            self.progress.stop()
+        try:
+            if self.renderer is not None:
+                self._send("stop")
+                if self.renderer.stdin is not None:
+                    self.renderer.stdin.close()
+                try:
+                    self.renderer.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.renderer.terminate()
+                    self.renderer.wait(timeout=2)
+            if self.progress is not None:
+                self.progress.stop()
+        finally:
+            if self._context_token is not None:
+                _active_progress.reset(self._context_token)
+                self._context_token = None
 
     def _print(self, message: str) -> None:
         self.console.print(Text(message, style="cyan"))
@@ -190,17 +206,47 @@ class _ProgressDisplay:
         else:
             self._print(rendered)
 
+    def diagnostic(self, kind: str, message: object) -> None:
+        """Print a warning or error without colliding with the live display."""
+        rendered = str(message)
+        if self.renderer is not None and self._send(kind, rendered):
+            return
+        if self.progress is not None:
+            self.progress.stop()
+            try:
+                _print_diagnostic(self.diagnostic_console, kind, rendered)
+            finally:
+                self.progress.start()
+            return
+        _print_diagnostic(self.diagnostic_console, kind, rendered)
+
 
 def _success(message: object) -> None:
     stdout_console.print(_styled_message("Success: ", "bold green", message))
 
 
+def _print_diagnostic(console: Console, kind: str, message: object) -> None:
+    prefix, style = {
+        "warning": ("Warning: ", "bold yellow"),
+        "error": ("Error: ", "bold red"),
+    }[kind]
+    console.print(_styled_message(prefix, style, message))
+
+
 def _warn(message: object) -> None:
-    stderr_console.print(_styled_message("Warning: ", "bold yellow", message))
+    progress = _active_progress.get()
+    if progress is not None:
+        progress.diagnostic("warning", message)
+    else:
+        _print_diagnostic(stderr_console, "warning", message)
 
 
 def _error(message: object) -> None:
-    stderr_console.print(_styled_message("Error: ", "bold red", message))
+    progress = _active_progress.get()
+    if progress is not None:
+        progress.diagnostic("error", message)
+    else:
+        _print_diagnostic(stderr_console, "error", message)
 
 
 def _quality_status(report: dict[str, Any] | None) -> int:
@@ -411,12 +457,15 @@ def _quality_table(report: dict[str, Any]) -> Table:
 def _print_quality(report: dict[str, Any], console: Console = stdout_console) -> None:
     console.print(_quality_table(report))
     problems = report["problems"]
-    lines = [_plain("• " + problem) for problem in problems] if problems else [_plain("None", "green")]
+    if not problems:
+        return
+    lines = [_plain("• " + problem) for problem in problems]
     console.print(
         Panel(
             Group(*lines),
-            title=_plain("Problems"),
-            border_style="red" if problems else "green",
+            title=_plain("Mesh problems"),
+            border_style="red",
+            expand=False,
         )
     )
 
