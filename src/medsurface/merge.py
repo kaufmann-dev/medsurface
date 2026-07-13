@@ -26,6 +26,7 @@ top. The caller must therefore verify subject identity for every merge.
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -33,10 +34,12 @@ from typing import Any, Callable
 import numpy as np
 import SimpleITK as sitk
 
-from . import pipeline, registration, segment, surface, volume as volume_mod
+from . import pipeline, registration, segment, surface
+from . import volume as volume_mod
 from .catalog import VolumeCandidate, same_source
 from .defaults import DEFAULT_MERGE_GRID_MM
 from .presets import Preset
+from .presets import validate as validate_preset
 from .registration import RegistrationResult
 
 Logger = Callable[[str], None]
@@ -68,6 +71,7 @@ MIN_SHARED_FOV_DICE = 0.55
 #: If the scans barely see the same space, there is nothing to register on --
 #: and Dice over a few cubic centimetres proves nothing either way.
 MIN_SHARED_FOV_MM3 = 20_000.0
+MAX_FUSED_VOXELS = 800_000_000
 
 # There is deliberately no gate on the ICP residual. It never discriminated: the
 # impostor scored 0.43 mm and a 5%-oversized skull 0.41 mm, both well inside any
@@ -158,10 +162,22 @@ def _corners(image: sitk.Image) -> np.ndarray:
 def _common_grid(fixed_mask, moving_mask, transform, grid_mm):
     rot, trans = transform[:3, :3], transform[:3, 3]
     pts = np.vstack([_corners(fixed_mask), (rot @ _corners(moving_mask).T).T + trans])
-    lo = np.floor(pts.min(0) / grid_mm) * grid_mm - 2 * grid_mm
-    hi = np.ceil(pts.max(0) / grid_mm) * grid_mm + 2 * grid_mm
-    size = np.ceil((hi - lo) / grid_mm).astype(int) + 1
-    return tuple(int(v) for v in size), lo
+    scaled = pts / grid_mm
+    if not np.all(np.isfinite(scaled)):
+        raise MergeError("the fused grid coordinates overflow at %.4g mm; raise --grid-mm" % grid_mm)
+    lo_index = np.floor(scaled.min(0)) - 2
+    hi_index = np.ceil(scaled.max(0)) + 2
+    planned = hi_index - lo_index + 1
+    if not np.all(np.isfinite(planned)) or np.any(planned > MAX_FUSED_VOXELS):
+        raise MergeError("the fused grid is too large at %.4g mm; raise --grid-mm" % grid_mm)
+    size = tuple(int(value) for value in planned)
+    voxels = math.prod(size)
+    if voxels > MAX_FUSED_VOXELS:
+        raise MergeError(
+            "the fused grid would hold %.0f M voxels at %.4g mm; raise --grid-mm"
+            % (voxels / 1e6, grid_mm)
+        )
+    return size, lo_index * grid_mm
 
 
 def _resample_field(image, size, origin, grid_mm, transform):
@@ -191,6 +207,24 @@ def merge(
     force: bool = False,
     log: Logger | None = None,
 ) -> MergeResult:
+    validate_preset(preset)
+    if not math.isfinite(grid_mm) or grid_mm <= 0:
+        raise ValueError("grid_mm must be finite and greater than zero")
+    overrides = {
+        "smooth_iters": smooth_iters,
+        "smooth_force": smooth_force,
+        "simplify_error_mm": simplify_error_mm,
+        "post_smooth_iters": post_smooth_iters,
+    }
+    for name, value in overrides.items():
+        if value is None:
+            continue
+        if not math.isfinite(value):
+            raise ValueError("%s must be finite" % name)
+        if name == "smooth_force" and not 0 < value <= 1:
+            raise ValueError("smooth_force must be greater than zero and at most one")
+        if name != "smooth_force" and value < 0:
+            raise ValueError("%s must be non-negative" % name)
     started = time.time()
 
     # Fall back to the preset, so a fused surface is finished exactly as a
@@ -270,10 +304,10 @@ def merge(
         "plan fused grid",
         lambda: _common_grid(fixed_mask, moving_mask, reg.transform, grid_mm),
     )
-    voxels = int(np.prod(size))
+    voxels = math.prod(size)
     say("fused grid %s at %.2f mm isotropic (%.0f M voxels)"
         % ("x".join(str(v) for v in size), grid_mm, voxels / 1e6))
-    if voxels > 800e6:
+    if voxels > MAX_FUSED_VOXELS:
         raise MergeError(
             "the fused grid would hold %.0f M voxels at %.2f mm; raise --grid-mm"
             % (voxels / 1e6, grid_mm))
@@ -325,7 +359,7 @@ def merge(
         smooth_force=smooth_force,
         simplify_error_mm=simplify_error_mm,
         post_smooth_iters=post_smooth_iters,
-        keep_largest_component=True,
+        keep_largest_component=preset.keep_largest_component,
         step=step,
         log=say,
     )

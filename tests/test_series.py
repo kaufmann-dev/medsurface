@@ -26,7 +26,9 @@ SAGITTAL = [0, 1, 0, 0, 0, -1]
 
 def _write_slice(path, z, series_uid=SERIES_UID, *, modality="CT", localizer=False,
                  description="TEST SERIES", kernel="Hr68", series_number=6, rows=8,
-                 orientation=None, pixel_spacing=(0.5, 0.5), patient_id=None):
+                 orientation=None, pixel_spacing=(0.5, 0.5), patient_id=None,
+                 image_type=None, rescale_type=None, rescale_slope=1,
+                 rescale_intercept=-1024, multi_energy=None):
     fm = FileMetaDataset()
     fm.MediaStorageSOPClassUID = CTImageStorage
     fm.MediaStorageSOPInstanceUID = generate_uid()
@@ -44,7 +46,11 @@ def _write_slice(path, z, series_uid=SERIES_UID, *, modality="CT", localizer=Fal
     ds.SeriesDescription = description
     ds.SeriesNumber = series_number
     ds.ConvolutionKernel = kernel
-    ds.ImageType = ["DERIVED", "SECONDARY", "LOCALIZER"] if localizer else ["ORIGINAL", "PRIMARY", "AXIAL"]
+    ds.ImageType = image_type or (
+        ["DERIVED", "SECONDARY", "LOCALIZER"]
+        if localizer
+        else ["ORIGINAL", "PRIMARY", "AXIAL"]
+    )
 
     ds.Rows = rows
     ds.Columns = rows
@@ -61,8 +67,14 @@ def _write_slice(path, z, series_uid=SERIES_UID, *, modality="CT", localizer=Fal
     ds.BitsStored = 16
     ds.HighBit = 15
     ds.PixelRepresentation = 0
-    ds.RescaleIntercept = -1024
-    ds.RescaleSlope = 1
+    if rescale_intercept is not None:
+        ds.RescaleIntercept = rescale_intercept
+    if rescale_slope is not None:
+        ds.RescaleSlope = rescale_slope
+    if rescale_type is not None:
+        ds.RescaleType = rescale_type
+    if multi_energy is not None:
+        ds.MultienergyCTAcquisition = multi_energy
     ds.PixelData = np.full((rows, rows), int(1024 + z), dtype=np.uint16).tobytes()
 
     ds.save_as(path, enforce_file_format=True)
@@ -128,6 +140,58 @@ def test_series_are_grouped_and_localizers_excluded(tmp_path):
     assert not by_uid[scout].usable  # localizer AND too few slices
 
     assert series_mod.rank(found)[0].uid == main
+
+
+def test_hu_calibration_evidence_is_discovered_and_must_be_consistent(tmp_path):
+    original = generate_uid()
+    derived_hu = generate_uid()
+    mixed = generate_uid()
+    for index in range(6):
+        _write_slice(tmp_path / ("original-%d" % index), index, series_uid=original)
+        _write_slice(
+            tmp_path / ("derived-%d" % index),
+            index,
+            series_uid=derived_hu,
+            image_type=["DERIVED", "PRIMARY", "AXIAL"],
+            rescale_type="HU",
+        )
+        _write_slice(
+            tmp_path / ("mixed-%d" % index),
+            index,
+            series_uid=mixed,
+            rescale_type="US" if index == 5 else "HU",
+        )
+
+    by_uid = {item.uid: item for item in series_mod.discover(str(tmp_path))}
+
+    assert by_uid[original].has_calibrated_hu
+    assert by_uid[derived_hu].has_calibrated_hu
+    assert not by_uid[mixed].hu_calibration_consistent
+    assert not by_uid[mixed].has_calibrated_hu
+
+
+def test_multienergy_ct_requires_an_explicit_hu_rescale_type(tmp_path):
+    implicit = generate_uid()
+    explicit = generate_uid()
+    for index in range(6):
+        _write_slice(
+            tmp_path / ("implicit-%d" % index),
+            index,
+            series_uid=implicit,
+            multi_energy="YES",
+        )
+        _write_slice(
+            tmp_path / ("explicit-%d" % index),
+            index,
+            series_uid=explicit,
+            multi_energy="YES",
+            rescale_type="HU",
+        )
+
+    by_uid = {item.uid: item for item in series_mod.discover(str(tmp_path))}
+
+    assert not by_uid[implicit].has_calibrated_hu
+    assert by_uid[explicit].has_calibrated_hu
 
 
 def test_nested_directories_are_walked(tmp_path):

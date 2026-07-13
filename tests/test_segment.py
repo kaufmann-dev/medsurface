@@ -131,3 +131,14 @@ def test_pad_adds_background_border():
     assert padded[0, 0, 0] == 0
     assert padded[2, 2, 2] == 1
     assert padded.sum() == 27
+
+
+@pytest.mark.parametrize("spacing", [0.0, -0.1, float("nan"), float("inf")])
+def test_resample_rejects_invalid_target_spacing(spacing):
+    with pytest.raises(ValueError, match="finite and greater than zero"):
+        segment.resample_isotropic(_two_blobs(), spacing)
+
+
+def test_resample_rejects_an_excessive_target_grid_before_allocating():
+    with pytest.raises(ValueError, match="resampled grid would hold"):
+        segment.resample_isotropic(_two_blobs(), 0.001)

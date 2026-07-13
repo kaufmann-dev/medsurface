@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from typing import Union
 
@@ -103,6 +104,37 @@ def get(name: str) -> Preset:
         raise KeyError(
             "unknown preset %r; available: %s" % (name, ", ".join(sorted(PRESETS)))
         ) from None
+
+
+def validate(preset: Preset) -> None:
+    """Reject invalid processing values before image or mesh allocation begins."""
+    nonnegative = {
+        "median_mm": preset.median_mm,
+        "closing_mm": preset.closing_mm,
+        "opening_mm": preset.opening_mm,
+        "min_island_mm3": preset.min_island_mm3,
+        "resample_mm": preset.resample_mm,
+        "smooth_iters": preset.smooth_iters,
+        "simplify_error_mm": preset.simplify_error_mm,
+        "post_smooth_iters": preset.post_smooth_iters,
+    }
+    for name, value in nonnegative.items():
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("%s must be finite and non-negative" % name)
+    if not math.isfinite(preset.smooth_force) or not 0 < preset.smooth_force <= 1:
+        raise ValueError("smooth_force must be finite, greater than zero, and at most one")
+    for name, threshold_value in (
+        ("threshold", preset.threshold),
+        ("threshold_max", preset.threshold_max),
+    ):
+        if (
+            threshold_value is not None
+            and threshold_value != "auto"
+            and not math.isfinite(float(threshold_value))
+        ):
+            raise ValueError("%s must be finite" % name)
+
+
 def override(preset: Preset, **kwargs) -> Preset:
     """Apply non-None overrides on top of a preset."""
     changes = {k: v for k, v in kwargs.items() if v is not None}

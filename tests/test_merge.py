@@ -244,6 +244,31 @@ def test_surface_stage_comes_from_the_preset():
     assert (bone.smooth_iters, bone.smooth_force, bone.post_smooth_iters) == (20, 0.1, 40)
 
 
+@pytest.mark.parametrize("grid_mm", [0.0, -0.4, float("nan"), float("inf")])
+def test_merge_rejects_invalid_grid_before_loading(grid_mm, monkeypatch):
+    monkeypatch.setattr(
+        merge_mod.volume_mod,
+        "load",
+        lambda _candidate: pytest.fail("volume loading must not start for an invalid grid"),
+    )
+
+    with pytest.raises(ValueError, match="grid_mm must be finite and greater than zero"):
+        merge_mod.merge(
+            _candidate(uid="a"),
+            _candidate(uid="b"),
+            presets.get("bone"),
+            "unused.stl",
+            grid_mm=grid_mm,
+        )
+
+
+def test_common_grid_rejects_tiny_spacing_without_integer_overflow():
+    mask = _image(_lumpy_shell(), spacing=(1.0, 1.0, 1.0))
+
+    with pytest.raises(MergeError, match="raise --grid-mm"):
+        merge_mod._common_grid(mask, mask, np.eye(4), 1e-12)
+
+
 def test_force_overrides_the_gates():
     merge_mod.check_registration(
         _result(overlap_moving_in_fixed=0.0, overlap_fixed_in_moving=0.0,

@@ -30,6 +30,8 @@ surface.
   identifying even when demographic fields have been removed.
 - Treat source data, logs, provenance, and output meshes according to the same
   privacy rules as other personal health data.
+- Mesh and JSON report paths cannot alias any discovered medical image input,
+  including DICOM instances and detached NRRD or MetaImage payloads.
 
 ## Choosing a volume
 
@@ -95,10 +97,12 @@ installed values at any time with `medsurface presets`.
 
 Numeric thresholds are inclusive lower bounds. `auto` calculates a
 format-neutral Otsu threshold from the volume instead of assuming calibrated
-Hounsfield units. The `bone`, `teeth`, and `skin` preset values are verified as
-HU only for DICOM CT. On every other input they are applied to stored values and
-produce a warning; use an intentional numeric `--threshold` or `--preset auto`
-when those values are not calibrated HU.
+Hounsfield units. The `bone`, `teeth`, and `skin` values are treated as HU only
+when a DICOM CT series has a complete, consistent rescale transform and either
+an explicit `HU` rescale type or original non-multienergy CT image metadata.
+Other inputs, derived CT without explicit units, inconsistent series, and
+ambiguous multienergy CT receive a warning. Use an intentional numeric
+`--threshold` or `--preset auto` when values are not calibrated HU.
 
 MeshLib smoothing uses the preset's iteration count and relaxation force. Use
 `--smooth-iters` and `--smooth-force` to override them; the built-in presets use
@@ -128,7 +132,9 @@ medsurface merge fixed.nii.gz moving.mha \
 ```
 
 An explicit CLI value overrides the corresponding preset value. Run
-`medsurface convert --help` for the complete set of overrides.
+`medsurface convert --help` or `medsurface merge --help` for the complete set of
+overrides. Both commands accept the shared median, opening, closing, island and
+component selection, smoothing, and simplification controls.
 
 ## Input requirements and limitations
 
@@ -143,7 +149,8 @@ File inputs must be real-valued, scalar, three-dimensional images with at least
 two voxels on each axis, finite origin/direction values, positive finite spacing,
 and a nonsingular direction matrix. Supported-format files that violate these
 constraints can still appear in `list` with a reason when their header is
-readable.
+readable. A detached `.mhd` or `.nhdr` whose referenced payload is absent or
+unreadable is listed as unusable instead of being selected and failing later.
 
 Classic single-frame DICOM stacks additionally have these limitations:
 
@@ -182,12 +189,21 @@ warnings and failures remain visible. Machine-readable `list --json`,
 `validate --json`, and `repair --json` suppress progress so stdout contains only
 JSON.
 
+Numeric processing options reject non-finite and out-of-range values as usage
+errors. Grid and resampling allocations are also bounded before the image
+toolkit is asked to allocate them; increase the requested voxel spacing if the
+planned volume is too large.
+
 ## Understanding validation
 
 Conversion and merging validate the in-memory surface, write a temporary file
 in the destination directory, validate that serialized file, and atomically
 publish it only when both checks pass. `repair` validates the file it writes;
 `validate` runs the same checks without changing its input.
+
+`convert --json FILE` and `merge --json FILE` publish the report atomically too.
+The report and mesh must be different files, and neither may overwrite a
+discovered image header, detached payload, or DICOM instance.
 
 A report is valid only when MeshLib imports the mesh as watertight, consistently
 wound, and enclosing a volume, with no holes, boundary edges, disoriented faces,

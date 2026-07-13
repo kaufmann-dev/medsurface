@@ -37,6 +37,11 @@ JSON is a separate plain-output contract. `list --json`, `validate --json`, and
 `repair --json` write only JSON to stdout. `convert --json FILE` and
 `merge --json FILE` write JSON only to the requested file. Human output never
 shares the JSON destination, and JSON contains no ANSI control sequences.
+Convert and merge reject mesh or report paths that alias each other or any
+discovered input file through a lexical path, symlink, or hard link. This
+includes every DICOM instance and each payload referenced by a detached image
+header. JSON reports are written to a temporary sibling and atomically
+published, so a failed report write preserves an existing report.
 Warnings raised by pydicom during discovery are captured, deduplicated with
 their occurrence counts preserved, and rendered concisely on stderr without
 Python source locations.
@@ -89,7 +94,9 @@ flat and a warning explains that missing anatomy was not recovered.
 ## File-volume compatibility
 
 SimpleITK reads image headers during discovery and pixel data only after
-selection. File candidates must be scalar, real-valued 3-D images with at least
+selection. Discovery separately resolves detached MetaImage and NRRD payload
+references and marks the header unusable when a required payload is absent or
+unreadable. File candidates must be scalar, real-valued 3-D images with at least
 two voxels per axis, finite origin/direction values, finite positive spacing,
 and a nonsingular 3×3 direction matrix.
 
@@ -117,7 +124,7 @@ data. The loader is for classic image series, not arbitrary DICOM objects.
 | Classic single-frame stacks                 | Supported and covered by generated uncompressed CT tests                                               |
 | Enhanced multi-frame objects                | Unsupported; one file is counted as one instance and per-frame geometry is not parsed                  |
 | Compressed transfer syntaxes                | Delegated to codecs in the installed SimpleITK/GDCM build; not tested here                             |
-| `RescaleSlope` / `RescaleIntercept`         | Applied by SimpleITK; CT presets rely on calibrated HU                                                 |
+| `RescaleSlope` / `RescaleIntercept`         | Applied by SimpleITK; both must be present and consistent before HU can be verified                    |
 | Pixel padding and `MONOCHROME1`             | No explicit project handling; untested                                                                 |
 | Consistent oblique stacks                   | Supported; slice normal and direction cosines are preserved                                            |
 | Gantry tilt or nonparallel slices           | No correction or complete geometry validation; unsupported without independent checks                  |
@@ -131,6 +138,15 @@ data. The loader is for classic image series, not arbitrary DICOM objects.
 `FrameOfReferenceUID` is not read. `merge` always registers the moving scan and
 does not assume cross-series coordinates already align.
 
+HU calibration is conservative. Every slice must carry the same finite
+`RescaleSlope` and `RescaleIntercept`. An explicit `RescaleType` must be `HU`.
+When `RescaleType` is absent, the series is accepted as HU only when `ImageType`
+begins with `ORIGINAL`, it is not a localizer, and
+`MultienergyCTAcquisition` is not `YES`. Derived or multienergy CT may still be
+verified when it explicitly declares `RescaleType=HU`; otherwise HU presets
+produce a calibration warning. The evidence and result are included in list
+JSON and provenance.
+
 When `ConvolutionKernel` is present, a case-insensitive warning heuristic uses
 the literal pattern
 `(?:^|[^0-9])(?:[BHUY]r?|BONE|EDGE|LUNG)\s*_?([6-9]\d)`. It recognizes names
@@ -143,10 +159,13 @@ series ranking, thresholds, or processing.
 Median, opening, and closing parameters are kernel extents in millimetres. Each
 axis is floored to the largest integer radius whose realized `(2r+1) × spacing`
 does not exceed the request. A zero radius is an identity operation on that axis.
+Convert and merge expose the same three morphology overrides.
 
 Fractional occupancy is linearly interpolated and thresholded at 0.5. Resampling
 can erase thin structures or change components, cavities, tunnels, and genus. It
-does not preserve anatomical topology.
+does not preserve anatomical topology. Non-finite or non-positive target spacing
+is rejected, and a planned isotropic grid above 800 million voxels is refused
+before allocation.
 
 ## Surface extraction and finishing
 
@@ -204,6 +223,9 @@ correspondence limit and up to 80 iterations per pass.
 
 Point-to-plane RMS and median are reported but not gated. The thresholds were
 selected on a small exploratory development set, not clinically calibrated.
+The fused-grid spacing must be finite and positive. Grid planning uses
+non-overflowing voxel counts and refuses grids above 800 million voxels before
+resampling.
 
 ## Merge identity contract
 
@@ -256,8 +278,14 @@ output. `uv.lock` covers Python 3.10–3.13; local development defaults to Pytho
 
 ```sh
 uv sync --locked
+uv run ruff check .
+uv run mypy
 uv run pytest -q
+uv build
 ```
+
+CI runs linting, source type checks, package builds, an installed-command smoke
+test, and the test suite on Python 3.10 through 3.13.
 
 Hatchling is the PEP 517 build backend, and uv orchestrates the workflow.
 MeshLib is pinned to `3.1.3.297` for consistent collision and simplification

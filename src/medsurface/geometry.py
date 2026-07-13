@@ -20,7 +20,6 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
-
 #: Guards against binary-float artefacts in the exact-fit case. 2.4 / 0.8 is
 #: 2.9999999999999996, not 3.0, which would floor a legitimate radius of 1 down
 #: to 0 and silently drop the filter on that axis.

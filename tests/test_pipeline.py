@@ -6,19 +6,32 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 
-from medsurface import pipeline as pipeline_mod, presets, validate
+from medsurface import pipeline as pipeline_mod
+from medsurface import presets, validate
 from medsurface.catalog import DicomSource, FileSource, VolumeCandidate
 from medsurface.pipeline import resolve_threshold
 from medsurface.series import Series
 from tests.mesh_helpers import write
 
 
-def _series(modality="CT"):
-    return Series(uid="1.2.3", modality=modality, description="test", series_number=1)
+def _series(modality="CT", **kwargs):
+    calibrated = {
+        "image_type": ("ORIGINAL", "PRIMARY", "AXIAL"),
+        "rescale_slope": 1.0,
+        "rescale_intercept": -1024.0,
+    }
+    calibrated.update(kwargs)
+    return Series(
+        uid="1.2.3",
+        modality=modality,
+        description="test",
+        series_number=1,
+        **calibrated,
+    )
 
 
-def _candidate(*, modality="CT", file=False):
-    series = _series(modality)
+def _candidate(*, modality="CT", file=False, **series_kwargs):
+    series = _series(modality, **series_kwargs)
     source = FileSource(Path("scan.nii"), "NIfTI") if file else DicomSource(Path("scans"), series)
     return VolumeCandidate(
         id=1,
@@ -108,8 +121,37 @@ def test_hu_warning_depends_on_verified_calibration_not_processing():
     assert pipeline_mod.threshold_warnings(_candidate(file=True), bone, 300.0) == []
 
 
+@pytest.mark.parametrize(
+    "series_kwargs",
+    [
+        {"image_type": (), "rescale_slope": None, "rescale_intercept": None},
+        {"image_type": ("DERIVED", "PRIMARY", "AXIAL")},
+        {"multi_energy_ct_acquisition": "YES"},
+        {"rescale_slope": None},
+    ],
+)
+def test_ct_without_sufficient_hu_evidence_is_unverified(series_kwargs):
+    candidate = _candidate(**series_kwargs)
+
+    assert not pipeline_mod.volume_mod.has_calibrated_hu(candidate)
+    assert "cannot be verified" in pipeline_mod.threshold_warnings(
+        candidate, presets.get("bone"), None
+    )[0]
+
+
+def test_explicit_hu_rescale_type_verifies_derived_ct():
+    candidate = _candidate(
+        image_type=("DERIVED", "PRIMARY", "AXIAL"),
+        rescale_type="HU",
+    )
+
+    assert pipeline_mod.volume_mod.has_calibrated_hu(candidate)
+    assert pipeline_mod.threshold_warnings(candidate, presets.get("bone"), None) == []
+
+
 def test_every_preset_is_self_consistent():
     for name, p in presets.PRESETS.items():
+        presets.validate(p)
         assert p.name == name
         assert p.description
         assert p.median_mm >= 0 and p.closing_mm >= 0 and p.opening_mm >= 0
@@ -134,6 +176,28 @@ def test_override_ignores_none_and_applies_values():
 def test_unknown_preset_lists_alternatives():
     with pytest.raises(KeyError, match="available:"):
         presets.get("nope")
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("median_mm", -1.0),
+        ("resample_mm", float("nan")),
+        ("smooth_iters", -1),
+        ("smooth_force", 1.1),
+        ("simplify_error_mm", float("inf")),
+    ],
+)
+def test_invalid_presets_are_rejected_before_volume_loading(field, value, monkeypatch):
+    invalid = presets.override(presets.get("bone"), **{field: value})
+    monkeypatch.setattr(
+        pipeline_mod.volume_mod,
+        "load",
+        lambda _candidate: pytest.fail("volume loading must not start for an invalid preset"),
+    )
+
+    with pytest.raises(ValueError):
+        pipeline_mod.convert(_candidate(), invalid, "unused.stl")
 
 
 def test_validate_does_not_repair_the_mesh_it_measures(tmp_path):

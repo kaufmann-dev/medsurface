@@ -36,9 +36,10 @@ Then convert the recommended volume:
 medsurface convert ~/scans/head-ct -o skull.stl
 ```
 
-The default `bone` preset extracts values at or above 300. This is verified as
-HU for DICOM CT; other inputs receive a calibration warning. Use the unique
-integer ID printed by `list` to select a different volume:
+The default `bone` preset extracts values at or above 300. It is treated as HU
+only when DICOM CT metadata provides sufficient calibration evidence; other
+inputs receive a warning. Use the unique integer ID printed by `list` to select
+a different volume:
 
 ```sh
 medsurface convert ~/scans/head-ct --volume 1 -o skull.stl

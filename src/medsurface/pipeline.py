@@ -8,9 +8,11 @@ from typing import Any, Callable
 
 import SimpleITK as sitk
 
-from . import segment, surface, volume as volume_mod
+from . import segment, surface
+from . import volume as volume_mod
 from .catalog import DicomSource, VolumeCandidate
 from .presets import Preset
+from .presets import validate as validate_preset
 
 Logger = Callable[[str], None]
 StepRunner = Callable[[str, Callable[[], Any]], Any]
@@ -71,13 +73,15 @@ def finish_surface(
             )
         )
 
-    surface_components = 1
+    surface_components = surface.component_count(poly)
     if keep_largest_component:
         poly, surface_components = step(
             "largest component",
             lambda: surface.largest_component(poly),
         )
         log("  surface shells: %d (kept 1)" % surface_components)
+    else:
+        log("  surface shells: %d (kept all)" % surface_components)
 
     if simplify_error_mm > 0:
         poly, decimation = step(
@@ -240,6 +244,10 @@ def source_provenance(
             "description": series.description,
             "convolution_kernel": series.kernel,
             "slices": series.n_slices,
+            "image_type": list(series.image_type),
+            "rescale_type": series.rescale_type,
+            "multi_energy_ct_acquisition": series.multi_energy_ct_acquisition,
+            "hu_calibration_consistent": series.hu_calibration_consistent,
         }
     return record
 
@@ -252,6 +260,7 @@ def convert(
     cap_field_of_view: bool = True,
     log: Logger | None = None,
 ) -> Result:
+    validate_preset(preset)
     t0 = time.time()
 
     def say(msg: str) -> None:

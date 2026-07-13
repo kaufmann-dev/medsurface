@@ -69,7 +69,7 @@ def load(candidate: VolumeCandidate) -> Volume:
 
 def has_calibrated_hu(candidate: VolumeCandidate) -> bool:
     """Whether the loader can verify that values are Hounsfield units."""
-    return bool(candidate.dicom and candidate.modality == "CT")
+    return bool(candidate.dicom and candidate.dicom.has_calibrated_hu)
 
 
 def warnings_for(volume: Volume) -> list[str]:
