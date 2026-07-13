@@ -42,6 +42,8 @@ JSON is a separate plain-output contract. `list --json`, `validate --json`, and
 `repair --json` write only JSON to stdout. `convert --json FILE` and
 `merge --json FILE` write JSON only to the requested file. Human output never
 shares the JSON destination, and JSON contains no ANSI control sequences.
+Convert and merge reports both include the complete effective preset and the
+measured number of output surface components.
 Convert and merge reject mesh or report paths that alias each other or any
 discovered input file through a lexical path, symlink, or hard link. This
 includes every DICOM instance and each payload referenced by a detached image
@@ -264,19 +266,19 @@ wound, and enclosing a volume, with zero holes, boundary edges, disoriented
 faces, and self-intersecting faces. Multiple closed components are allowed.
 MeshLib can normalize raw face configurations while loading, so validation does
 not expose separate non-manifold or degenerate-face counters. A failed
-self-intersection measurement is invalid. `convert` and `merge` have no
-validation bypass: they validate both the
-in-memory mesh and the serialized temporary file, then atomically replace the
-requested destination only with a valid output.
+self-intersection measurement is invalid. `convert`, `merge`, and `repair` have
+no validation bypass: they validate both the in-memory mesh and the serialized
+temporary file, then atomically replace the requested destination only with a
+valid output.
 
 STL, PLY, and OBJ are loaded directly by MeshLib. VTP is not supported. All
 metrics describe the MeshLib-imported representation, and self-intersections
 count the unique faces in MeshLib collision pairs.
 
 `repair` uses MeshLib to unite vertices within 1e-6, fix multiple edges,
-decimate degeneracies, and fill holes. It writes a new file; validation never
-mutates the input it measures. A repaired file remains on disk if it does not
-pass the complete validation contract.
+decimate degeneracies, and fill holes. Validation never mutates the input it
+measures. An invalid repair is discarded, and an existing destination remains
+unchanged.
 
 ## Dependencies and development
 

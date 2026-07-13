@@ -7,7 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 from medsurface import cli, repair, validate
-from tests.mesh_helpers import box, write
+from tests.mesh_helpers import box, concatenate, transformed, write
 
 
 def test_repair_closes_an_open_mesh(tmp_path):
@@ -20,13 +20,35 @@ def test_repair_closes_an_open_mesh(tmp_path):
     before = validate.validate(source)
     assert not before["watertight"]
 
-    stats = repair.repair(source, output)
+    result = repair.repair(source, output)
     after = validate.validate(output)
 
-    assert stats["holes_in"] > 0
-    assert stats["holes_out"] == 0
-    assert stats["holes_filled"] > 0
+    assert result.stats["holes_in"] > 0
+    assert result.stats["holes_out"] == 0
+    assert result.stats["holes_filled"] > 0
+    assert result.quality["valid"]
     assert after["watertight"]
+
+
+def test_invalid_repair_preserves_an_existing_destination(tmp_path):
+    source = tmp_path / "intersecting.ply"
+    destination = tmp_path / "destination.ply"
+    crossing = transformed(
+        box((2.0, 2.0, 2.0)),
+        translation=(0.35, 0.1, 0.2),
+        rotation_z_deg=30.0,
+    )
+    write(source, concatenate(box((2.0, 2.0, 2.0)), crossing))
+    write(destination, box())
+    original = destination.read_bytes()
+    assert validate.validate(str(destination))["valid"]
+
+    with pytest.raises(ValueError, match="in-memory output mesh is invalid"):
+        repair.repair(str(source), str(destination))
+
+    assert destination.read_bytes() == original
+    assert validate.validate(str(destination))["valid"]
+    assert not list(tmp_path.glob(".destination.ply.*"))
 
 
 def test_repair_refuses_to_overwrite_its_input_or_a_hard_link(tmp_path):

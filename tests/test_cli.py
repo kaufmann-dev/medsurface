@@ -146,6 +146,7 @@ def _merge_result(output: str, *, warnings_: list[str] | None = None, quality: d
         volume_fixed_mm3=100.0,
         volume_moving_mm3=110.0,
         volume_union_mm3=150.0,
+        surface_components=2,
         seconds=2.5,
         warnings=warnings_ or [],
         provenance={"fixed": {"format": "DICOM"}, "moving": {"format": "DICOM"}},
@@ -1057,7 +1058,9 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
     assert captured["simplify_error_mm"] == pytest.approx(0.2)
     assert captured["post_smooth_iters"] == 8
     assert captured["force"]
-    assert json.loads(json_file.read_text())["result"]["grid_size"] == [10, 20, 30]
+    payload = json.loads(json_file.read_text())
+    assert payload["result"]["grid_size"] == [10, 20, 30]
+    assert payload["result"]["surface_components"] == 2
 
     def refuse(**_kwargs):
         raise merge_mod.MergeError("registration gate refused the pair")
@@ -1205,10 +1208,15 @@ def test_repair_json_is_plain_and_errors_are_concise(tmp_path, monkeypatch):
     output = tmp_path / "fixed.stl"
     mesh.write_text("placeholder")
     from medsurface import repair as repair_mod
-    from medsurface import validate as validate_mod
 
-    monkeypatch.setattr(repair_mod, "repair", lambda *_args, **_kwargs: {"holes_filled": 1})
-    monkeypatch.setattr(validate_mod, "validate", lambda _path: _quality())
+    monkeypatch.setattr(
+        repair_mod,
+        "repair",
+        lambda *_args, **_kwargs: repair_mod.RepairResult(
+            stats={"holes_filled": 1},
+            quality=_quality(),
+        ),
+    )
     result = runner.invoke(
         cli.app,
         ["repair", str(mesh), "-o", str(output), "--json"],
