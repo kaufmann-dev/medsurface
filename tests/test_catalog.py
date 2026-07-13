@@ -25,6 +25,7 @@ def _write_dicom_series(
     root: Path,
     *,
     uid: str | None = None,
+    modality: str | None = "CT",
     series_number: int = 1,
     slices: int = 6,
     slice_spacing: float = 1.0,
@@ -42,7 +43,8 @@ def _write_dicom_series(
         ds.SOPClassUID = meta.MediaStorageSOPClassUID
         ds.SOPInstanceUID = meta.MediaStorageSOPInstanceUID
         ds.SeriesInstanceUID = uid
-        ds.Modality = "CT"
+        if modality is not None:
+            ds.Modality = modality
         ds.ImageType = ["ORIGINAL", "PRIMARY", "AXIAL"]
         ds.SeriesDescription = "axial source"
         ds.SeriesNumber = series_number
@@ -157,6 +159,31 @@ def test_dicom_only_catalog_still_automatically_ranks_the_best_stack(tmp_path):
     assert chosen.dicom.uid == fine
     assert chosen.dicom.uid != coarse
     assert chosen.dicom.has_calibrated_hu
+
+
+@pytest.mark.parametrize(
+    "other_modality,expected",
+    [("MR", "CT, MR"), (None, "CT, unknown")],
+)
+def test_dicom_catalog_spanning_modalities_requires_an_id(
+    tmp_path, other_modality, expected
+):
+    _write_dicom_series(tmp_path / "ct", modality="CT", series_number=1)
+    _write_dicom_series(
+        tmp_path / "other",
+        modality=other_modality,
+        series_number=2,
+    )
+
+    found = catalog.discover(tmp_path)
+
+    assert len(found) == 2
+    assert catalog.recommended(found) is None
+    with pytest.raises(ValueError, match="multiple modalities") as caught:
+        catalog.select(found, None)
+    assert expected in str(caught.value)
+    assert catalog.select(found, found[0].id) is found[0]
+    assert catalog.select(found, found[1].id) is found[1]
 
 
 def test_only_integer_catalog_ids_are_accepted(tmp_path):

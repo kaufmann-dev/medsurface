@@ -39,7 +39,9 @@ medsurface convert ~/scans/head-ct -o skull.stl
 The default `bone` preset extracts values at or above 300. It is treated as HU
 only when DICOM CT metadata provides sufficient calibration evidence; other
 inputs receive a warning. Use the unique integer ID printed by `list` to select
-a different volume:
+a different volume. A DICOM directory spanning multiple modalities, such as CT
+and MR, deliberately has no automatic default because those volumes are not
+comparable acquisitions:
 
 ```sh
 medsurface convert ~/scans/head-ct --volume 1 -o skull.stl
@@ -66,8 +68,9 @@ uncalibrated data.
 | `medsurface validate MODEL.stl`              | Report mesh quality without changing the file         |
 | `medsurface repair MODEL.stl -o FIXED.stl`   | Repair an open or non-manifold mesh                   |
 
-Run `medsurface COMMAND --help` for every option. Output format follows the
-extension: `.stl`, `.ply`, or `.obj`.
+Run `medsurface COMMAND --help` for every option and `medsurface --version` for
+the installed version. Output format follows the extension: `.stl`, `.ply`, or
+`.obj`; unsupported output extensions are rejected before image processing.
 
 ## Common workflows
 

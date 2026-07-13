@@ -259,8 +259,10 @@ def convert(
     threshold: float | str | None = None,
     cap_field_of_view: bool = True,
     log: Logger | None = None,
+    warn: Logger | None = None,
 ) -> Result:
     validate_preset(preset)
+    surface.validate_output_path(output_path)
     t0 = time.time()
 
     def say(msg: str) -> None:
@@ -274,9 +276,20 @@ def convert(
         say("  %-34s %6.1fs" % (msg, time.time() - t))
         return out
 
+    warnings: list[str] = []
+
+    def add_warning(message: str) -> None:
+        warnings.append(message)
+        if warn:
+            warn(message)
+
+    def add_warnings(messages: list[str]) -> None:
+        for message in messages:
+            add_warning(message)
+
+    add_warnings(threshold_warnings(candidate, preset, threshold))
     vol = step("load volume", lambda: volume_mod.load(candidate))
-    warnings = volume_mod.warnings_for(vol)
-    warnings.extend(threshold_warnings(candidate, preset, threshold))
+    add_warnings(volume_mod.warnings_for(vol))
     lo, hi = step("measure intensity range", vol.intensity_range)
     say("volume %s  spacing %s mm  intensity %.0f..%.0f"
         % ("x".join(str(v) for v in vol.size),
@@ -305,12 +318,12 @@ def convert(
 
     touches = volume_mod.touches_boundary(binary)
     if touches and not cap_field_of_view:
-        warnings.append(
+        add_warning(
             "anatomy reaches the edge of the scanned volume and --no-cap was given, "
             "so the surface will be left open there"
         )
     if touches and cap_field_of_view:
-        warnings.append(
+        add_warning(
             "anatomy is truncated by the scanner's field of view; the opening has "
             "been capped flat. The missing anatomy cannot be recovered."
         )
@@ -321,7 +334,7 @@ def convert(
     if preset.resample_mm > 0:
         native = min(vol.spacing)
         if preset.resample_mm > native:
-            warnings.append(
+            add_warning(
                 "--resample-mm %.2f is coarser than the native %.3f mm voxel, so structures "
                 "thinner than the target voxel are erased. On a head CT, resampling to 0.6 mm "
                 "reopened 257 pores that the morphological closing had sealed, and terraced "
@@ -354,7 +367,7 @@ def convert(
     )
     poly = finished.poly
     surface_components = finished.surface_components
-    warnings.extend(finished.warnings)
+    add_warnings(finished.warnings)
     poly = step("index -> physical space", lambda: surface.transform(poly, affine))
 
     quality = step("validate and publish mesh", lambda: surface.write_validated(poly, output_path))

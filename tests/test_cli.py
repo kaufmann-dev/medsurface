@@ -18,7 +18,7 @@ import pytest
 from rich.console import Console
 from typer.testing import CliRunner
 
-from medsurface import cli
+from medsurface import __version__, cli
 from medsurface.catalog import DicomSource, FileSource, VolumeCandidate
 from medsurface.series import Series
 
@@ -200,6 +200,14 @@ def test_root_command_without_arguments_is_lightweight_help():
         assert command in result.stdout
 
 
+def test_version_is_lightweight_and_public():
+    result = _run_cli_in_clean_interpreter(["--version"])
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "medsurface %s" % __version__
+    assert result.stderr == ""
+
+
 @pytest.mark.parametrize(
     "argv",
     [
@@ -220,6 +228,23 @@ def test_every_help_surface_is_lightweight(argv):
     assert result.stderr == ""
     assert "\x1b" not in result.stdout
     assert "Traceback" not in result.stdout
+
+
+def test_merge_help_describes_shared_processing_options():
+    result = _run_cli_in_clean_interpreter(["merge", "--help"])
+
+    assert result.returncode == 0
+    for option, description_start in (
+        ("--median-mm", "Despeckle kernel"),
+        ("--closing-mm", "Pore-sealing kernel"),
+        ("--opening-mm", "Bridge-breaking kernel"),
+        ("--min-island-mm3", "Drop blobs smaller"),
+        ("--smooth-iters", "MeshLib relaxation"),
+        ("--smooth-force", "MeshLib relaxation"),
+        ("--post-smooth-iters", "Smoothing after"),
+    ):
+        assert option in result.stdout
+        assert description_start in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -450,6 +475,21 @@ def test_list_file_volume_uses_dash_for_missing_metadata():
     assert "Modality: -" in rendered
     assert "Description: -" in rendered
     assert "Plane: axial" in rendered
+
+
+def test_list_explains_why_mixed_dicom_modalities_have_no_default(
+    tmp_path, monkeypatch
+):
+    ct = _candidate(row_id=1, uid="1.2.3", modality="CT")
+    mr = _candidate(row_id=2, uid="1.2.4", modality="MR")
+    monkeypatch.setattr(cli, "_discover", lambda _root: [ct, mr])
+
+    result = runner.invoke(cli.app, ["list", str(tmp_path)], prog_name="medsurface")
+
+    assert result.exit_code == 0
+    assert "No automatic default" in result.stdout
+    assert "multiple modalities: CT, MR" in result.stdout
+    assert "Choose a volume with" in result.stdout
 
 
 def test_discovery_warnings_are_deduplicated_and_do_not_corrupt_json(tmp_path, monkeypatch):
@@ -716,6 +756,65 @@ def test_invalid_processing_numbers_are_usage_errors_before_discovery(
     assert "Traceback" not in result.stderr
 
 
+def test_convert_rejects_output_extension_before_discovery(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        cli,
+        "_discover",
+        lambda _root: pytest.fail("discovery must not run for an unsupported output"),
+    )
+
+    result = runner.invoke(
+        cli.app,
+        ["convert", str(tmp_path), "-o", str(tmp_path / "out.xyz")],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 2
+    assert "unsupported output extension" in result.stderr
+
+
+def test_merge_rejects_output_extension_before_discovery(tmp_path, monkeypatch):
+    moving = tmp_path / "moving"
+    moving.mkdir()
+    monkeypatch.setattr(
+        cli,
+        "_discover",
+        lambda _root: pytest.fail("discovery must not run for an unsupported output"),
+    )
+
+    result = runner.invoke(
+        cli.app,
+        ["merge", str(tmp_path), str(moving), "-o", str(tmp_path / "out.xyz")],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 2
+    assert "unsupported output extension" in result.stderr
+
+
+def test_repair_rejects_output_extension_before_loading(tmp_path, monkeypatch):
+    mesh = tmp_path / "input.stl"
+    mesh.write_text("placeholder")
+    from medsurface import repair as repair_mod
+
+    monkeypatch.setattr(
+        repair_mod,
+        "repair",
+        lambda *_args, **_kwargs: pytest.fail(
+            "repair must not start for an unsupported output"
+        ),
+    )
+
+    result = runner.invoke(
+        cli.app,
+        ["repair", str(mesh), "-o", str(tmp_path / "out.xyz")],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 2
+    assert "unsupported output extension" in result.stderr
+
+
 def test_convert_rejects_report_aliases_before_processing(tmp_path, monkeypatch):
     source = tmp_path / "scan.mha"
     source.write_bytes(b"original medical image")
@@ -820,11 +919,11 @@ def test_quiet_suppresses_progress_but_not_warnings(tmp_path, monkeypatch):
 
     from medsurface import pipeline
 
-    monkeypatch.setattr(
-        pipeline,
-        "convert",
-        lambda **_kwargs: _convert_result("out.stl", warnings_=["sampling warning"]),
-    )
+    def fake_convert(**kwargs):
+        kwargs["warn"]("sampling warning")
+        return _convert_result("out.stl", warnings_=["sampling warning"])
+
+    monkeypatch.setattr(pipeline, "convert", fake_convert)
     result = runner.invoke(
         cli.app,
         ["convert", str(tmp_path), "-o", "out.stl", "-q"],
@@ -834,6 +933,47 @@ def test_quiet_suppresses_progress_but_not_warnings(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert result.stdout == ""
     assert "Warning: sampling warning" in result.stderr
+    assert result.stderr.count("sampling warning") == 1
+
+
+def test_convert_requires_id_for_multiple_dicom_modalities(tmp_path, monkeypatch):
+    ct = _candidate(row_id=1, uid="1.2.3", modality="CT")
+    mr = _candidate(row_id=2, uid="1.2.4", modality="MR")
+    monkeypatch.setattr(cli, "_discover", lambda _root: [ct, mr])
+
+    result = runner.invoke(
+        cli.app,
+        ["convert", str(tmp_path), "-o", str(tmp_path / "out.stl")],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 2
+    assert "multiple modalities: CT, MR" in result.stderr
+    assert "volume ID" in result.stderr
+
+
+def test_merge_identifies_the_input_with_ambiguous_dicom_modalities(
+    tmp_path, monkeypatch
+):
+    moving_dir = tmp_path / "moving"
+    moving_dir.mkdir()
+    fixed = _candidate(row_id=1, uid="1.2.3", modality="CT")
+    moving_ct = _candidate(row_id=1, uid="1.3.3", modality="CT")
+    moving_mr = _candidate(row_id=2, uid="1.3.4", modality="MR")
+
+    def fake_discover(path: Path):
+        return [moving_ct, moving_mr] if path == moving_dir else [fixed]
+
+    monkeypatch.setattr(cli, "_discover", fake_discover)
+    result = runner.invoke(
+        cli.app,
+        ["merge", str(tmp_path), str(moving_dir), "-o", str(tmp_path / "out.stl")],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 2
+    assert "moving input" in result.stderr
+    assert "multiple modalities: CT, MR" in result.stderr
 
 
 def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypatch):

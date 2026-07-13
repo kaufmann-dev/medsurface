@@ -9,13 +9,16 @@ import meshlib.mrmeshnumpy as mrmeshnumpy
 import meshlib.mrmeshpy as mrmeshpy
 import numpy as np
 
+from .defaults import SUPPORTED_MESH_EXTENSIONS
+
 
 def _load_mesh(path: str) -> mrmeshpy.Mesh:
     """Load a supported triangle mesh with MeshLib."""
     ext = os.path.splitext(path)[1].lower()
-    if ext not in (".obj", ".ply", ".stl"):
+    if ext not in SUPPORTED_MESH_EXTENSIONS:
         raise ValueError(
-            "unsupported mesh extension %r; supported: .obj, .ply, .stl" % ext
+            "unsupported mesh extension %r; supported: %s"
+            % (ext, ", ".join(SUPPORTED_MESH_EXTENSIONS))
         )
     return mrmeshpy.loadMesh(path)
 

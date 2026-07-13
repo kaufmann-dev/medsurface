@@ -206,8 +206,10 @@ def merge(
     post_smooth_iters: int | None = None,
     force: bool = False,
     log: Logger | None = None,
+    warn: Logger | None = None,
 ) -> MergeResult:
     validate_preset(preset)
+    surface.validate_output_path(output_path)
     if not math.isfinite(grid_mm) or grid_mm <= 0:
         raise ValueError("grid_mm must be finite and greater than zero")
     overrides = {
@@ -247,16 +249,19 @@ def merge(
         say("  %-36s %6.1fs" % (label, time.time() - t))
         return out
 
-    warnings = check_compatible(fixed, moving)
+    warnings: list[str] = []
 
-    say("fixed  ID %d  %s  %s" % (fixed.id, fixed.format, fixed.source_name))
-    say("moving ID %d  %s  %s" % (moving.id, moving.format, moving.source_name))
+    def add_warning(message: str) -> None:
+        warnings.append(message)
+        if warn:
+            warn(message)
 
-    fixed_volume = step("load fixed volume", lambda: volume_mod.load(fixed))
-    moving_volume = step("load moving volume", lambda: volume_mod.load(moving))
-    warnings.extend(volume_mod.warnings_for(fixed_volume))
-    warnings.extend(volume_mod.warnings_for(moving_volume))
-    warnings.extend(
+    def add_warnings(messages: list[str]) -> None:
+        for message in messages:
+            add_warning(message)
+
+    add_warnings(check_compatible(fixed, moving))
+    add_warnings(
         pipeline.threshold_warnings(
             fixed,
             preset,
@@ -264,7 +269,7 @@ def merge(
             "--fixed-threshold",
         )
     )
-    warnings.extend(
+    add_warnings(
         pipeline.threshold_warnings(
             moving,
             preset,
@@ -272,6 +277,14 @@ def merge(
             "--moving-threshold",
         )
     )
+
+    say("fixed  ID %d  %s  %s" % (fixed.id, fixed.format, fixed.source_name))
+    say("moving ID %d  %s  %s" % (moving.id, moving.format, moving.source_name))
+
+    fixed_volume = step("load fixed volume", lambda: volume_mod.load(fixed))
+    moving_volume = step("load moving volume", lambda: volume_mod.load(moving))
+    add_warnings(volume_mod.warnings_for(fixed_volume))
+    add_warnings(volume_mod.warnings_for(moving_volume))
 
     fixed_value, fixed_source = step(
         "resolve fixed threshold",
@@ -287,14 +300,21 @@ def merge(
     moving_mask = step("segment moving", lambda: pipeline.build_mask(moving_volume.image, preset, moving_value))
 
     say("registering ...")
-    reg = registration.rigid_register(fixed_mask, moving_mask, log=lambda m: say("  " + m))
+    try:
+        reg = registration.rigid_register(
+            fixed_mask,
+            moving_mask,
+            log=lambda m: say("  " + m),
+        )
+    except registration.RegistrationError as exc:
+        raise MergeError(str(exc)) from None
     for line in reg.summary().splitlines():
         say("  " + line.strip() if line.startswith(" ") else "  " + line)
     check_registration(reg, force=force)
 
     finest = min(min(fixed_volume.spacing), min(moving_volume.spacing))
     if grid_mm > finest:
-        warnings.append(
+        add_warning(
             "the fused grid is %.2f mm but the finest input voxel is %.3f mm; "
             "structures thinner than the grid are lost. Lower --grid-mm to keep "
             "them, at cubic cost in memory." % (grid_mm, finest)
@@ -365,12 +385,12 @@ def merge(
     )
     poly = finished.poly
     shells = finished.surface_components
-    warnings.extend(finished.warnings)
+    add_warnings(finished.warnings)
     poly = step("index -> fixed physical space", lambda: surface.transform(poly, affine))
 
     boundary, holes = step("check surface defects", lambda: surface.count_defects(poly))
     if boundary or holes:
-        warnings.append(
+        add_warning(
             "fused surface has %d boundary edge(s) and %d hole(s)" % (boundary, holes)
         )
 

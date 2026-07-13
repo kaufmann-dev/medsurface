@@ -404,10 +404,30 @@ def recommended(candidates: list[VolumeCandidate]) -> VolumeCandidate | None:
     if len(usable) == 1:
         return usable[0]
     if usable and all(candidate.dicom is not None for candidate in usable):
+        if selection_ambiguity(usable) is not None:
+            return None
         ranked = series_mod.rank(candidate.dicom for candidate in usable if candidate.dicom is not None)
         winner = ranked[0]
         return next(candidate for candidate in usable if candidate.dicom is winner)
     return None
+
+
+def selection_ambiguity(candidates: list[VolumeCandidate]) -> str | None:
+    """Explain a DICOM-only catalog that has no safe automatic winner."""
+    usable = [candidate for candidate in candidates if candidate.usable]
+    if len(usable) < 2 or not all(candidate.dicom is not None for candidate in usable):
+        return None
+    modalities = sorted(
+        {
+            candidate.modality.strip().upper()
+            if candidate.modality and candidate.modality.strip()
+            else "unknown"
+            for candidate in usable
+        }
+    )
+    if len(modalities) < 2:
+        return None
+    return "usable DICOM volumes span multiple modalities: %s" % ", ".join(modalities)
 
 
 def select(candidates: list[VolumeCandidate], wanted: int | None) -> VolumeCandidate:
@@ -431,6 +451,12 @@ def select(candidates: list[VolumeCandidate], wanted: int | None) -> VolumeCandi
     default = recommended(candidates)
     if default is not None:
         return default
+    ambiguity = selection_ambiguity(candidates)
+    if ambiguity is not None:
+        raise ValueError(
+            "%s; run 'medsurface list INPUT' and pass the displayed volume ID"
+            % ambiguity
+        )
     raise ValueError(
         "input contains multiple usable volumes; run 'medsurface list INPUT' and pass a volume ID"
     )

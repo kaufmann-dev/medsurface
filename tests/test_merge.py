@@ -13,7 +13,7 @@ import pytest
 import SimpleITK as sitk
 
 from medsurface import merge as merge_mod
-from medsurface import presets, registration
+from medsurface import presets, registration, volume
 from medsurface.catalog import DicomSource, FileSource, VolumeCandidate
 from medsurface.merge import MergeError
 from medsurface.series import Series
@@ -148,6 +148,30 @@ def test_empty_mask_is_reported_not_silently_registered():
     solid = _image(_ball((30, 30, 30), (15, 15, 15), 8))
     with pytest.raises(registration.RegistrationError, match="empty"):
         registration.rigid_register(solid, empty)
+
+
+def test_merge_translates_registration_failure_to_its_public_error(monkeypatch):
+    image = _image(_ball((30, 30, 30), (15, 15, 15), 8))
+
+    def load(candidate):
+        return volume.Volume(image=image, candidate=candidate)
+
+    def fail_registration(*_args, **_kwargs):
+        raise registration.RegistrationError("one mask vanished on the registration grid")
+
+    monkeypatch.setattr(merge_mod.volume_mod, "load", load)
+    monkeypatch.setattr(merge_mod.pipeline, "build_mask", lambda *_args, **_kwargs: image)
+    monkeypatch.setattr(merge_mod.registration, "rigid_register", fail_registration)
+
+    with pytest.raises(MergeError, match="one mask vanished"):
+        merge_mod.merge(
+            _candidate(uid="a"),
+            _candidate(uid="b"),
+            presets.get("bone"),
+            "unused.stl",
+            fixed_threshold=1.0,
+            moving_threshold=1.0,
+        )
 
 
 # --------------------------------------------------------------- the refusals
@@ -314,12 +338,19 @@ def _candidate(uid="1.2.3", modality="CT", part=1, *, path=None):
 
 def test_merge_announces_volume_loading_before_it_starts(monkeypatch):
     messages = []
+    emitted_warnings = []
 
     class StopLoading(Exception):
         pass
 
     def stop(_candidate):
         assert messages[-1] == "load fixed volume ..."
+        assert emitted_warnings[0] == (
+            "subject identity is not verified; confirm that fixed and moving volumes "
+            "show the same subject before using the fused surface"
+        )
+        assert any("--fixed-threshold" in message for message in emitted_warnings)
+        assert any("--moving-threshold" in message for message in emitted_warnings)
         raise StopLoading
 
     monkeypatch.setattr(merge_mod.volume_mod, "load", stop)
@@ -330,6 +361,7 @@ def test_merge_announces_volume_loading_before_it_starts(monkeypatch):
             presets.get("bone"),
             "unused.stl",
             log=messages.append,
+            warn=emitted_warnings.append,
         )
 
 

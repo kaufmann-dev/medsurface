@@ -22,7 +22,7 @@ from rich.progress import Progress, SpinnerColumn, TaskID, TextColumn, TimeElaps
 from rich.table import Table
 from rich.text import Text
 
-from . import defaults
+from . import __version__, defaults
 from . import presets as presets_mod
 from .presets import PRESETS
 
@@ -49,8 +49,23 @@ app = typer.Typer(
 )
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo("medsurface %s" % __version__)
+        raise typer.Exit()
+
+
 @app.callback()
-def root(ctx: typer.Context) -> None:
+def root(
+    ctx: typer.Context,
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show version and exit.",
+    ),
+) -> None:
     """Turn a medical image volume into a watertight 3D surface mesh."""
     if ctx.invoked_subcommand is None:
         stdout_console.print(ctx.get_help())
@@ -202,6 +217,26 @@ def _exit_for_quality(report: dict[str, Any] | None) -> None:
 def _warn_if_invalid(report: dict[str, Any], subject: str) -> None:
     if not report["valid"]:
         _warn("%s failed validation: %s" % (subject, "; ".join(report["problems"])))
+
+
+def _validate_mesh_output(path: Path) -> None:
+    extension = path.suffix.casefold()
+    if extension not in defaults.SUPPORTED_MESH_EXTENSIONS:
+        _error(
+            "unsupported output extension %r; supported: %s"
+            % (extension, ", ".join(defaults.SUPPORTED_MESH_EXTENSIONS))
+        )
+        raise typer.Exit(2)
+
+
+def _emit_remaining_warnings(messages: list[str], emitted: list[str]) -> None:
+    """Render result warnings not already streamed by the processing layer."""
+    streamed = Counter(emitted)
+    for message in messages:
+        if streamed[message]:
+            streamed[message] -= 1
+        else:
+            _warn(message)
 
 
 def _parse_threshold(value: str | None, option: str = "--threshold") -> float | str | None:
@@ -497,6 +532,11 @@ def list_volumes(
         command.append("medsurface convert %s -o out.stl" % input_path, style="bold")
         stdout_console.print(command)
     elif any(candidate.usable for candidate in found):
+        ambiguity = catalog.selection_ambiguity(found)
+        if ambiguity is not None:
+            stdout_console.print(
+                Text("No automatic default: %s." % ambiguity, style="yellow")
+            )
         command = Text("Choose a volume with:  ")
         command.append(
             "medsurface convert %s --volume ID -o out.stl" % input_path,
@@ -583,6 +623,7 @@ def convert(
     quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
 ) -> None:
     """Extract a surface mesh from a medical image volume."""
+    _validate_mesh_output(output)
     threshold_value = _parse_threshold(threshold)
     _validate_processing_numbers(
         nonnegative=[
@@ -597,6 +638,12 @@ def convert(
         ],
         unit_interval=(("--smooth-force", smooth_force),),
     )
+    emitted_warnings: list[str] = []
+
+    def emit_warning(message: str) -> None:
+        emitted_warnings.append(message)
+        _warn(message)
+
     progress = _ProgressDisplay(not quiet, "Discovering volumes ...")
     with progress:
         found = _discover(input_path)
@@ -640,6 +687,7 @@ def convert(
                 threshold=threshold_value,
                 cap_field_of_view=not no_cap,
                 log=progress.log,
+                warn=emit_warning,
             )
         except ValueError as exc:
             _error(exc)
@@ -670,8 +718,7 @@ def convert(
                 _error("cannot write JSON report %s: %s" % (json_file, exc))
                 raise typer.Exit(1) from None
 
-    for message in result.warnings:
-        _warn(message)
+    _emit_remaining_warnings(result.warnings, emitted_warnings)
 
     if not quiet:
         _success("wrote %s" % result.output_path)
@@ -730,10 +777,18 @@ def merge(
         "--moving-threshold",
         help="Moving stored intensity or 'auto' for Otsu.",
     ),
-    median_mm: float | None = typer.Option(None, "--median-mm"),
-    closing_mm: float | None = typer.Option(None, "--closing-mm"),
-    opening_mm: float | None = typer.Option(None, "--opening-mm"),
-    min_island_mm3: float | None = typer.Option(None, "--min-island-mm3"),
+    median_mm: float | None = typer.Option(
+        None, "--median-mm", help="Despeckle kernel extent, mm."
+    ),
+    closing_mm: float | None = typer.Option(
+        None, "--closing-mm", help="Pore-sealing kernel extent, mm."
+    ),
+    opening_mm: float | None = typer.Option(
+        None, "--opening-mm", help="Bridge-breaking kernel extent, mm."
+    ),
+    min_island_mm3: float | None = typer.Option(
+        None, "--min-island-mm3", help="Drop blobs smaller than this."
+    ),
     all_islands: bool = typer.Option(False, "--all-islands", help="Keep every labelmap island."),
     all_components: bool = typer.Option(
         False, "--all-components", help="Keep every fused surface shell."
@@ -743,16 +798,22 @@ def merge(
         "--grid-mm",
         help="Isotropic fused-grid voxel size in mm.",
     ),
-    smooth_iters: int | None = typer.Option(None, "--smooth-iters", help="Default: from the preset."),
+    smooth_iters: int | None = typer.Option(
+        None, "--smooth-iters", help="MeshLib relaxation iterations."
+    ),
     smooth_force: float | None = typer.Option(
-        None, "--smooth-force", help="Default: from the preset."
+        None,
+        "--smooth-force",
+        help="MeshLib relaxation strength per iteration.",
     ),
     simplify_error_mm: float | None = typer.Option(
         None,
         "--simplify-error-mm",
         help="MeshLib estimated surface-deviation/QEM limit in model mm, not a certified Hausdorff bound (0 = off).",
     ),
-    post_smooth_iters: int | None = typer.Option(None, "--post-smooth-iters", help="Default: from the preset."),
+    post_smooth_iters: int | None = typer.Option(
+        None, "--post-smooth-iters", help="Smoothing after simplification."
+    ),
     force: bool = typer.Option(
         False,
         "--force",
@@ -762,6 +823,7 @@ def merge(
     quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
 ) -> None:
     """Register two scans of the same anatomy and fuse their surfaces."""
+    _validate_mesh_output(output)
     fixed_threshold_value = _parse_threshold(fixed_threshold, "--fixed-threshold")
     moving_threshold_value = _parse_threshold(moving_threshold, "--moving-threshold")
     _validate_processing_numbers(
@@ -777,6 +839,12 @@ def merge(
         positive=(("--grid-mm", grid_mm),),
         unit_interval=(("--smooth-force", smooth_force),),
     )
+    emitted_warnings: list[str] = []
+
+    def emit_warning(message: str) -> None:
+        emitted_warnings.append(message)
+        _warn(message)
+
     progress = _ProgressDisplay(not quiet, "Discovering fixed volumes ...")
     with progress:
         fixed_found = _discover(fixed_input)
@@ -793,7 +861,15 @@ def merge(
 
         try:
             fixed_candidate = catalog.select(fixed_found, fixed_volume)
+        except ValueError as exc:
+            _error("fixed input: %s" % exc)
+            raise typer.Exit(2) from None
+        try:
             moving_candidate = catalog.select(moving_found, moving_volume)
+        except ValueError as exc:
+            _error("moving input: %s" % exc)
+            raise typer.Exit(2) from None
+        try:
             _protect_output_paths([*fixed_found, *moving_found], output, json_file)
         except ValueError as exc:
             _error(exc)
@@ -827,6 +903,7 @@ def merge(
                 post_smooth_iters=post_smooth_iters,
                 force=force,
                 log=progress.log,
+                warn=emit_warning,
             )
         except merge_mod.MergeError as exc:
             _error(exc)
@@ -862,8 +939,7 @@ def merge(
                 _error("cannot write JSON report %s: %s" % (json_file, exc))
                 raise typer.Exit(1) from None
 
-    for message in result.warnings:
-        _warn(message)
+    _emit_remaining_warnings(result.warnings, emitted_warnings)
 
     if not quiet:
         _success("wrote %s" % result.output_path)
@@ -926,6 +1002,7 @@ def repair(
     quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
 ) -> None:
     """Make a non-watertight mesh watertight."""
+    _validate_mesh_output(output)
     progress = _ProgressDisplay(
         not quiet and not json_output,
         "Loading repair engine ...",
