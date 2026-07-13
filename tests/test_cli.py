@@ -7,6 +7,7 @@ import json
 import os
 import pty
 import select
+import shlex
 import subprocess
 import sys
 import time
@@ -23,6 +24,13 @@ from medsurface.catalog import DicomSource, FileSource, VolumeCandidate
 from medsurface.series import Series
 
 runner = CliRunner()
+
+
+def _expected_shell_command(arguments) -> str:
+    rendered = [str(argument) for argument in arguments]
+    if os.name == "nt":
+        return subprocess.list2cmdline(rendered)
+    return shlex.join(rendered)
 
 
 def _plain_subprocess_env() -> dict[str, str]:
@@ -485,6 +493,20 @@ def test_list_human_output_shows_discovery_progress(tmp_path, monkeypatch):
     assert "axial" in result.stdout
 
 
+def test_list_command_hint_is_shell_quoted_without_hard_wrapping(tmp_path, monkeypatch):
+    input_path = tmp_path / "scan folder;$(unsafe)"
+    input_path.mkdir()
+    monkeypatch.setattr(cli, "_discover", lambda _root: [_candidate()])
+
+    result = runner.invoke(cli.app, ["list", str(input_path)], prog_name="medsurface")
+
+    assert result.exit_code == 0
+    expected = _expected_shell_command(
+        ["medsurface", "convert", input_path, "-o", "out.stl"]
+    )
+    assert "Convert the default with:  " + expected in result.stdout
+
+
 def test_list_file_volume_uses_dash_for_missing_metadata():
     candidate = VolumeCandidate(
         id=1,
@@ -526,7 +548,10 @@ def test_list_explains_why_mixed_dicom_modalities_have_no_default(
     assert result.exit_code == 0
     assert "No automatic default" in result.stdout
     assert "multiple modalities: CT, MR" in result.stdout
-    assert "Choose a volume with" in result.stdout
+    expected = _expected_shell_command(
+        ["medsurface", "convert", tmp_path, "--volume", "ID", "-o", "out.stl"]
+    )
+    assert "Choose a volume with:  " + expected in result.stdout
 
 
 def test_discovery_warnings_are_deduplicated_and_do_not_corrupt_json(tmp_path, monkeypatch):

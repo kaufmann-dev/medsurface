@@ -25,20 +25,22 @@ hidden.
 Human output uses shared Rich stdout and stderr consoles with terminal color
 detection. Volume, preset, and quality results use responsive
 tables. Dynamic paths, UIDs, descriptions, and error text are treated as plain
-text rather than Rich markup. Long operations announce a stage before they
-begin. Interactive terminals show an indeterminate spinner, current stage, and
-per-stage elapsed time. The interactive renderer runs in a small helper process
-so native MeshLib calls that hold Python's interpreter lock cannot freeze its
-animation. Live warnings and errors are relayed through that renderer, which
-clears the spinner before writing the diagnostic to stderr and then redraws the
-current stage. Redirected output receives persistent ANSI-free stage lines. No
-percentage is shown because the processing libraries do not expose a reliable
-completed-work total. Normal progress can be suppressed with `--quiet`, while
-warnings and failures remain visible. Processing functions retain warnings in
-their result objects and stream them through a callback as soon as each warning
-becomes known. Subject-identity and unverified-HU warnings therefore precede
-volume loading, while later geometry and surface warnings appear at their
-corresponding stages without being printed twice by the CLI.
+text rather than Rich markup. Suggested commands quote arguments for the current
+platform and use soft terminal wrapping so a long path remains one copyable
+logical line. Long operations announce a stage before they begin. Interactive
+terminals show an indeterminate spinner, current stage, and per-stage elapsed
+time. The interactive renderer runs in a small helper process so native MeshLib
+calls that hold Python's interpreter lock cannot freeze its animation. Live
+warnings and errors are relayed through that renderer, which clears the spinner
+before writing the diagnostic to stderr and then redraws the current stage.
+Redirected output receives persistent ANSI-free stage lines. No percentage is
+shown because the processing libraries do not expose a reliable completed-work
+total. Normal progress can be suppressed with `--quiet`, while warnings and
+failures remain visible. Processing functions retain warnings in their result
+objects and stream them through a callback as soon as each warning becomes
+known. Subject-identity and unverified-HU warnings therefore precede volume
+loading, while later geometry and surface warnings appear at their corresponding
+stages without being printed twice by the CLI.
 
 JSON is a separate plain-output contract. `list --json`, `validate --json`, and
 `repair --json` write only JSON to stdout. `convert --json FILE` and
