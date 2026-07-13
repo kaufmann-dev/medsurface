@@ -47,6 +47,7 @@ def _series(
     number: int = 6,
     modality: str = "CT",
     description: str = "axial bone",
+    kernel_values: tuple[str, ...] = (),
 ) -> Series:
     value = Series(
         uid=uid,
@@ -54,6 +55,7 @@ def _series(
         description=description,
         series_number=number,
         id=row_id,
+        kernel_values=kernel_values,
     )
     value.files = ["slice-%d" % index for index in range(8)]
     value.pixel_spacing = (0.5, 0.5)
@@ -463,7 +465,12 @@ def test_required_inputs_use_typer_path_validation(command, argv):
 
 
 def test_list_json_uses_unique_id_and_plain_stdout(tmp_path, monkeypatch):
-    found = [_candidate(description="[bold red]literal[/bold red]")]
+    found = [
+        _candidate(
+            description="[bold red]literal[/bold red]",
+            kernel_values=("Hr68f", "1"),
+        )
+    ]
     monkeypatch.setattr(cli, "_discover", lambda _root: found)
 
     result = runner.invoke(cli.app, ["list", str(tmp_path), "--json"], prog_name="medsurface")
@@ -476,6 +483,7 @@ def test_list_json_uses_unique_id_and_plain_stdout(tmp_path, monkeypatch):
     assert payload[0]["dicom"]["series_number"] == 6
     assert payload[0]["dicom"]["part"] == 1
     assert payload[0]["dicom"]["n_parts"] == 1
+    assert payload[0]["dicom"]["kernel"] == ["Hr68f", "1"]
     assert payload[0]["description"] == "[bold red]literal[/bold red]"
     assert "ident" not in payload[0]
     assert "\x1b" not in result.stdout
@@ -483,7 +491,12 @@ def test_list_json_uses_unique_id_and_plain_stdout(tmp_path, monkeypatch):
 
 
 def test_list_human_output_shows_discovery_progress(tmp_path, monkeypatch):
-    monkeypatch.setattr(cli, "_discover", lambda _root: [_candidate()])
+    candidate = _candidate(kernel_values=("Hr68f", "1"))
+    monkeypatch.setattr(
+        cli,
+        "_discover",
+        lambda _root: [candidate],
+    )
 
     result = runner.invoke(cli.app, ["list", str(tmp_path)], prog_name="medsurface")
 
@@ -491,6 +504,9 @@ def test_list_human_output_shows_discovery_progress(tmp_path, monkeypatch):
     assert "Discovering volumes ..." in result.stdout
     assert "DICOM #" in result.stdout
     assert "axial" in result.stdout
+    assert cli._volume_status(candidate, candidate) == (
+        "default; usable; sharp kernel Hr68f, 1"
+    )
 
 
 def test_list_command_hint_is_shell_quoted_without_hard_wrapping(tmp_path, monkeypatch):

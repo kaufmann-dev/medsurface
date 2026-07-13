@@ -69,10 +69,11 @@ stable for unchanged contents but intentionally local to one discovery result.
 
 The common catalog record carries format, source, modality, description, size,
 spacing, direction, origin, pixel type, component count, plane, and usability.
-DICOM adds its UID, orientation part, SeriesNumber, convolution kernel, and
-spacing diagnostics. Direction matrices provide plane metadata for file inputs;
-missing human-readable metadata remains absent in JSON and is rendered as `-`
-in the human table.
+DICOM adds its UID, orientation part, SeriesNumber, convolution kernel values,
+and spacing diagnostics. Multi-valued kernels are arrays in JSON and provenance
+and comma-separated in human output. Direction matrices provide plane metadata
+for file inputs; missing human-readable metadata remains absent in JSON and is
+rendered as `-` in the human table.
 
 Only the displayed integer ID is accepted by `--volume`, `--fixed-volume`, and
 `--moving-volume`. UIDs, SeriesNumber values, descriptions, and paths are not
@@ -162,8 +163,8 @@ verified when it explicitly declares `RescaleType=HU`; otherwise HU presets
 produce a calibration warning. The evidence and result are included in list
 JSON and provenance.
 
-When `ConvolutionKernel` is present, a case-insensitive warning heuristic uses
-the literal pattern
+When `ConvolutionKernel` is present, each value is checked independently by a
+case-insensitive warning heuristic using the literal pattern
 `(?:^|[^0-9])(?:[BHUY]r?|BONE|EDGE|LUNG)\s*_?([6-9]\d)`. It recognizes names
 such as `Hr68` and `B70f`; vendor naming outside that pattern can be missed or
 misclassified. A match only produces a sharp-kernel warning. It does not change

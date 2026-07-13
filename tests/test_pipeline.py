@@ -142,6 +142,23 @@ def test_hu_warning_depends_on_verified_calibration_not_processing():
     assert pipeline_mod.threshold_warnings(_candidate(file=True), bone, 300.0) == []
 
 
+def test_multivalued_kernel_is_consistent_in_warnings_and_provenance():
+    candidate = _candidate(kernel_values=("Hr68f", "1"))
+    image = sitk.Image(2, 2, 2, sitk.sitkInt16)
+    image.SetSpacing((0.5, 0.5, 0.5))
+    volume = pipeline_mod.volume_mod.Volume(image=image, candidate=candidate)
+
+    warnings = pipeline_mod.volume_mod.warnings_for(volume)
+    assert len(warnings) == 1
+    assert warnings[0].startswith(
+        "reconstruction kernel Hr68f, 1 is a sharp/edge-enhancing kernel"
+    )
+    assert "Hr68f\\1" not in warnings[0]
+
+    provenance = pipeline_mod.source_provenance(volume, 300.0, "preset:bone")
+    assert provenance["dicom"]["convolution_kernel"] == ["Hr68f", "1"]
+
+
 @pytest.mark.parametrize(
     "series_kwargs",
     [
