@@ -56,6 +56,11 @@ MIN_SLICE_SPACING_MM = 0.01
 ORIENTATION_TOLERANCE_DEG = 2.0
 
 
+def format_kernel_values(values: Iterable[str]) -> str:
+    """Render DICOM ConvolutionKernel values for human-readable output."""
+    return ", ".join(values)
+
+
 @dataclass
 class Series:
     uid: str
@@ -70,7 +75,7 @@ class Series:
     columns: int | None = None
     pixel_spacing: tuple[float, float] | None = None
     slice_thickness: float | None = None
-    kernel: str | None = None
+    kernel_values: tuple[str, ...] = ()
     image_type: tuple[str, ...] = ()
     rescale_type: str | None = None
     rescale_slope: float | None = None
@@ -104,7 +109,11 @@ class Series:
 
     @property
     def sharp_kernel(self) -> bool:
-        return bool(self.kernel and SHARP_KERNEL_RE.search(self.kernel))
+        return any(SHARP_KERNEL_RE.search(value) for value in self.kernel_values)
+
+    @property
+    def kernel_display(self) -> str:
+        return format_kernel_values(self.kernel_values)
 
     @property
     def has_calibrated_hu(self) -> bool:
@@ -261,7 +270,7 @@ def discover_files(paths: Iterable[str]) -> list[Series]:
                 columns=_as_int(getattr(ds, "Columns", None)),
                 pixel_spacing=(float(ps[0]), float(ps[1])) if ps else None,
                 slice_thickness=_as_float(getattr(ds, "SliceThickness", None)),
-                kernel=_kernel_of(ds),
+                kernel_values=_kernel_values_of(ds),
                 image_type=tuple(image_type),
                 rescale_type=_normalised_text(getattr(ds, "RescaleType", None)),
                 rescale_slope=_as_float(getattr(ds, "RescaleSlope", None)),
@@ -359,13 +368,12 @@ def _finalise(series: Series, positions: list[tuple[float, str]]) -> None:
         series.slice_spacing = series.slice_thickness
 
 
-def _kernel_of(ds) -> str | None:
-    k = getattr(ds, "ConvolutionKernel", None)
-    if k is None:
-        return None
-    if isinstance(k, (list, tuple, pydicom.multival.MultiValue)):
-        return "\\".join(str(x) for x in k)
-    return str(k)
+def _kernel_values_of(ds) -> tuple[str, ...]:
+    raw = getattr(ds, "ConvolutionKernel", None)
+    if raw is None:
+        return ()
+    values = raw if isinstance(raw, (list, tuple, pydicom.multival.MultiValue)) else (raw,)
+    return tuple(text for value in values if (text := str(value).strip()))
 
 
 def _as_int(v):

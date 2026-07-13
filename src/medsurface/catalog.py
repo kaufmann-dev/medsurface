@@ -78,8 +78,8 @@ class VolumeCandidate:
         return self.dicom.series_number if self.dicom is not None else None
 
     @property
-    def kernel(self) -> str | None:
-        return self.dicom.kernel if self.dicom is not None else None
+    def kernel_values(self) -> tuple[str, ...]:
+        return self.dicom.kernel_values if self.dicom is not None else ()
 
     @property
     def sharp_kernel(self) -> bool:

@@ -207,14 +207,20 @@ def test_nested_directories_are_walked(tmp_path):
 def test_sharp_kernel_detection(tmp_path):
     d = str(tmp_path)
     for i in range(6):
-        _write_slice(os.path.join(d, "a%d" % i), i, kernel="Hr68")
-    assert series_mod.discover(d)[0].sharp_kernel
+        _write_slice(os.path.join(d, "a%d" % i), i, kernel=["Hr68f", "1"])
+    sharp = series_mod.discover(d)[0]
+    assert sharp.kernel_values == ("Hr68f", "1")
+    assert sharp.kernel_display == "Hr68f, 1"
+    assert sharp.sharp_kernel
 
     d2 = str(tmp_path / "soft")
     os.makedirs(d2)
     for i in range(6):
         _write_slice(os.path.join(d2, "b%d" % i), i, kernel="Hr40")
-    assert not series_mod.discover(d2)[0].sharp_kernel
+    smooth = series_mod.discover(d2)[0]
+    assert smooth.kernel_values == ("Hr40",)
+    assert smooth.kernel_display == "Hr40"
+    assert not smooth.sharp_kernel
 
 
 @pytest.mark.parametrize(

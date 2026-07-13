@@ -376,7 +376,7 @@ def _volume_status(candidate: Any, recommended: Any | None) -> str:
     if series is not None and series.n_parts > 1:
         notes.append("orientation %d of %d in this UID" % (series.part, series.n_parts))
     if candidate.sharp_kernel:
-        notes.append("sharp kernel %s" % candidate.kernel)
+        notes.append("sharp kernel %s" % series.kernel_display)
     return "; ".join(notes)
 
 
@@ -562,7 +562,7 @@ def list_volumes(
                         "part": candidate.dicom.part,
                         "n_parts": candidate.dicom.n_parts,
                         "series_number": candidate.dicom.series_number,
-                        "kernel": candidate.dicom.kernel,
+                        "kernel": list(candidate.dicom.kernel_values),
                         "sharp_kernel": candidate.dicom.sharp_kernel,
                         "spacing_uniform": candidate.dicom.spacing_uniform,
                         "spacing_spread_mm": candidate.dicom.spacing_spread_mm,

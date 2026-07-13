@@ -242,7 +242,7 @@ def source_provenance(
             "series_orientation_part": [series.part, series.n_parts],
             "series_number": series.series_number,
             "description": series.description,
-            "convolution_kernel": series.kernel,
+            "convolution_kernel": list(series.kernel_values),
             "slices": series.n_slices,
             "image_type": list(series.image_type),
             "rescale_type": series.rescale_type,

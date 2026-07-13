@@ -95,10 +95,10 @@ def warnings_for(volume: Volume) -> list[str]:
 
     if series is not None and series.sharp_kernel:
         out.append(
-            "reconstruction kernel %r is a sharp/edge-enhancing kernel: it amplifies "
+            "reconstruction kernel %s is a sharp/edge-enhancing kernel: it amplifies "
             "noise, so a low bone threshold will produce a spiky surface. Prefer a "
             "higher threshold (~300 HU rather than ~200 HU), or a smoother kernel "
-            "series if the study has one." % series.kernel
+            "series if the study has one." % series.kernel_display
         )
 
     return out
