@@ -365,6 +365,39 @@ def test_merge_announces_volume_loading_before_it_starts(monkeypatch):
         )
 
 
+def test_merge_emits_fixed_volume_warnings_before_loading_moving(monkeypatch):
+    fixed = _candidate(uid="a")
+    moving = _candidate(uid="b")
+    emitted_warnings = []
+
+    class StopMovingLoad(Exception):
+        pass
+
+    fixed_loaded = object()
+
+    def load(candidate):
+        if candidate is fixed:
+            return fixed_loaded
+        assert "fixed geometry warning" in emitted_warnings
+        raise StopMovingLoad
+
+    monkeypatch.setattr(merge_mod.volume_mod, "load", load)
+    monkeypatch.setattr(
+        merge_mod.volume_mod,
+        "warnings_for",
+        lambda volume: ["fixed geometry warning"] if volume is fixed_loaded else [],
+    )
+
+    with pytest.raises(StopMovingLoad):
+        merge_mod.merge(
+            fixed,
+            moving,
+            presets.get("bone"),
+            "unused.stl",
+            warn=emitted_warnings.append,
+        )
+
+
 def test_same_volume_twice_is_refused():
     candidate = _candidate()
     with pytest.raises(MergeError, match="same volume"):

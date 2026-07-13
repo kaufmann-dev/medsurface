@@ -266,8 +266,8 @@ def merge(
     say("moving ID %d  %s  %s" % (moving.id, moving.format, moving.source_name))
 
     fixed_volume = step("load fixed volume", lambda: volume_mod.load(fixed))
-    moving_volume = step("load moving volume", lambda: volume_mod.load(moving))
     add_warnings(volume_mod.warnings_for(fixed_volume))
+    moving_volume = step("load moving volume", lambda: volume_mod.load(moving))
     add_warnings(volume_mod.warnings_for(moving_volume))
 
     fixed_value, fixed_source = step(
