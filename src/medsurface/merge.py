@@ -18,12 +18,10 @@ so the answer must be checked, not trusted. Two unrelated scans produce a
 confident-looking transform and a mesh made of two skulls stuck together at
 random. The gates below exist to make that outcome an error instead.
 
-Geometry alone cannot do it. Measured: a skull uniformly scaled by 3%, which is
-well inside person-to-person variation, passes both geometric gates (overlap
-0.989, dice 0.675) because rigid registration parks it neatly on top. So the
-demographics are checked too -- not out of bureaucracy, but because the geometry
-demonstrably cannot tell two similar bodies apart. Scans with no identifiers at
-all (de-identified data) warn and proceed.
+Geometry cannot establish subject identity. Measured: a skull uniformly scaled
+by 3%, which is well inside person-to-person variation, passes both geometric
+gates (overlap 0.989, dice 0.675) because rigid registration parks it neatly on
+top. The caller must therefore verify subject identity for every merge.
 """
 
 from __future__ import annotations
@@ -33,14 +31,13 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 import numpy as np
-import pydicom
 import SimpleITK as sitk
 
 from . import pipeline, registration, segment, surface, volume as volume_mod
+from .catalog import VolumeCandidate, same_source
 from .defaults import DEFAULT_MERGE_GRID_MM
 from .presets import Preset
 from .registration import RegistrationResult
-from .series import Series
 
 Logger = Callable[[str], None]
 
@@ -91,8 +88,8 @@ class MergeResult:
     grid_mm: float
     grid_size: tuple[int, int, int]
     registration: RegistrationResult
-    volume_a_mm3: float
-    volume_b_mm3: float
+    volume_fixed_mm3: float
+    volume_moving_mm3: float
     volume_union_mm3: float
     surface_components: int
     seconds: float
@@ -101,124 +98,14 @@ class MergeResult:
     quality: dict[str, Any] = field(default_factory=dict)
 
 
-def _normalise_name(value: str) -> str:
-    """`Doe^Jane` and `DOE  JANE ` are the same person.
-
-    DICOM writes names as caret-separated components, and institutions disagree
-    about case and padding.
-    """
-    return " ".join(str(value).replace("^", " ").split()).casefold()
-
-
-def _patient_fields(path: str) -> dict[str, str] | None:
-    try:
-        ds = pydicom.dcmread(path, stop_before_pixels=True)
-    except Exception:  # noqa: BLE001
-        return None
-    return {
-        "id": str(getattr(ds, "PatientID", "")).strip(),
-        "issuer": str(getattr(ds, "IssuerOfPatientID", "")).strip(),
-        "name": _normalise_name(getattr(ds, "PatientName", "")),
-        "birth_date": str(getattr(ds, "PatientBirthDate", "")).strip(),
-        "sex": str(getattr(ds, "PatientSex", "")).strip().upper(),
-    }
-
-
-@dataclass
-class PatientMatch:
-    verdict: str  # "same" | "different" | "unknown"
-    matched: list[str]
-    conflicts: list[str]
-
-
-def compare_patients(path_a: str, path_b: str) -> PatientMatch:
-    """Decide whether two instances describe the same person.
-
-    ``PatientID`` equality is *not* the test. Medical record numbers are scoped to
-    the issuing institution -- which is why DICOM carries ``IssuerOfPatientID`` --
-    so the same person legitimately has different IDs at different hospitals. Two
-    real studies of one skull differed in both ``PatientID`` (7 vs 15 characters)
-    and ``PatientName`` formatting, while agreeing exactly on birth date and sex.
-
-    Conflicting demographics are treated as evidence of different people; a
-    matching ID, or a matching name plus birth date, as sufficient corroboration
-    that the studies come from the same person. Neither is proof -- identifiers
-    are re-issued, pseudonymised and mistyped -- so `--force` exists. Anything
-    else is ``unknown`` and left to the caller.
-
-    This is the only place in the package that reads patient-identifying fields,
-    and it reads them solely to compare them. Only field *names* ever appear in
-    the result. Values are never returned, logged, raised, or written to
-    provenance.
-    """
-    fa, fb = _patient_fields(path_a), _patient_fields(path_b)
-    if fa is None or fb is None or not any(fa.values()) or not any(fb.values()):
-        return PatientMatch("unknown", [], [])
-
-    def both(key):
-        return bool(fa[key]) and bool(fb[key])
-
-    def agree(key):
-        return both(key) and fa[key] == fb[key]
-
-    def conflict(key):
-        return both(key) and fa[key] != fb[key]
-
-    matched = [k for k in ("id", "name", "birth_date", "sex") if agree(k)]
-
-    # Demographics are the strong evidence: they are not institution-scoped.
-    hard_conflicts = [k for k in ("birth_date", "sex", "name") if conflict(k)]
-    if hard_conflicts:
-        return PatientMatch("different", matched, hard_conflicts)
-
-    # An ID match only proves identity if the issuers do not disagree.
-    if agree("id") and not conflict("issuer"):
-        return PatientMatch("same", matched, [])
-
-    if agree("name") and (agree("birth_date") or not both("birth_date")):
-        return PatientMatch("same", matched, [])
-
-    # IDs differ and nothing corroborates that this is one person.
-    if conflict("id"):
-        return PatientMatch("different", matched, ["id"])
-
-    return PatientMatch("unknown", matched, [])
-
-
-def check_compatible(a: Series, b: Series, force: bool = False) -> list[str]:
-    """Refuse pairs that cannot sensibly be fused. Returns non-fatal warnings."""
-    warnings: list[str] = []
-
-    if a.uid == b.uid and a.part == b.part:
-        raise MergeError("both inputs resolve to the same series (%s)" % a.uid)
-
-    if a.modality != b.modality:
-        msg = ("modalities differ (%s vs %s); intensities are not comparable"
-               % (a.modality, b.modality))
-        if not force:
-            raise MergeError(msg + ". Pass --force if you really mean it.")
-        warnings.append(msg)
-
-    if not a.files or not b.files:
-        return warnings
-
-    match = compare_patients(a.files[0], b.files[0])
-    if match.verdict == "different":
-        fields = ", ".join(match.conflicts)
-        msg = ("the two series appear to be different patients (%s %s; values not "
-               "shown)" % (fields, "differ" if len(match.conflicts) > 1 else "differs"))
-        if match.conflicts == ["id"]:
-            msg += (". If these are de-identified studies of one person that were "
-                    "given different pseudonyms, pass --force")
-        if not force:
-            raise MergeError(msg + ". Pass --force if these really are the same body.")
-        warnings.append(msg)
-    elif match.verdict == "unknown":
-        # De-identified data lands here, warns, and proceeds.
-        warnings.append("cannot verify that both scans are of the same person "
-                        "(no comparable patient identifiers)")
-
-    return warnings
+def check_compatible(fixed: VolumeCandidate, moving: VolumeCandidate) -> list[str]:
+    """Reject duplicate inputs and state the format-neutral identity contract."""
+    if same_source(fixed, moving):
+        raise MergeError("fixed and moving inputs resolve to the same volume")
+    return [
+        "subject identity is not verified; confirm that fixed and moving volumes "
+        "show the same subject before using the fused surface"
+    ]
 
 
 def check_registration(result: RegistrationResult, force: bool = False) -> None:
@@ -268,9 +155,9 @@ def _corners(image: sitk.Image) -> np.ndarray:
     return np.asarray(pts, dtype=float)
 
 
-def _common_grid(mask_a, mask_b, transform, grid_mm):
+def _common_grid(fixed_mask, moving_mask, transform, grid_mm):
     rot, trans = transform[:3, :3], transform[:3, 3]
-    pts = np.vstack([_corners(mask_a), (rot @ _corners(mask_b).T).T + trans])
+    pts = np.vstack([_corners(fixed_mask), (rot @ _corners(moving_mask).T).T + trans])
     lo = np.floor(pts.min(0) / grid_mm) * grid_mm - 2 * grid_mm
     hi = np.ceil(pts.max(0) / grid_mm) * grid_mm + 2 * grid_mm
     size = np.ceil((hi - lo) / grid_mm).astype(int) + 1
@@ -290,11 +177,12 @@ def _resample_field(image, size, origin, grid_mm, transform):
 
 
 def merge(
-    series_a: Series,
-    series_b: Series,
+    fixed: VolumeCandidate,
+    moving: VolumeCandidate,
     preset: Preset,
     output_path: str,
-    threshold: float | None = None,
+    fixed_threshold: float | str | None = None,
+    moving_threshold: float | str | None = None,
     grid_mm: float = DEFAULT_MERGE_GRID_MM,
     smooth_iters: int | None = None,
     smooth_force: float | None = None,
@@ -325,40 +213,52 @@ def merge(
         say("  %-36s %6.1fs" % (label, time.time() - t))
         return out
 
-    warnings = check_compatible(series_a, series_b, force=force)
+    warnings = check_compatible(fixed, moving)
 
-    say("fixed  DICOM #%s  %s  (%d slices)"
-        % (series_a.series_number if series_a.series_number is not None else "-",
-           series_a.label(), series_a.n_slices))
-    say("moving DICOM #%s  %s  (%d slices)"
-        % (series_b.series_number if series_b.series_number is not None else "-",
-           series_b.label(), series_b.n_slices))
+    say("fixed  ID %d  %s  %s" % (fixed.id, fixed.format, fixed.source_name))
+    say("moving ID %d  %s  %s" % (moving.id, moving.format, moving.source_name))
 
-    vol_a = step("load fixed DICOM volume", lambda: volume_mod.load(series_a))
-    vol_b = step("load moving DICOM volume", lambda: volume_mod.load(series_b))
-    warnings.extend(volume_mod.warnings_for(vol_a))
-    warnings.extend(volume_mod.warnings_for(vol_b))
+    fixed_volume = step("load fixed volume", lambda: volume_mod.load(fixed))
+    moving_volume = step("load moving volume", lambda: volume_mod.load(moving))
+    warnings.extend(volume_mod.warnings_for(fixed_volume))
+    warnings.extend(volume_mod.warnings_for(moving_volume))
+    warnings.extend(
+        pipeline.threshold_warnings(
+            fixed,
+            preset,
+            fixed_threshold,
+            "--fixed-threshold",
+        )
+    )
+    warnings.extend(
+        pipeline.threshold_warnings(
+            moving,
+            preset,
+            moving_threshold,
+            "--moving-threshold",
+        )
+    )
 
-    value_a, source_a = step(
+    fixed_value, fixed_source = step(
         "resolve fixed threshold",
-        lambda: pipeline.resolve_threshold(vol_a.image, series_a, preset, threshold),
+        lambda: pipeline.resolve_threshold(fixed_volume.image, preset, fixed_threshold),
     )
-    value_b, source_b = step(
+    moving_value, moving_source = step(
         "resolve moving threshold",
-        lambda: pipeline.resolve_threshold(vol_b.image, series_b, preset, threshold),
+        lambda: pipeline.resolve_threshold(moving_volume.image, preset, moving_threshold),
     )
-    say("threshold: fixed %.1f (%s), moving %.1f (%s)" % (value_a, source_a, value_b, source_b))
+    say("threshold: fixed %.1f (%s), moving %.1f (%s)" % (fixed_value, fixed_source, moving_value, moving_source))
 
-    mask_a = step("segment fixed", lambda: pipeline.build_mask(vol_a.image, preset, value_a))
-    mask_b = step("segment moving", lambda: pipeline.build_mask(vol_b.image, preset, value_b))
+    fixed_mask = step("segment fixed", lambda: pipeline.build_mask(fixed_volume.image, preset, fixed_value))
+    moving_mask = step("segment moving", lambda: pipeline.build_mask(moving_volume.image, preset, moving_value))
 
     say("registering ...")
-    reg = registration.rigid_register(mask_a, mask_b, log=lambda m: say("  " + m))
+    reg = registration.rigid_register(fixed_mask, moving_mask, log=lambda m: say("  " + m))
     for line in reg.summary().splitlines():
         say("  " + line.strip() if line.startswith(" ") else "  " + line)
     check_registration(reg, force=force)
 
-    finest = min(min(vol_a.spacing), min(vol_b.spacing))
+    finest = min(min(fixed_volume.spacing), min(moving_volume.spacing))
     if grid_mm > finest:
         warnings.append(
             "the fused grid is %.2f mm but the finest input voxel is %.3f mm; "
@@ -368,7 +268,7 @@ def merge(
 
     size, origin = step(
         "plan fused grid",
-        lambda: _common_grid(mask_a, mask_b, reg.transform, grid_mm),
+        lambda: _common_grid(fixed_mask, moving_mask, reg.transform, grid_mm),
     )
     voxels = int(np.prod(size))
     say("fused grid %s at %.2f mm isotropic (%.0f M voxels)"
@@ -381,32 +281,32 @@ def merge(
     identity = sitk.Transform(3, sitk.sitkIdentity)
     inverse = registration.inverse_transform(reg.transform)
 
-    field_a = step("resample fixed",
-                   lambda: _resample_field(segment.antialias_for_grid(mask_a, grid_mm), size, origin,
+    fixed_field = step("resample fixed",
+                   lambda: _resample_field(segment.antialias_for_grid(fixed_mask, grid_mm), size, origin,
                                            grid_mm, identity))
-    field_b = step("resample moving",
-                   lambda: _resample_field(segment.antialias_for_grid(mask_b, grid_mm), size, origin,
+    moving_field = step("resample moving",
+                   lambda: _resample_field(segment.antialias_for_grid(moving_mask, grid_mm), size, origin,
                                            grid_mm, inverse))
 
     # Union of occupancy, not of labels: keeps the sub-voxel boundary each scan
     # carries, so the fused surface is not quantised to the grid.
     fused = step(
         "fuse occupancy fields",
-        lambda: sitk.Clamp(sitk.Maximum(field_a, field_b), sitk.sitkFloat32, 0.0, 1.0),
+        lambda: sitk.Clamp(sitk.Maximum(fixed_field, moving_field), sitk.sitkFloat32, 0.0, 1.0),
     )
 
     voxel_mm3 = grid_mm ** 3
 
     def measure_volumes() -> tuple[float, float, float]:
         return (
-            float((sitk.GetArrayViewFromImage(field_a) > 0.5).sum()) * voxel_mm3,
-            float((sitk.GetArrayViewFromImage(field_b) > 0.5).sum()) * voxel_mm3,
+            float((sitk.GetArrayViewFromImage(fixed_field) > 0.5).sum()) * voxel_mm3,
+            float((sitk.GetArrayViewFromImage(moving_field) > 0.5).sum()) * voxel_mm3,
             float((sitk.GetArrayViewFromImage(fused) > 0.5).sum()) * voxel_mm3,
         )
 
-    vol_a_mm3, vol_b_mm3, vol_u_mm3 = step("measure fused volumes", measure_volumes)
+    fixed_volume_mm3, moving_volume_mm3, union_volume_mm3 = step("measure fused volumes", measure_volumes)
     say("bone: fixed %.0f cm3 | moving %.0f cm3 | fused %.0f cm3"
-        % (vol_a_mm3 / 1000, vol_b_mm3 / 1000, vol_u_mm3 / 1000))
+        % (fixed_volume_mm3 / 1000, moving_volume_mm3 / 1000, union_volume_mm3 / 1000))
 
     fused = segment.pad(fused, 1)
 
@@ -432,7 +332,7 @@ def merge(
     poly = finished.poly
     shells = finished.surface_components
     warnings.extend(finished.warnings)
-    poly = step("index -> patient space (LPS)", lambda: surface.transform(poly, affine))
+    poly = step("index -> fixed physical space", lambda: surface.transform(poly, affine))
 
     boundary, holes = step("check surface defects", lambda: surface.count_defects(poly))
     if boundary or holes:
@@ -443,14 +343,8 @@ def merge(
     quality = step("validate and publish mesh", lambda: surface.write_validated(poly, output_path))
 
     provenance = {
-        "fixed": {"uid": series_a.uid, "series_number": series_a.series_number,
-                  "series_orientation_part": [series_a.part, series_a.n_parts],
-                  "description": series_a.description, "slices": series_a.n_slices,
-                  "spacing_mm": list(vol_a.spacing), "threshold": value_a},
-        "moving": {"uid": series_b.uid, "series_number": series_b.series_number,
-                   "series_orientation_part": [series_b.part, series_b.n_parts],
-                   "description": series_b.description, "slices": series_b.n_slices,
-                   "spacing_mm": list(vol_b.spacing), "threshold": value_b},
+        "fixed": pipeline.source_provenance(fixed_volume, fixed_value, fixed_source),
+        "moving": pipeline.source_provenance(moving_volume, moving_value, moving_source),
         "grid_mm": grid_mm,
         "surface_finishing": finished.provenance,
         "transform_moving_to_fixed": reg.transform.tolist(),
@@ -462,7 +356,7 @@ def merge(
             "shared_fov_dice": reg.shared_fov_dice,
             "shared_fov_mm3": reg.shared_fov_mm3,
         },
-        "coordinate_system": "LPS (DICOM patient space of the fixed series)",
+        "coordinate_system": "SimpleITK physical space of the fixed volume",
         "forced": bool(force),
     }
 
@@ -474,9 +368,9 @@ def merge(
         grid_mm=grid_mm,
         grid_size=size,
         registration=reg,
-        volume_a_mm3=vol_a_mm3,
-        volume_b_mm3=vol_b_mm3,
-        volume_union_mm3=vol_u_mm3,
+        volume_fixed_mm3=fixed_volume_mm3,
+        volume_moving_mm3=moving_volume_mm3,
+        volume_union_mm3=union_volume_mm3,
         surface_components=shells,
         seconds=time.time() - started,
         warnings=warnings,

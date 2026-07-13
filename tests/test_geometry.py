@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from dicom_surface.geometry import (
+from medsurface.geometry import (
     is_anisotropic,
     kernel_extent_mm,
     kernel_radius_voxels,

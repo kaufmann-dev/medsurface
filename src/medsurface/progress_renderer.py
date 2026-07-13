@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import sys
 import threading
@@ -15,7 +16,17 @@ from rich.text import Text
 
 def main() -> None:
     initial = sys.argv[1] if len(sys.argv) > 1 else "Working ..."
-    console = Console(highlight=False, markup=False)
+    if sys.stdout.isatty() and os.environ.get("TERM", "").casefold() in {"dumb", "unknown"}:
+        os.environ["TERM"] = "xterm-256color"
+    # Rich treats TERM=dumb as non-interactive even when stdout is a real PTY.
+    # The parent only starts this helper for a terminal, so the descriptor is
+    # the authoritative signal here.
+    console = Console(
+        highlight=False,
+        markup=False,
+        force_terminal=sys.stdout.isatty(),
+        force_interactive=sys.stdout.isatty(),
+    )
     messages: queue.SimpleQueue[dict[str, str]] = queue.SimpleQueue()
     input_closed = threading.Event()
 

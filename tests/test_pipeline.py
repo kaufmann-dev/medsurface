@@ -1,17 +1,40 @@
-"""Preset resolution and the modality guard."""
+"""Preset resolution and format-neutral threshold behavior."""
+
+from pathlib import Path
 
 import numpy as np
 import pytest
 import SimpleITK as sitk
 
-from dicom_surface import pipeline as pipeline_mod, presets, validate
-from dicom_surface.pipeline import ModalityMismatch, resolve_threshold
-from dicom_surface.series import Series
+from medsurface import pipeline as pipeline_mod, presets, validate
+from medsurface.catalog import DicomSource, FileSource, VolumeCandidate
+from medsurface.pipeline import resolve_threshold
+from medsurface.series import Series
 from tests.mesh_helpers import write
 
 
 def _series(modality="CT"):
     return Series(uid="1.2.3", modality=modality, description="test", series_number=1)
+
+
+def _candidate(*, modality="CT", file=False):
+    series = _series(modality)
+    source = FileSource(Path("scan.nii"), "NIfTI") if file else DicomSource(Path("scans"), series)
+    return VolumeCandidate(
+        id=1,
+        source=source,
+        format="NIfTI" if file else "DICOM",
+        source_name="scan.nii" if file else "scans",
+        modality=None if file else modality,
+        description=None,
+        size=(32, 32, 32),
+        spacing=(1.0, 1.0, 1.0),
+        direction=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+        origin=(0.0, 0.0, 0.0),
+        pixel_type="32-bit float",
+        components=1,
+        plane="axial",
+    )
 
 
 def _ct_image():
@@ -31,14 +54,14 @@ def test_conversion_announces_volume_loading_before_it_starts(monkeypatch):
     class StopLoading(Exception):
         pass
 
-    def stop(_series):
-        assert messages[-1] == "load DICOM volume ..."
+    def stop(_candidate):
+        assert messages[-1] == "load volume ..."
         raise StopLoading
 
     monkeypatch.setattr(pipeline_mod.volume_mod, "load", stop)
     with pytest.raises(StopLoading):
         pipeline_mod.convert(
-            _series(),
+            _candidate(),
             presets.get("bone"),
             "unused.stl",
             log=messages.append,
@@ -46,33 +69,43 @@ def test_conversion_announces_volume_loading_before_it_starts(monkeypatch):
 
 
 def test_explicit_threshold_wins_over_preset():
-    v, src = resolve_threshold(_ct_image(), _series(), presets.get("bone"), 123.0)
+    v, src = resolve_threshold(_ct_image(), presets.get("bone"), 123.0)
     assert v == 123.0 and src == "explicit"
 
 
 def test_preset_threshold_used_for_ct():
-    v, src = resolve_threshold(_ct_image(), _series("CT"), presets.get("bone"), None)
+    v, src = resolve_threshold(_ct_image(), presets.get("bone"), None)
     assert v == 300.0 and src == "preset:bone"
 
 
-def test_hu_preset_rejected_for_non_ct():
-    """A Hounsfield threshold is meaningless on MR. Refuse rather than emit
-    a confidently wrong mesh."""
-    for modality in ("MR", "US", "PT", "XA"):
-        with pytest.raises(ModalityMismatch, match="only.*meaningful for CT"):
-            resolve_threshold(_ct_image(), _series(modality), presets.get("bone"), None)
+def test_explicit_auto_uses_otsu():
+    value, source = resolve_threshold(_ct_image(), presets.get("bone"), "auto")
+    assert source == "otsu"
+    assert np.isfinite(value)
 
 
 def test_auto_preset_works_on_any_modality():
-    for modality in ("CT", "MR", "US"):
-        v, src = resolve_threshold(_ct_image(), _series(modality), presets.get("auto"), None)
-        assert src == "otsu"
-        assert np.isfinite(v)
+    v, src = resolve_threshold(_ct_image(), presets.get("auto"), None)
+    assert src == "otsu"
+    assert np.isfinite(v)
 
 
 def test_explicit_threshold_bypasses_the_modality_guard():
-    v, src = resolve_threshold(_ct_image(), _series("MR"), presets.get("bone"), 500.0)
+    v, src = resolve_threshold(_ct_image(), presets.get("bone"), 500.0)
     assert v == 500.0 and src == "explicit"
+
+
+def test_hu_warning_depends_on_verified_calibration_not_processing():
+    bone = presets.get("bone")
+    assert pipeline_mod.threshold_warnings(_candidate(), bone, None) == []
+    warnings = pipeline_mod.threshold_warnings(_candidate(file=True), bone, None)
+    assert len(warnings) == 1 and "cannot be verified" in warnings[0]
+    assert "--threshold" in warnings[0]
+    merge_warning = pipeline_mod.threshold_warnings(
+        _candidate(file=True), bone, None, "--moving-threshold"
+    )
+    assert "--moving-threshold" in merge_warning[0]
+    assert pipeline_mod.threshold_warnings(_candidate(file=True), bone, 300.0) == []
 
 
 def test_every_preset_is_self_consistent():
@@ -84,9 +117,9 @@ def test_every_preset_is_self_consistent():
         assert p.simplify_error_mm >= 0
         if isinstance(p.threshold, str):
             assert p.threshold == "auto"
-            assert p.modalities == ()
+            assert p.threshold_unit == "auto"
         else:
-            assert p.modalities, "an HU threshold must declare its modalities"
+            assert p.threshold_unit == "HU"
 
 
 def test_override_ignores_none_and_applies_values():
@@ -101,12 +134,6 @@ def test_override_ignores_none_and_applies_values():
 def test_unknown_preset_lists_alternatives():
     with pytest.raises(KeyError, match="available:"):
         presets.get("nope")
-
-
-def test_accepts_modality():
-    assert presets.accepts_modality(presets.get("auto"), "MR")
-    assert presets.accepts_modality(presets.get("bone"), "CT")
-    assert not presets.accepts_modality(presets.get("bone"), "MR")
 
 
 def test_validate_does_not_repair_the_mesh_it_measures(tmp_path):

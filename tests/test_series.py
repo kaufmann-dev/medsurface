@@ -14,7 +14,7 @@ import pytest
 from pydicom.dataset import Dataset, FileMetaDataset
 from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
 
-from dicom_surface import series as series_mod
+from medsurface import series as series_mod
 
 SERIES_UID = generate_uid()
 
@@ -127,7 +127,7 @@ def test_series_are_grouped_and_localizers_excluded(tmp_path):
     assert by_uid[main].usable
     assert not by_uid[scout].usable  # localizer AND too few slices
 
-    assert series_mod.select(found, None).uid == main
+    assert series_mod.rank(found)[0].uid == main
 
 
 def test_nested_directories_are_walked(tmp_path):
@@ -160,22 +160,6 @@ def test_sharp_kernel_detection(tmp_path):
 )
 def test_sharp_kernel_patterns(kernel, sharp):
     assert bool(series_mod.SHARP_KERNEL_RE.search(kernel)) is sharp
-
-
-def test_select_by_row_id_uid_and_description(tmp_path):
-    d = str(tmp_path)
-    for i in range(6):
-        _write_slice(os.path.join(d, "x%d" % i), i, description="GS nativ 1,00 ax")
-    found = series_mod.discover(d)
-    uid = found[0].uid
-
-    assert series_mod.select(found, uid).uid == uid
-    assert series_mod.select(found, "1").uid == uid
-    assert series_mod.select(found, "nativ").uid == uid
-    with pytest.raises(ValueError, match="no series matches"):
-        series_mod.select(found, "6")
-    with pytest.raises(ValueError, match="no series matches"):
-        series_mod.select(found, "does-not-exist")
 
 
 def test_uid_holding_two_orientations_is_split(tmp_path):
@@ -232,7 +216,7 @@ def test_wrong_normal_would_collapse_the_spacing(tmp_path):
             assert s.voxel_volume_mm3 > 1e-4
 
     # the real acquisition wins; the reformat does not sneak in on a bogus voxel size
-    chosen = series_mod.select(found, None)
+    chosen = series_mod.rank(found)[0]
     assert chosen.uid == real
     assert chosen.n_slices == 30
 
@@ -291,39 +275,6 @@ def test_rank_sends_degenerate_voxel_volume_last(tmp_path):
     assert series_mod.rank([broken, bad])[0] is bad
 
 
-def test_select_each_orientation_split_by_row_id(tmp_path):
-    d = str(tmp_path)
-    uid = generate_uid()
-    _write_slice(os.path.join(d, "aaa_odd"), 0, series_uid=uid, series_number=1021,
-                 orientation=SAGITTAL)
-    for i in range(20):
-        _write_slice(os.path.join(d, "zzz_%02d" % i), i * 2.0, series_uid=uid,
-                     series_number=1021, orientation=AXIAL)
-    found = series_mod.discover(d)
-
-    assert series_mod.select(found, "1").n_slices == 20
-    assert series_mod.select(found, "2").n_slices == 1
-    with pytest.raises(ValueError, match="no series matches"):
-        series_mod.select(found, "1021.1")
-    with pytest.raises(ValueError, match=r"ambiguous \(2 rows: 1, 2\)"):
-        series_mod.select(found, uid)
-
-
-def test_ambiguous_uid_lists_the_row_ids(tmp_path):
-    d = str(tmp_path)
-    uid = generate_uid()
-    for i in range(8):
-        _write_slice(os.path.join(d, "ax%02d" % i), i * 2.0, series_uid=uid,
-                     series_number=7, orientation=AXIAL)
-    for i in range(8):
-        _write_slice(os.path.join(d, "sg%02d" % i), i * 2.0, series_uid=uid,
-                     series_number=7, orientation=SAGITTAL)
-    found = series_mod.discover(d)
-    assert len(found) == 2 and all(s.usable for s in found)
-    with pytest.raises(ValueError, match=r"2 rows: 1, 2"):
-        series_mod.select(found, uid)
-
-
 def test_duplicate_dicom_series_numbers_get_unique_row_ids(tmp_path):
     d = str(tmp_path)
     left, right = generate_uid(), generate_uid()
@@ -337,15 +288,7 @@ def test_duplicate_dicom_series_numbers_get_unique_row_ids(tmp_path):
 
     assert [series.id for series in found] == [1, 2]
     assert [series.series_number for series in found] == [7, 7]
-    assert {series_mod.select(found, "1").uid, series_mod.select(found, "2").uid} == {
-        left,
-        right,
-    }
-    with pytest.raises(ValueError, match="no series matches"):
-        series_mod.select(found, "7")
-    with pytest.raises(ValueError, match=r"description 'shared' is ambiguous \(2 rows: 1, 2\)"):
-        series_mod.select(found, "shared")
-    assert series_mod.select(found, left).uid == left
+    assert {series.uid for series in found} == {left, right}
 
 
 def test_orientation_jitter_does_not_split_a_series(tmp_path):
@@ -361,22 +304,6 @@ def test_orientation_jitter_does_not_split_a_series(tmp_path):
     assert len(found) == 1
     assert found[0].n_slices == 10
     assert found[0].n_parts == 1
-
-
-def test_select_rejects_ambiguous_description(tmp_path):
-    d = str(tmp_path)
-    bone, soft = generate_uid(), generate_uid()
-    for i in range(6):
-        _write_slice(os.path.join(d, "a%d" % i), i, series_uid=bone,
-                     description="axial bone", series_number=1)
-    # second series, same description substring
-    for i in range(6):
-        _write_slice(os.path.join(d, "b%d" % i), i, series_uid=soft,
-                     description="axial soft", series_number=2)
-    found = series_mod.discover(d)
-    assert len(found) == 2
-    with pytest.raises(ValueError, match="is ambiguous"):
-        series_mod.select(found, "axial")
 
 
 def test_rank_prefers_smaller_voxels(tmp_path):
@@ -458,14 +385,6 @@ def test_rank_prefers_axial_over_a_reformat_with_more_slices(tmp_path):
     best = series_mod.rank(found)[0]
     assert best.uid == axial
     assert best.plane == "axial"
-    assert series_mod.select(found, None).uid == axial
-
-
-def test_no_usable_series_raises(tmp_path):
-    d = str(tmp_path)
-    _write_slice(os.path.join(d, "only"), 0, localizer=True)
-    with pytest.raises(ValueError, match="no usable image series"):
-        series_mod.select(series_mod.discover(d), None)
 
 
 def test_non_dicom_files_are_ignored(tmp_path):

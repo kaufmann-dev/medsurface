@@ -37,7 +37,7 @@ stderr_console = Console(stderr=True, highlight=False, markup=False)
 
 app = typer.Typer(
     add_completion=False,
-    help="Turn a DICOM series into a watertight 3D surface mesh.",
+    help="Turn a medical image volume into a watertight 3D surface mesh.",
     invoke_without_command=True,
     no_args_is_help=False,
     pretty_exceptions_show_locals=False,
@@ -47,7 +47,7 @@ app = typer.Typer(
 
 @app.callback()
 def root(ctx: typer.Context) -> None:
-    """Turn a DICOM series into a watertight 3D surface mesh."""
+    """Turn a medical image volume into a watertight 3D surface mesh."""
     if ctx.invoked_subcommand is None:
         stdout_console.print(ctx.get_help())
 
@@ -88,7 +88,7 @@ class _ProgressDisplay:
             return False
         try:
             self.renderer = subprocess.Popen(
-                [sys.executable, "-m", "dicom_surface.progress_renderer", self.initial],
+                [sys.executable, "-m", "medsurface.progress_renderer", self.initial],
                 stdin=subprocess.PIPE,
                 stdout=self.console.file,
                 text=True,
@@ -200,16 +200,16 @@ def _warn_if_invalid(report: dict[str, Any], subject: str) -> None:
         _warn("%s failed validation: %s" % (subject, "; ".join(report["problems"])))
 
 
-def _parse_threshold(value: str | None) -> tuple[float | None, bool]:
-    """Return an explicit numeric threshold and whether Otsu was requested."""
+def _parse_threshold(value: str | None, option: str = "--threshold") -> float | str | None:
+    """Return a numeric threshold, the ``auto`` sentinel, or ``None``."""
     if value is None:
-        return None, False
+        return None
     if value == "auto":
-        return None, True
+        return value
     try:
-        return float(value), False
+        return float(value)
     except ValueError:
-        _error("--threshold must be a number or 'auto'")
+        _error("%s must be a number or 'auto'" % option)
         raise typer.Exit(2) from None
 
 
@@ -227,12 +227,12 @@ def _emit_discovery_warnings(captured: list[warnings.WarningMessage]) -> None:
 
 
 def _discover(root: Path):
-    """Discover series while presenting pydicom warnings as concise CLI warnings."""
-    from . import series as series_mod
+    """Discover volumes while presenting reader warnings concisely."""
+    from . import catalog
 
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter("always")
-        found = series_mod.discover(str(root))
+        found = catalog.discover(root)
     _emit_discovery_warnings(captured)
     return found
 
@@ -241,23 +241,24 @@ def _plain(value: object, style: str | None = None) -> Text:
     return Text(str(value), style=style)
 
 
-def _series_status(series: Any, recommended: Any | None) -> str:
+def _volume_status(candidate: Any, recommended: Any | None) -> str:
     notes: list[str] = []
-    if series is recommended:
+    if candidate is recommended:
         notes.append("default")
-    if series.unusable_reason:
-        notes.append(series.unusable_reason)
+    if candidate.unusable_reason:
+        notes.append(candidate.unusable_reason)
     else:
         notes.append("usable")
-    if series.n_parts > 1:
+    series = candidate.dicom
+    if series is not None and series.n_parts > 1:
         notes.append("orientation %d of %d in this UID" % (series.part, series.n_parts))
-    if series.sharp_kernel:
-        notes.append("sharp kernel %s" % series.kernel)
+    if candidate.sharp_kernel:
+        notes.append("sharp kernel %s" % candidate.kernel)
     return "; ".join(notes)
 
 
-def _series_table(found: list[Any], recommended: Any | None) -> Table:
-    """Build the responsive table used by ``list`` and rendering tests."""
+def _volume_table(found: list[Any], recommended: Any | None) -> Table:
+    """Build the responsive, format-neutral table used by ``list``."""
     table = Table(
         box=box.SIMPLE_HEAVY,
         expand=True,
@@ -265,32 +266,36 @@ def _series_table(found: list[Any], recommended: Any | None) -> Table:
         row_styles=("", "dim"),
     )
     table.add_column("ID", justify="right", no_wrap=True)
-    table.add_column("DICOM #", justify="right", no_wrap=True)
-    table.add_column("Modality", no_wrap=True)
-    table.add_column("Description", ratio=2, overflow="fold")
-    table.add_column("Slices", justify="right", no_wrap=True)
-    table.add_column("Voxel (mm)", no_wrap=True)
-    table.add_column("Plane", no_wrap=True)
-    table.add_column("Status", ratio=3, overflow="fold")
+    table.add_column("Input", ratio=2, overflow="fold")
+    table.add_column("Metadata", ratio=3, overflow="fold")
+    table.add_column("Geometry", ratio=2, overflow="fold")
+    table.add_column("Status", ratio=2, overflow="fold", min_width=16)
 
-    for series in found:
+    for candidate in found:
         voxel = "-"
-        if series.pixel_spacing and series.slice_spacing:
-            voxel = "%.3g × %.3g × %.3g" % (
-                series.pixel_spacing[0],
-                series.pixel_spacing[1],
-                series.slice_spacing,
-            )
-        row_style = "bold cyan" if series is recommended else None
+        if candidate.spacing is not None and len(candidate.spacing) == 3:
+            voxel = "%.3g × %.3g × %.3g" % candidate.spacing
+        row_style = "bold cyan" if candidate is recommended else None
+        input_details = "Format: %s\nSource: %s" % (
+            candidate.format,
+            candidate.source_name or "-",
+        )
+        metadata = "DICOM #: %s\nModality: %s\nDescription: %s" % (
+            candidate.series_number if candidate.series_number is not None else "-",
+            candidate.modality or "-",
+            candidate.description or "-",
+        )
+        geometry = "Slices: %s\nVoxel (mm): %s\nPlane: %s" % (
+            candidate.slices if candidate.slices is not None else "-",
+            voxel,
+            candidate.plane or "-",
+        )
         table.add_row(
-            _plain(series.id),
-            _plain(series.series_number if series.series_number is not None else "-"),
-            _plain(series.modality),
-            _plain(series.description or "(none)"),
-            _plain(series.n_slices),
-            _plain(voxel),
-            _plain(series.plane if series.usable else "-"),
-            _plain(_series_status(series, recommended)),
+            _plain(candidate.id),
+            _plain(input_details),
+            _plain(metadata),
+            _plain(geometry),
+            _plain(_volume_status(candidate, recommended)),
             style=row_style,
         )
     return table
@@ -360,14 +365,14 @@ def _write_json_file(path: Path, payload: object) -> None:
 
 
 @app.command("list")
-def list_series(
-    dicom_dir: Path = typer.Argument(
+def list_volumes(
+    input_path: Path = typer.Argument(
         ...,
         exists=True,
-        file_okay=False,
+        file_okay=True,
         dir_okay=True,
         readable=True,
-        help="Directory tree containing DICOM instances.",
+        help="Volume file or directory tree containing supported volumes.",
     ),
     json_output: bool = typer.Option(
         False,
@@ -375,56 +380,73 @@ def list_series(
         help="Write one plain JSON array to stdout.",
     ),
 ) -> None:
-    """Show every series in a DICOM directory."""
-    with _ProgressDisplay(not json_output, "Discovering DICOM series ..."):
-        found = _discover(dicom_dir)
+    """Show every supported volume under an input path."""
+    with _ProgressDisplay(not json_output, "Discovering volumes ..."):
+        found = _discover(input_path)
     if not found:
-        _error("no DICOM instances found under %s" % dicom_dir)
+        _error("no supported volumes found under %s" % input_path)
         raise typer.Exit(1)
 
+    from . import catalog
+
+    recommended = catalog.recommended(found)
     if json_output:
         payload = [
             {
-                "id": series.id,
-                "uid": series.uid,
-                "part": series.part,
-                "n_parts": series.n_parts,
-                "series_number": series.series_number,
-                "modality": series.modality,
-                "description": series.description,
-                "slices": series.n_slices,
-                "rows": series.rows,
-                "columns": series.columns,
-                "pixel_spacing": list(series.pixel_spacing) if series.pixel_spacing else None,
-                "slice_spacing": series.slice_spacing,
-                "plane": series.plane,
-                "kernel": series.kernel,
-                "sharp_kernel": series.sharp_kernel,
-                "spacing_uniform": series.spacing_uniform,
-                "spacing_spread_mm": series.spacing_spread_mm,
-                "localizer": series.is_localizer,
-                "usable": series.usable,
-                "unusable_reason": series.unusable_reason,
+                "id": candidate.id,
+                "default": candidate is recommended,
+                "format": candidate.format,
+                "source": candidate.source_name,
+                "modality": candidate.modality,
+                "description": candidate.description,
+                "size": list(candidate.size) if candidate.size else None,
+                "spacing": list(candidate.spacing) if candidate.spacing else None,
+                "origin": list(candidate.origin) if candidate.origin else None,
+                "direction": list(candidate.direction) if candidate.direction else None,
+                "pixel_type": candidate.pixel_type,
+                "components": candidate.components,
+                "plane": candidate.plane,
+                "usable": candidate.usable,
+                "unusable_reason": candidate.unusable_reason,
+                "dicom": (
+                    {
+                        "uid": candidate.dicom.uid,
+                        "part": candidate.dicom.part,
+                        "n_parts": candidate.dicom.n_parts,
+                        "series_number": candidate.dicom.series_number,
+                        "kernel": candidate.dicom.kernel,
+                        "sharp_kernel": candidate.dicom.sharp_kernel,
+                        "spacing_uniform": candidate.dicom.spacing_uniform,
+                        "spacing_spread_mm": candidate.dicom.spacing_spread_mm,
+                        "localizer": candidate.dicom.is_localizer,
+                    }
+                    if candidate.dicom is not None
+                    else None
+                ),
             }
-            for series in found
+            for candidate in found
         ]
         print(json.dumps(payload, indent=2))
         return
 
-    from . import series as series_mod
-
-    ranked = series_mod.rank([series for series in found if series.usable])
-    recommended = ranked[0] if ranked else None
-    stdout_console.print(_series_table(found, recommended))
+    stdout_console.print(_volume_table(found, recommended))
     stdout_console.print(
         Text(
             "Row IDs are local to this discovery result; run list again after directory contents change.",
             style="dim",
         )
     )
-    command = Text("Convert the default with:  ")
-    command.append("dicom-surface convert %s -o out.stl" % dicom_dir, style="bold")
-    stdout_console.print(command)
+    if recommended is not None:
+        command = Text("Convert the default with:  ")
+        command.append("medsurface convert %s -o out.stl" % input_path, style="bold")
+        stdout_console.print(command)
+    elif any(candidate.usable for candidate in found):
+        command = Text("Choose a volume with:  ")
+        command.append(
+            "medsurface convert %s --volume ID -o out.stl" % input_path,
+            style="bold",
+        )
+        stdout_console.print(command)
 
 
 @app.command()
@@ -438,7 +460,6 @@ def presets() -> None:
     tissue.add_column("Description", ratio=2, overflow="fold")
     for name in sorted(PRESETS):
         preset = PRESETS[name]
-        modality = ", ".join(preset.modalities) if preset.modalities else "any"
         threshold = preset.threshold if isinstance(preset.threshold, str) else "%g" % preset.threshold
         simplify = "off" if preset.simplify_error_mm == 0 else "%.2f mm" % preset.simplify_error_mm
         processing = "median %.1f mm; closing %.1f mm; smooth %d @ %.2f; simplify %s" % (
@@ -450,7 +471,7 @@ def presets() -> None:
         )
         tissue.add_row(
             _plain(name),
-            _plain(modality),
+            _plain("CT/HU" if preset.threshold_unit == "HU" else "any"),
             _plain(threshold),
             _plain(processing),
             _plain(preset.description),
@@ -459,19 +480,20 @@ def presets() -> None:
 
 @app.command()
 def convert(
-    dicom_dir: Path = typer.Argument(
+    input_path: Path = typer.Argument(
         ...,
         exists=True,
-        file_okay=False,
+        file_okay=True,
         dir_okay=True,
         readable=True,
-        help="Directory tree containing the source DICOM series.",
+        help="Volume file or directory tree containing supported volumes.",
     ),
     output: Path = typer.Option(..., "-o", "--output", help="Output .stl/.ply/.obj file."),
-    series: str | None = typer.Option(
+    volume_id: int | None = typer.Option(
         None,
-        "--series",
-        help="Displayed row ID, complete SeriesInstanceUID, or description substring.",
+        "--volume",
+        min=1,
+        help="Integer volume ID displayed by 'medsurface list'.",
     ),
     preset: PresetChoice = typer.Option(PresetChoice.BONE, "--preset"),
     threshold: str | None = typer.Option(
@@ -504,24 +526,24 @@ def convert(
     json_file: Path | None = typer.Option(None, "--json", help="Write results and provenance to this JSON file."),
     quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
 ) -> None:
-    """Extract a surface mesh from a DICOM series."""
-    threshold_value, auto_threshold = _parse_threshold(threshold)
-    progress = _ProgressDisplay(not quiet, "Discovering DICOM series ...")
+    """Extract a surface mesh from a medical image volume."""
+    threshold_value = _parse_threshold(threshold)
+    progress = _ProgressDisplay(not quiet, "Discovering volumes ...")
     with progress:
-        found = _discover(dicom_dir)
+        found = _discover(input_path)
         if not found:
-            _error("no DICOM instances found under %s" % dicom_dir)
+            _error("no supported volumes found under %s" % input_path)
             raise typer.Exit(1)
 
-        from . import series as series_mod
+        from . import catalog
 
         try:
-            chosen = series_mod.select(found, series)
+            chosen = catalog.select(found, volume_id)
         except ValueError as exc:
             _error(exc)
             raise typer.Exit(2) from None
 
-        progress.log("series ID %d  %s  (%d slices)" % (chosen.id, chosen.label(), chosen.n_slices))
+        progress.log("volume ID %d  %s  %s" % (chosen.id, chosen.format, chosen.source_name))
         resolved_preset = presets_mod.get(preset.value)
         resolved_preset = presets_mod.override(
             resolved_preset,
@@ -537,24 +559,18 @@ def convert(
             keep_largest_island=False if all_islands else None,
             keep_largest_component=False if all_components else None,
         )
-        if auto_threshold:
-            resolved_preset = presets_mod.override(resolved_preset, threshold="auto")
-
         progress.update("Loading conversion engine ...")
         from . import pipeline
 
         try:
             result = pipeline.convert(
-                series=chosen,
+                candidate=chosen,
                 preset=resolved_preset,
                 output_path=str(output),
                 threshold=threshold_value,
                 cap_field_of_view=not no_cap,
                 log=progress.log,
             )
-        except pipeline.ModalityMismatch as exc:
-            _error(exc)
-            raise typer.Exit(2) from None
         except ValueError as exc:
             _error(exc)
             raise typer.Exit(1) from None
@@ -600,38 +616,45 @@ def convert(
 
 @app.command()
 def merge(
-    dicom_dir_a: Path = typer.Argument(
+    fixed_input: Path = typer.Argument(
         ...,
         exists=True,
-        file_okay=False,
+        file_okay=True,
         dir_okay=True,
         readable=True,
-        help="Fixed scan; defines the output coordinate frame.",
+        help="Fixed volume file or directory; defines the output coordinate frame.",
     ),
     output: Path = typer.Option(..., "-o", "--output", help="Output .stl/.ply/.obj file."),
-    dicom_dir_b: Path | None = typer.Argument(
-        None,
+    moving_input: Path = typer.Argument(
+        ...,
         exists=True,
-        file_okay=False,
+        file_okay=True,
         dir_okay=True,
         readable=True,
-        help="Moving scan; omit to choose two series from the first directory.",
+        help="Moving volume file or directory.",
     ),
-    series_a: str | None = typer.Option(
+    fixed_volume: int | None = typer.Option(
         None,
-        "--series-a",
-        help="Fixed scan row ID, complete UID, or description substring.",
+        "--fixed-volume",
+        min=1,
+        help="Integer fixed-volume ID displayed by 'medsurface list'.",
     ),
-    series_b: str | None = typer.Option(
+    moving_volume: int | None = typer.Option(
         None,
-        "--series-b",
-        help="Moving scan row ID, complete UID, or description substring.",
+        "--moving-volume",
+        min=1,
+        help="Integer moving-volume ID displayed by 'medsurface list'.",
     ),
     preset: PresetChoice = typer.Option(PresetChoice.BONE, "--preset"),
-    threshold: str | None = typer.Option(
+    fixed_threshold: str | None = typer.Option(
         None,
-        "--threshold",
-        help="Intensity (HU for CT) or 'auto'; applies to both scans.",
+        "--fixed-threshold",
+        help="Fixed stored intensity or 'auto' for Otsu.",
+    ),
+    moving_threshold: str | None = typer.Option(
+        None,
+        "--moving-threshold",
+        help="Moving stored intensity or 'auto' for Otsu.",
     ),
     median_mm: float | None = typer.Option(None, "--median-mm"),
     closing_mm: float | None = typer.Option(None, "--closing-mm"),
@@ -654,31 +677,31 @@ def merge(
     force: bool = typer.Option(
         False,
         "--force",
-        help="Override patient, modality, and registration gates.",
+        help="Override registration-quality gates.",
     ),
     json_file: Path | None = typer.Option(None, "--json", help="Write results and provenance to this JSON file."),
     quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
 ) -> None:
     """Register two scans of the same anatomy and fuse their surfaces."""
-    threshold_value, auto_threshold = _parse_threshold(threshold)
-    directory_b = dicom_dir_b or dicom_dir_a
-    progress = _ProgressDisplay(not quiet, "Discovering fixed DICOM series ...")
+    fixed_threshold_value = _parse_threshold(fixed_threshold, "--fixed-threshold")
+    moving_threshold_value = _parse_threshold(moving_threshold, "--moving-threshold")
+    progress = _ProgressDisplay(not quiet, "Discovering fixed volumes ...")
     with progress:
-        found_a = _discover(dicom_dir_a)
-        if directory_b == dicom_dir_a:
-            found_b = found_a
+        fixed_found = _discover(fixed_input)
+        if fixed_input.resolve() == moving_input.resolve():
+            moving_found = fixed_found
         else:
-            progress.update("Discovering moving DICOM series ...")
-            found_b = _discover(directory_b)
-        if not found_a or not found_b:
-            _error("no DICOM instances found")
+            progress.update("Discovering moving volumes ...")
+            moving_found = _discover(moving_input)
+        if not fixed_found or not moving_found:
+            _error("no supported volumes found for one or both inputs")
             raise typer.Exit(1)
 
-        from . import series as series_mod
+        from . import catalog
 
         try:
-            chosen_a = series_mod.select(found_a, series_a)
-            chosen_b = series_mod.select(found_b, series_b)
+            fixed_candidate = catalog.select(fixed_found, fixed_volume)
+            moving_candidate = catalog.select(moving_found, moving_volume)
         except ValueError as exc:
             _error(exc)
             raise typer.Exit(2) from None
@@ -690,19 +713,17 @@ def merge(
             closing_mm=closing_mm,
             min_island_mm3=min_island_mm3,
         )
-        if auto_threshold:
-            resolved_preset = presets_mod.override(resolved_preset, threshold="auto")
-
         progress.update("Loading merge engine ...")
-        from . import merge as merge_mod, pipeline
+        from . import merge as merge_mod
 
         try:
             result = merge_mod.merge(
-                series_a=chosen_a,
-                series_b=chosen_b,
+                fixed=fixed_candidate,
+                moving=moving_candidate,
                 preset=resolved_preset,
                 output_path=str(output),
-                threshold=threshold_value,
+                fixed_threshold=fixed_threshold_value,
+                moving_threshold=moving_threshold_value,
                 grid_mm=grid_mm,
                 smooth_iters=smooth_iters,
                 smooth_force=smooth_force,
@@ -714,7 +735,7 @@ def merge(
         except merge_mod.MergeError as exc:
             _error(exc)
             raise typer.Exit(3) from None
-        except (pipeline.ModalityMismatch, ValueError) as exc:
+        except ValueError as exc:
             _error(exc)
             raise typer.Exit(2) from None
 
@@ -729,8 +750,8 @@ def merge(
                     "bounds_mm": list(result.bounds_mm),
                     "grid_mm": result.grid_mm,
                     "grid_size": list(result.grid_size),
-                    "volume_fixed_mm3": result.volume_a_mm3,
-                    "volume_moving_mm3": result.volume_b_mm3,
+                    "volume_fixed_mm3": result.volume_fixed_mm3,
+                    "volume_moving_mm3": result.volume_moving_mm3,
                     "volume_fused_mm3": result.volume_union_mm3,
                     "seconds": result.seconds,
                     "warnings": result.warnings,

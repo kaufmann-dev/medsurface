@@ -1,9 +1,8 @@
 """Rigid registration of two scans of the same anatomy.
 
-This implementation does not inspect ``FrameOfReferenceUID`` or assume that two
-series already align. DICOM patient coordinates are patient-oriented (LPS), but
-origin, pose, and head tilt can differ between acquisitions, so ``merge`` always
-registers the moving scan.
+Inputs are interpreted in their physical coordinate systems. This implementation
+does not assume that two volumes already align; origin, pose, and head tilt can
+differ between acquisitions, so ``merge`` always registers the moving scan.
 
 The search is global-then-local:
 
@@ -186,7 +185,7 @@ def _icp_point_to_plane(src, tgt, tgt_normals, tgt_tree, transform,
 
 
 def surface_points(mask: sitk.Image, smooth_iters: int = 10):
-    """Vertices and vertex normals of a mask's surface, in patient coordinates."""
+    """Vertices and vertex normals of a mask's surface, in physical coordinates."""
     padded = segment.pad(mask, 1)
     poly = surface.marching_cubes(padded, 0.5)
     if poly.topology.numValidFaces() == 0:

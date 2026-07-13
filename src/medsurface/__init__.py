@@ -1,4 +1,4 @@
-"""dicom-surface: turn a DICOM series into a watertight 3D surface mesh."""
+"""Turn medical image volumes into watertight 3D surface meshes."""
 
 from .presets import PRESETS, Preset  # noqa: F401
 

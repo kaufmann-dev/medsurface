@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "dicom-surface"
+name = "medsurface"
 version = "0.1.0"
-description = "Turn a DICOM series into a watertight 3D surface mesh"
+description = "Turn medical image volumes into watertight 3D surface meshes"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -35,14 +35,14 @@ dependencies = [
 dev = ["pytest>=7.0"]
 
 [project.scripts]
-dicom-surface = "dicom_surface.cli:app"
+medsurface = "medsurface.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/kaufmann-dev/dicom-surface"
-Issues = "https://github.com/kaufmann-dev/dicom-surface/issues"
+Homepage = "https://github.com/kaufmann-dev/medsurface"
+Issues = "https://github.com/kaufmann-dev/medsurface/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/dicom_surface"]
+packages = ["src/medsurface"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
