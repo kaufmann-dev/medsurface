@@ -376,7 +376,7 @@ def _volume_status(candidate: Any, recommended: Any | None) -> str:
     if series is not None and series.n_parts > 1:
         notes.append("orientation %d of %d in this UID" % (series.part, series.n_parts))
     if candidate.sharp_kernel:
-        notes.append("sharp kernel %s" % series.kernel_display)
+        notes.append("sharp kernel")
     return "; ".join(notes)
 
 
@@ -403,10 +403,13 @@ def _volume_table(found: list[Any], recommended: Any | None) -> Table:
             candidate.format,
             candidate.source_name or "-",
         )
-        metadata = "DICOM #: %s\nModality: %s\nDescription: %s" % (
+        series = candidate.dicom
+        kernel = series.kernel_display if series is not None and series.kernel_values else "-"
+        metadata = "DICOM #: %s\nModality: %s\nDescription: %s\nKernel: %s" % (
             candidate.series_number if candidate.series_number is not None else "-",
             candidate.modality or "-",
             candidate.description or "-",
+            kernel,
         )
         geometry = "Slices: %s\nVoxel (mm): %s\nPlane: %s" % (
             candidate.slices if candidate.slices is not None else "-",

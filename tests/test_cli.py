@@ -504,9 +504,15 @@ def test_list_human_output_shows_discovery_progress(tmp_path, monkeypatch):
     assert "Discovering volumes ..." in result.stdout
     assert "DICOM #" in result.stdout
     assert "axial" in result.stdout
-    assert cli._volume_status(candidate, candidate) == (
-        "default; usable; sharp kernel Hr68f, 1"
-    )
+    assert cli._volume_status(candidate, candidate) == "default; usable; sharp kernel"
+
+    stream = io.StringIO()
+    console = Console(file=stream, width=160, color_system=None, force_terminal=False)
+    console.print(cli._volume_table([candidate], candidate))
+    rendered = stream.getvalue()
+    assert "Kernel: Hr68f, 1" in rendered
+    assert "default; usable; sharp kernel" in rendered
+    assert "sharp kernel Hr68f, 1" not in rendered
 
 
 def test_list_command_hint_is_shell_quoted_without_hard_wrapping(tmp_path, monkeypatch):
@@ -549,6 +555,7 @@ def test_list_file_volume_uses_dash_for_missing_metadata():
     assert "DICOM #: -" in rendered
     assert "Modality: -" in rendered
     assert "Description: -" in rendered
+    assert "Kernel: -" in rendered
     assert "Plane: axial" in rendered
 
 
