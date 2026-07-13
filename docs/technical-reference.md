@@ -1,7 +1,7 @@
 # Technical reference
 
 This document describes implementation details and limitations that are useful
-for auditing results or contributing to `dicom-surface`. Start with the project
+for auditing results or contributing to `medsurface`. Start with the project
 [README](../README.md) for installation and first use, or the [user
 guide](user-guide.md) for presets, input limitations, and safety.
 
@@ -17,12 +17,12 @@ The CLI module imports only Typer, Rich, defaults, and preset registries while
 constructing commands. MeshLib, registration, validation, and processing
 modules are imported inside the command that needs them. Root help, command
 help, and malformed invocations therefore finish without loading the processing
-pipeline. Expected selection, modality, file, and safety failures are concise;
+pipeline. Expected selection, volume, file, and safety failures are concise;
 unexpected programming exceptions remain visible, with traceback locals
 hidden.
 
 Human output uses shared Rich stdout and stderr consoles with terminal color
-detection. Series, preset, and quality results use responsive
+detection. Volume, preset, and quality results use responsive
 tables. Dynamic paths, UIDs, descriptions, and error text are treated as plain
 text rather than Rich markup. Long operations announce a stage before they
 begin. Interactive terminals show an indeterminate spinner, current stage, and
@@ -41,37 +41,71 @@ Warnings raised by pydicom during discovery are captured, deduplicated with
 their occurrence counts preserved, and rendered concisely on stderr without
 Python source locations.
 
-## Series discovery and selection
+## Volume discovery and selection
 
-Discovery sorts stacks by DICOM `SeriesNumber`, complete SeriesInstanceUID, and
-orientation part, then assigns unique 1-based row IDs. Those IDs are stable for
-unchanged directory contents but intentionally local to one discovery result.
-They are not written into processing provenance. Provenance uses the complete
-UID, DICOM SeriesNumber, and orientation-part metadata instead.
+One format-neutral catalog is built for every input. A direct supported file
+contributes one candidate. A directory is walked recursively; classic DICOM
+instances are grouped into physical stacks and supported NIfTI, NRRD, and
+MetaImage headers each contribute a file candidate. The combined candidates are
+sorted deterministically and assigned one set of unique 1-based IDs. IDs are
+stable for unchanged contents but intentionally local to one discovery result.
 
-`--series`, `--series-a`, and `--series-b` resolve a displayed row ID, a complete
-SeriesInstanceUID, or a case-insensitive description substring. DICOM
-`SeriesNumber` is not a selector because it need not be unique. When a UID or
-description matches several orientation stacks, selection fails with the row
-IDs that disambiguate it.
+The common catalog record carries format, source, modality, description, size,
+spacing, direction, origin, pixel type, component count, plane, and usability.
+DICOM adds its UID, orientation part, SeriesNumber, convolution kernel, and
+spacing diagnostics. Direction matrices provide plane metadata for file inputs;
+missing human-readable metadata remains absent in JSON and is rendered as `-`
+in the human table.
+
+Only the displayed integer ID is accepted by `--volume`, `--fixed-volume`, and
+`--moving-volume`. UIDs, SeriesNumber values, descriptions, and paths are not
+selectors. Provenance records the chosen catalog ID plus stable source metadata.
+
+Selection without an ID follows three rules: one usable candidate is automatic;
+multiple usable DICOM candidates retain the DICOM ranking; every other
+multi-volume catalog requires an explicit ID. `merge` builds or reuses a catalog
+for each positional input and applies those rules independently, so two DICOM-only
+directories still automatically choose their best stacks.
 
 ## Processing pipeline
 
 `convert` performs these stages:
 
-1. Discover DICOM instances, group them by series UID and orientation, and
-   assign deterministic row IDs after sorting.
-2. Order slices by `ImagePositionPatient` projected onto the slice normal.
-3. Load the ordered stack with SimpleITK and resolve the intensity threshold.
+1. Build the volume catalog and resolve the selected candidate.
+2. For DICOM, order slices by `ImagePositionPatient` projected onto the slice
+   normal; for a file volume, use its stored image geometry.
+3. Load the selected candidate with SimpleITK and resolve the intensity threshold.
 4. Apply island filtering, median filtering, optional opening, and closing.
 5. Pad field-of-view boundaries, extract the 0.5 isosurface with MeshLib marching
    cubes, smooth, select surface components, and optionally simplify.
-6. Transform vertices into DICOM patient LPS coordinates; validate the mesh in
-   memory, write and validate a temporary file, then atomically publish it.
+6. Transform vertices into the input's SimpleITK physical coordinates; validate
+   the mesh in memory, write and validate a temporary file, then atomically
+   publish it.
 
 The output is normally a closed surface because the mask is padded with
 background before extraction. When anatomy touches the scan boundary, the cap is
 flat and a warning explains that missing anatomy was not recovered.
+
+## File-volume compatibility
+
+SimpleITK reads image headers during discovery and pixel data only after
+selection. File candidates must be scalar, real-valued 3-D images with at least
+two voxels per axis, finite origin/direction values, finite positive spacing,
+and a nonsingular 3×3 direction matrix.
+
+| format    | extensions        | storage form                                     | behavior                                           |
+| --------- | ----------------- | ------------------------------------------------ | -------------------------------------------------- |
+| NIfTI     | `.nii`, `.nii.gz` | Single file                                      | Supported                                          |
+| NRRD      | `.nrrd`           | Usually header and pixels in one file            | Supported                                          |
+| NRRD      | `.nhdr`           | Header references a separate payload             | Supported when the referenced payload is available |
+| MetaImage | `.mha`            | Header and pixels in one file                    | Supported                                          |
+| MetaImage | `.mhd`            | Header references a separate payload             | Supported when the referenced payload is available |
+| HDF5      | `.h5`, `.hdf5`    | Application-defined datasets and metadata        | Not accepted                                       |
+| Raw       | `.raw`, `.bin`    | Headerless bytes without reliable image geometry | Not accepted as an independent volume              |
+
+NRRD and MetaImage metadata keys for modality or description are surfaced when
+their readers preserve them. NIfTI metadata support depends on the fields
+exposed by SimpleITK. Plane is derived from geometry rather than a text label.
 
 ## DICOM compatibility
 
@@ -171,24 +205,21 @@ correspondence limit and up to 80 iterations per pass.
 Point-to-plane RMS and median are reported but not gated. The thresholds were
 selected on a small exploratory development set, not clinically calibrated.
 
-## Patient comparison
+## Merge identity contract
 
-`merge` reads `PatientID`, `IssuerOfPatientID`, `PatientName`,
-`PatientBirthDate`, and `PatientSex` from the first instance of each series.
+All input formats follow the same rule: `merge` does not inspect patient fields,
+does not compare modalities, and cannot establish subject identity. Every merge
+warns that the operator must confirm both volumes show the same subject. This
+avoids a DICOM-only trust signal that file formats cannot provide and that could
+never prove identity reliably.
 
-- A present name, birth-date, or sex conflict refuses the merge.
-- Matching IDs corroborate identity unless both issuers are present and differ.
-- A matching normalized name corroborates identity when birth dates match or
-  are not both present.
-- Differing IDs without earlier corroboration refuse the merge.
-- Missing or unverifiable identity warns and proceeds.
+The same underlying file or DICOM UID/orientation part cannot be selected for
+both roles. `--force` overrides only failed registration-quality gates. It does
+not override duplicate selection, catalog selection, loading errors, or an
+excessive fused grid.
 
-`--force` overrides modality mismatch, a different-patient verdict, and failed
-registration gates. It does not override selecting the same series twice,
-loading errors, or an excessive fused grid.
-
-Patient-field values are not logged or stored in provenance. Series UIDs,
-descriptions, paths, and derived anatomy can still be identifying.
+DICOM UIDs, descriptions, file paths, and derived anatomy can remain identifying
+even though discovery does not read patient identifiers.
 
 ## Validation and repair
 

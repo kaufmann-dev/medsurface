@@ -6,7 +6,7 @@ import os
 import pytest
 from typer.testing import CliRunner
 
-from dicom_surface import cli, repair, validate
+from medsurface import cli, repair, validate
 from tests.mesh_helpers import box, write
 
 
@@ -69,7 +69,7 @@ def test_repair_json_mode_writes_only_json(tmp_path):
     result = CliRunner().invoke(
         cli.app,
         ["repair", str(source), "-o", str(output), "--json"],
-        prog_name="dicom-surface",
+        prog_name="medsurface",
     )
     assert result.exit_code == 0
     payload = json.loads(result.stdout)

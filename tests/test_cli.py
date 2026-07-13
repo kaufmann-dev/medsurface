@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import pty
 import select
-import time
-import json
-import os
 import subprocess
 import sys
+import time
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,8 +18,9 @@ import pytest
 from rich.console import Console
 from typer.testing import CliRunner
 
-from dicom_surface import cli
-from dicom_surface.series import Series
+from medsurface import cli
+from medsurface.catalog import DicomSource, FileSource, VolumeCandidate
+from medsurface.series import Series
 
 
 runner = CliRunner()
@@ -53,6 +53,26 @@ def _series(
     value.slice_spacing = 1.0
     value.normal = (0.0, 0.0, 1.0)
     return value
+
+
+def _candidate(**kwargs) -> VolumeCandidate:
+    series = _series(**kwargs)
+    return VolumeCandidate(
+        id=series.id,
+        source=DicomSource(Path("scans"), series),
+        format="DICOM",
+        source_name="scans",
+        modality=series.modality,
+        description=series.description,
+        size=(512, 512, series.n_slices),
+        spacing=(0.5, 0.5, 1.0),
+        direction=None,
+        origin=None,
+        pixel_type=None,
+        components=1,
+        plane=series.plane,
+        unusable_reason=series.unusable_reason,
+    )
 
 
 def _quality(*, valid: bool = True) -> dict:
@@ -93,7 +113,7 @@ def _convert_result(output: str, *, warnings_: list[str] | None = None, quality:
         labelmap_components=2,
         surface_components=1,
         warnings=warnings_ or [],
-        provenance={"series_uid": "1.2.3"},
+        provenance={"input": {"format": "DICOM"}},
         quality=_quality() if quality is None else quality,
     )
 
@@ -106,12 +126,12 @@ def _merge_result(output: str, *, warnings_: list[str] | None = None, quality: d
         bounds_mm=(0.0, 1.0, 0.0, 2.0, 0.0, 3.0),
         grid_mm=0.8,
         grid_size=(10, 20, 30),
-        volume_a_mm3=100.0,
-        volume_b_mm3=110.0,
+        volume_fixed_mm3=100.0,
+        volume_moving_mm3=110.0,
         volume_union_mm3=150.0,
         seconds=2.5,
         warnings=warnings_ or [],
-        provenance={"fixed": {"uid": "1.2.3"}, "moving": {"uid": "1.2.4"}},
+        provenance={"fixed": {"format": "DICOM"}, "moving": {"format": "DICOM"}},
         quality=_quality() if quality is None else quality,
     )
 
@@ -121,22 +141,22 @@ def _run_cli_in_clean_interpreter(argv):
 import json
 import sys
 from typer.testing import CliRunner
-from dicom_surface import cli
+from medsurface import cli
 
 heavy_modules = {
-    "dicom_surface.merge",
-    "dicom_surface.pipeline",
-    "dicom_surface.registration",
-    "dicom_surface.repair",
-    "dicom_surface.surface",
-    "dicom_surface.validate",
+    "medsurface.merge",
+    "medsurface.pipeline",
+    "medsurface.registration",
+    "medsurface.repair",
+    "medsurface.surface",
+    "medsurface.validate",
     "meshlib",
 }
 assert heavy_modules.isdisjoint(sys.modules)
 result = CliRunner().invoke(
     cli.app,
     json.loads(sys.argv[1]),
-    prog_name="dicom-surface",
+    prog_name="medsurface",
 )
 assert heavy_modules.isdisjoint(sys.modules)
 sys.stdout.write(result.stdout)
@@ -158,7 +178,7 @@ def test_root_command_without_arguments_is_lightweight_help():
     assert result.returncode == 0
     assert result.stderr == ""
     assert "\x1b" not in result.stdout
-    assert "Usage: dicom-surface [OPTIONS] [COMMAND]" in result.stdout
+    assert "Usage: medsurface [OPTIONS] [COMMAND]" in result.stdout
     for command in ("list", "presets", "convert", "merge", "validate", "repair"):
         assert command in result.stdout
 
@@ -179,7 +199,7 @@ def test_every_help_surface_is_lightweight(argv):
     result = _run_cli_in_clean_interpreter(argv)
 
     assert result.returncode == 0
-    assert "Usage: dicom-surface" in result.stdout
+    assert "Usage: medsurface" in result.stdout
     assert result.stderr == ""
     assert "\x1b" not in result.stdout
     assert "Traceback" not in result.stdout
@@ -203,7 +223,7 @@ def test_malformed_invocations_fail_before_heavy_imports(argv):
 
     assert result.returncode == 2
     assert result.stdout == ""
-    assert result.stderr.startswith("Usage: dicom-surface")
+    assert result.stderr.startswith("Usage: medsurface")
     assert "\x1b" not in result.stderr
     assert "Error" in result.stderr
     assert "Traceback" not in result.stderr
@@ -211,7 +231,7 @@ def test_malformed_invocations_fail_before_heavy_imports(argv):
 
 def test_python_module_uses_public_program_name():
     result = subprocess.run(
-        [sys.executable, "-m", "dicom_surface", "--help"],
+        [sys.executable, "-m", "medsurface", "--help"],
         capture_output=True,
         text=True,
         check=False,
@@ -219,7 +239,7 @@ def test_python_module_uses_public_program_name():
     )
 
     assert result.returncode == 0
-    assert "Usage: dicom-surface" in result.stdout
+    assert "Usage: medsurface" in result.stdout
     assert "\x1b" not in result.stdout
 
 
@@ -231,7 +251,7 @@ def test_removed_bone_detail_preset_is_rejected(tmp_path):
     result = runner.invoke(
         cli.app,
         ["convert", str(tmp_path), "-o", "out.stl", "--preset", "bone-detail"],
-        prog_name="dicom-surface",
+        prog_name="medsurface",
     )
 
     assert result.exit_code == 2
@@ -331,7 +351,7 @@ def test_interactive_progress_renderer_runs_in_an_independent_process():
     ],
 )
 def test_removed_self_intersection_flag_is_a_usage_error(argv):
-    result = runner.invoke(cli.app, argv, prog_name="dicom-surface")
+    result = runner.invoke(cli.app, argv, prog_name="medsurface")
 
     assert result.exit_code == 2
     assert "No such option" in result.stderr
@@ -342,13 +362,13 @@ def test_removed_self_intersection_flag_is_a_usage_error(argv):
     [
         ("list", ["list", "missing"]),
         ("convert", ["convert", "missing", "-o", "out.stl"]),
-        ("merge", ["merge", "missing", "-o", "out.stl"]),
+        ("merge", ["merge", "missing", "also-missing", "-o", "out.stl"]),
         ("validate", ["validate", "missing.stl"]),
         ("repair", ["repair", "missing.stl", "-o", "fixed.stl"]),
     ],
 )
 def test_required_inputs_use_typer_path_validation(command, argv):
-    result = runner.invoke(cli.app, argv, prog_name="dicom-surface")
+    result = runner.invoke(cli.app, argv, prog_name="medsurface")
 
     assert result.exit_code == 2
     assert "does not exist" in result.stderr
@@ -356,17 +376,19 @@ def test_required_inputs_use_typer_path_validation(command, argv):
 
 
 def test_list_json_uses_unique_id_and_plain_stdout(tmp_path, monkeypatch):
-    found = [_series(description="[bold red]literal[/bold red]")]
+    found = [_candidate(description="[bold red]literal[/bold red]")]
     monkeypatch.setattr(cli, "_discover", lambda _root: found)
 
-    result = runner.invoke(cli.app, ["list", str(tmp_path), "--json"], prog_name="dicom-surface")
+    result = runner.invoke(cli.app, ["list", str(tmp_path), "--json"], prog_name="medsurface")
 
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload[0]["id"] == 1
-    assert payload[0]["series_number"] == 6
-    assert payload[0]["part"] == 1
-    assert payload[0]["n_parts"] == 1
+    assert payload[0]["default"] is True
+    assert payload[0]["format"] == "DICOM"
+    assert payload[0]["dicom"]["series_number"] == 6
+    assert payload[0]["dicom"]["part"] == 1
+    assert payload[0]["dicom"]["n_parts"] == 1
     assert payload[0]["description"] == "[bold red]literal[/bold red]"
     assert "ident" not in payload[0]
     assert "\x1b" not in result.stdout
@@ -374,26 +396,56 @@ def test_list_json_uses_unique_id_and_plain_stdout(tmp_path, monkeypatch):
 
 
 def test_list_human_output_shows_discovery_progress(tmp_path, monkeypatch):
-    monkeypatch.setattr(cli, "_discover", lambda _root: [_series()])
+    monkeypatch.setattr(cli, "_discover", lambda _root: [_candidate()])
 
-    result = runner.invoke(cli.app, ["list", str(tmp_path)], prog_name="dicom-surface")
+    result = runner.invoke(cli.app, ["list", str(tmp_path)], prog_name="medsurface")
 
     assert result.exit_code == 0
-    assert "Discovering DICOM series ..." in result.stdout
+    assert "Discovering volumes ..." in result.stdout
     assert "DICOM #" in result.stdout
+    assert "axial" in result.stdout
+
+
+def test_list_file_volume_uses_dash_for_missing_metadata():
+    candidate = VolumeCandidate(
+        id=1,
+        source=FileSource(Path("scan.nii.gz"), "NIfTI"),
+        format="NIfTI",
+        source_name="scan.nii.gz",
+        modality=None,
+        description=None,
+        size=(10, 20, 30),
+        spacing=(0.5, 0.5, 1.0),
+        direction=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+        origin=(0.0, 0.0, 0.0),
+        pixel_type="16-bit signed integer",
+        components=1,
+        plane="axial",
+    )
+    stream = io.StringIO()
+    console = Console(file=stream, width=160, color_system=None, force_terminal=False)
+
+    console.print(cli._volume_table([candidate], candidate))
+
+    rendered = stream.getvalue()
+    assert "Format: NIfTI" in rendered
+    assert "DICOM #: -" in rendered
+    assert "Modality: -" in rendered
+    assert "Description: -" in rendered
+    assert "Plane: axial" in rendered
 
 
 def test_discovery_warnings_are_deduplicated_and_do_not_corrupt_json(tmp_path, monkeypatch):
-    from dicom_surface import series as series_mod
+    from medsurface import catalog
 
     def fake_discover(_root):
         for _ in range(3):
             warnings.warn("Invalid value for VR UI: broken UID", UserWarning)
         warnings.warn("Invalid value for VR DS: broken spacing", UserWarning)
-        return [_series()]
+        return [_candidate()]
 
-    monkeypatch.setattr(series_mod, "discover", fake_discover)
-    result = runner.invoke(cli.app, ["list", str(tmp_path), "--json"], prog_name="dicom-surface")
+    monkeypatch.setattr(catalog, "discover", fake_discover)
+    result = runner.invoke(cli.app, ["list", str(tmp_path), "--json"], prog_name="medsurface")
 
     assert result.exit_code == 0
     assert json.loads(result.stdout)[0]["id"] == 1
@@ -405,28 +457,28 @@ def test_discovery_warnings_are_deduplicated_and_do_not_corrupt_json(tmp_path, m
 
 
 def test_series_table_is_responsive_safe_and_ansi_free():
-    recommended = _series(
+    recommended = _candidate(
         row_id=1,
         description="[bold]recommended acquisition with a deliberately long description[/bold]",
     )
-    dose = _series(
+    dose = _candidate(
         row_id=2,
         uid="1.2.4",
         number=6,
         modality="RTDOSE",
         description="radiotherapy dose object with another long description",
     )
-    dose.files = ["one"]
-    plan = _series(
+    dose.unusable_reason = "not an image series"
+    plan = _candidate(
         row_id=3,
         uid="1.2.5",
         number=17,
         modality="RTPLAN",
         description="plan notes",
     )
-    plan.files = ["one"]
-    plan.n_parts = 2
-    plan.part = 2
+    assert plan.dicom is not None
+    plan.dicom.n_parts = 2
+    plan.dicom.part = 2
 
     for width in (160, 84):
         stream = io.StringIO()
@@ -438,7 +490,7 @@ def test_series_table_is_responsive_safe_and_ansi_free():
             highlight=False,
             markup=False,
         )
-        console.print(cli._series_table([recommended, dose, plan], recommended))
+        console.print(cli._volume_table([recommended, dose, plan], recommended))
         rendered = stream.getvalue()
         normalized = " ".join(rendered.split())
 
@@ -448,7 +500,8 @@ def test_series_table_is_responsive_safe_and_ansi_free():
         assert "RTPLAN" in rendered
         assert "default" in normalized
         assert "not an" in normalized
-        assert "image series" in normalized
+        assert "image" in normalized
+        assert "series" in normalized
         assert "orientation" in normalized
         assert "[bold]" in normalized
         assert "\x1b" not in rendered
@@ -456,7 +509,7 @@ def test_series_table_is_responsive_safe_and_ansi_free():
 
 
 def test_presets_renders_tissue_table_without_ansi():
-    result = runner.invoke(cli.app, ["presets"], prog_name="dicom-surface")
+    result = runner.invoke(cli.app, ["presets"], prog_name="medsurface")
 
     assert result.exit_code == 0
     assert "Tissue presets (--preset)" in result.stdout
@@ -465,13 +518,13 @@ def test_presets_renders_tissue_table_without_ansi():
 
 
 def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
-    chosen = _series()
+    chosen = _candidate()
     captured = {}
     output = tmp_path / "surface.stl"
     json_file = tmp_path / "result.json"
     monkeypatch.setattr(cli, "_discover", lambda _root: [chosen])
 
-    from dicom_surface import pipeline
+    from medsurface import pipeline
 
     def fake_convert(**kwargs):
         captured.update(kwargs)
@@ -485,7 +538,7 @@ def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
             str(tmp_path),
             "-o",
             str(output),
-            "--series",
+            "--volume",
             "1",
             "--preset",
             "skin",
@@ -516,21 +569,21 @@ def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
             str(json_file),
             "-q",
         ],
-        prog_name="dicom-surface",
+        prog_name="medsurface",
     )
 
     assert result.exit_code == 0, result.output
     assert result.stdout == ""
     assert result.stderr == ""
-    assert captured["series"] is chosen
+    assert captured["candidate"] is chosen
     assert captured["preset"].name == "skin"
-    assert captured["preset"].threshold == "auto"
+    assert captured["preset"].threshold == pytest.approx(-300.0)
     assert captured["preset"].median_mm == pytest.approx(1.1)
     assert captured["preset"].opening_mm == pytest.approx(3.3)
     assert captured["preset"].simplify_error_mm == pytest.approx(0.18)
     assert not captured["preset"].keep_largest_island
     assert not captured["preset"].keep_largest_component
-    assert captured["threshold"] is None
+    assert captured["threshold"] == "auto"
     assert not captured["cap_field_of_view"]
     payload = json.loads(json_file.read_text())
     assert payload["result"]["output"] == str(output)
@@ -538,12 +591,12 @@ def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
 
 
 def test_convert_defaults_quality_output_and_invalid_exit(tmp_path, monkeypatch):
-    chosen = _series()
+    chosen = _candidate()
     captured = {}
     output = tmp_path / "surface.stl"
     monkeypatch.setattr(cli, "_discover", lambda _root: [chosen])
 
-    from dicom_surface import pipeline
+    from medsurface import pipeline
 
     def fake_convert(**kwargs):
         captured.update(kwargs)
@@ -553,7 +606,7 @@ def test_convert_defaults_quality_output_and_invalid_exit(tmp_path, monkeypatch)
     result = runner.invoke(
         cli.app,
         ["convert", str(tmp_path), "-o", str(output)],
-        prog_name="dicom-surface",
+        prog_name="medsurface",
     )
 
     assert result.exit_code == 1
@@ -567,6 +620,34 @@ def test_convert_defaults_quality_output_and_invalid_exit(tmp_path, monkeypatch)
     assert "failed validation" in result.stderr
 
 
+def test_convert_without_selector_keeps_dicom_best_stack_selection(tmp_path, monkeypatch):
+    coarse = _candidate(row_id=1, uid="1.2.3", description="coarse")
+    fine = _candidate(row_id=2, uid="1.2.4", description="fine")
+    assert coarse.dicom is not None and fine.dicom is not None
+    coarse.dicom.pixel_spacing = (1.0, 1.0)
+    coarse.dicom.slice_spacing = 2.0
+    fine.dicom.pixel_spacing = (0.4, 0.4)
+    fine.dicom.slice_spacing = 0.8
+    monkeypatch.setattr(cli, "_discover", lambda _root: [coarse, fine])
+
+    captured = {}
+    from medsurface import pipeline
+
+    def fake_convert(**kwargs):
+        captured.update(kwargs)
+        return _convert_result("out.stl")
+
+    monkeypatch.setattr(pipeline, "convert", fake_convert)
+    result = runner.invoke(
+        cli.app,
+        ["convert", str(tmp_path), "-o", "out.stl", "-q"],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["candidate"] is fine
+
+
 def test_invalid_threshold_is_exit_two_before_discovery(tmp_path, monkeypatch):
     monkeypatch.setattr(
         cli,
@@ -576,7 +657,7 @@ def test_invalid_threshold_is_exit_two_before_discovery(tmp_path, monkeypatch):
     result = runner.invoke(
         cli.app,
         ["convert", str(tmp_path), "-o", "out.stl", "--threshold", "wat"],
-        prog_name="dicom-surface",
+        prog_name="medsurface",
     )
 
     assert result.exit_code == 2
@@ -585,22 +666,22 @@ def test_invalid_threshold_is_exit_two_before_discovery(tmp_path, monkeypatch):
 
 
 def test_selection_error_is_exit_two(tmp_path, monkeypatch):
-    monkeypatch.setattr(cli, "_discover", lambda _root: [_series()])
+    monkeypatch.setattr(cli, "_discover", lambda _root: [_candidate()])
     result = runner.invoke(
         cli.app,
-        ["convert", str(tmp_path), "-o", "out.stl", "--series", "99"],
-        prog_name="dicom-surface",
+        ["convert", str(tmp_path), "-o", "out.stl", "--volume", "99"],
+        prog_name="medsurface",
     )
 
     assert result.exit_code == 2
-    assert "no series matches" in result.stderr
+    assert "no volume has ID" in result.stderr
 
 
 def test_quiet_suppresses_progress_but_not_warnings(tmp_path, monkeypatch):
-    chosen = _series()
+    chosen = _candidate()
     monkeypatch.setattr(cli, "_discover", lambda _root: [chosen])
 
-    from dicom_surface import pipeline
+    from medsurface import pipeline
 
     monkeypatch.setattr(
         pipeline,
@@ -610,7 +691,7 @@ def test_quiet_suppresses_progress_but_not_warnings(tmp_path, monkeypatch):
     result = runner.invoke(
         cli.app,
         ["convert", str(tmp_path), "-o", "out.stl", "-q"],
-        prog_name="dicom-surface",
+        prog_name="medsurface",
     )
 
     assert result.exit_code == 0
@@ -621,8 +702,8 @@ def test_quiet_suppresses_progress_but_not_warnings(tmp_path, monkeypatch):
 def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypatch):
     directory_b = tmp_path / "moving"
     directory_b.mkdir()
-    fixed = _series(uid="1.2.3", description="fixed")
-    moving = _series(uid="1.2.4", description="moving")
+    fixed = _candidate(uid="1.2.3", description="fixed")
+    moving = _candidate(uid="1.2.4", description="moving")
     captured = {}
     output = tmp_path / "merged.stl"
     json_file = tmp_path / "merged.json"
@@ -631,7 +712,7 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
         return [moving] if path == directory_b else [fixed]
 
     monkeypatch.setattr(cli, "_discover", fake_discover)
-    from dicom_surface import merge as merge_mod
+    from medsurface import merge as merge_mod
 
     def fake_merge(**kwargs):
         captured.update(kwargs)
@@ -646,14 +727,16 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
             str(directory_b),
             "-o",
             str(output),
-            "--series-a",
+            "--fixed-volume",
             "1",
-            "--series-b",
+            "--moving-volume",
             "1",
             "--preset",
             "teeth",
-            "--threshold",
+            "--fixed-threshold",
             "250",
+            "--moving-threshold",
+            "auto",
             "--median-mm",
             "1.1",
             "--closing-mm",
@@ -675,14 +758,15 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
             str(json_file),
             "-q",
         ],
-        prog_name="dicom-surface",
+        prog_name="medsurface",
     )
 
     assert result.exit_code == 0, result.output
-    assert captured["series_a"] is fixed
-    assert captured["series_b"] is moving
+    assert captured["fixed"] is fixed
+    assert captured["moving"] is moving
     assert captured["preset"].name == "teeth"
-    assert captured["threshold"] == pytest.approx(250.0)
+    assert captured["fixed_threshold"] == pytest.approx(250.0)
+    assert captured["moving_threshold"] == "auto"
     assert captured["grid_mm"] == pytest.approx(0.8)
     assert captured["smooth_iters"] == 12
     assert captured["smooth_force"] == pytest.approx(0.1)
@@ -698,22 +782,64 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
     refused = runner.invoke(
         cli.app,
         ["merge", str(tmp_path), str(directory_b), "-o", str(output)],
-        prog_name="dicom-surface",
+        prog_name="medsurface",
     )
     assert refused.exit_code == 3
     assert "registration gate refused" in refused.stderr
 
 
+def test_merge_without_selectors_ranks_each_dicom_directory(tmp_path, monkeypatch):
+    moving_dir = tmp_path / "moving"
+    moving_dir.mkdir()
+    fixed_coarse = _candidate(row_id=1, uid="1.2.1", description="fixed coarse")
+    fixed_fine = _candidate(row_id=2, uid="1.2.2", description="fixed fine")
+    moving_coarse = _candidate(row_id=1, uid="1.3.1", description="moving coarse")
+    moving_fine = _candidate(row_id=2, uid="1.3.2", description="moving fine")
+    for candidate, pixel_spacing, slice_spacing in (
+        (fixed_coarse, (1.0, 1.0), 2.0),
+        (fixed_fine, (0.4, 0.4), 0.8),
+        (moving_coarse, (1.2, 1.2), 2.0),
+        (moving_fine, (0.5, 0.5), 0.7),
+    ):
+        assert candidate.dicom is not None
+        candidate.dicom.pixel_spacing = pixel_spacing
+        candidate.dicom.slice_spacing = slice_spacing
+
+    def fake_discover(path: Path):
+        if path == moving_dir:
+            return [moving_coarse, moving_fine]
+        return [fixed_coarse, fixed_fine]
+
+    monkeypatch.setattr(cli, "_discover", fake_discover)
+    captured = {}
+    from medsurface import merge as merge_mod
+
+    def fake_merge(**kwargs):
+        captured.update(kwargs)
+        return _merge_result("merged.stl")
+
+    monkeypatch.setattr(merge_mod, "merge", fake_merge)
+    result = runner.invoke(
+        cli.app,
+        ["merge", str(tmp_path), str(moving_dir), "-o", "merged.stl", "-q"],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["fixed"] is fixed_fine
+    assert captured["moving"] is moving_fine
+
+
 def test_validate_json_is_plain_and_invalid_quality_exits_one(tmp_path, monkeypatch):
     mesh = tmp_path / "mesh.stl"
     mesh.write_text("placeholder")
-    from dicom_surface import validate as validate_mod
+    from medsurface import validate as validate_mod
 
     monkeypatch.setattr(validate_mod, "validate", lambda _path: _quality(valid=False))
     result = runner.invoke(
         cli.app,
         ["validate", str(mesh), "--json"],
-        prog_name="dicom-surface",
+        prog_name="medsurface",
     )
 
     assert result.exit_code == 1
@@ -724,7 +850,7 @@ def test_validate_json_is_plain_and_invalid_quality_exits_one(tmp_path, monkeypa
     human = runner.invoke(
         cli.app,
         ["validate", str(mesh)],
-        prog_name="dicom-surface",
+        prog_name="medsurface",
     )
     assert human.exit_code == 1
     assert "Loading validation engine ..." in human.stdout
@@ -736,14 +862,14 @@ def test_repair_json_is_plain_and_errors_are_concise(tmp_path, monkeypatch):
     mesh = tmp_path / "mesh.stl"
     output = tmp_path / "fixed.stl"
     mesh.write_text("placeholder")
-    from dicom_surface import repair as repair_mod, validate as validate_mod
+    from medsurface import repair as repair_mod, validate as validate_mod
 
     monkeypatch.setattr(repair_mod, "repair", lambda *_args, **_kwargs: {"holes_filled": 1})
     monkeypatch.setattr(validate_mod, "validate", lambda _path: _quality())
     result = runner.invoke(
         cli.app,
         ["repair", str(mesh), "-o", str(output), "--json"],
-        prog_name="dicom-surface",
+        prog_name="medsurface",
     )
 
     assert result.exit_code == 0
@@ -757,7 +883,7 @@ def test_repair_json_is_plain_and_errors_are_concise(tmp_path, monkeypatch):
     failed = runner.invoke(
         cli.app,
         ["repair", str(mesh), "-o", str(output)],
-        prog_name="dicom-surface",
+        prog_name="medsurface",
     )
     assert failed.exit_code == 1
     assert "Loading repair engine ..." in failed.stdout

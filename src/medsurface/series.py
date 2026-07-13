@@ -150,9 +150,31 @@ def _slice_normal(orientation: Iterable[float]) -> np.ndarray:
     return np.cross(o[0:3], o[3:6])
 
 
+_DISCOVERY_TAGS = [
+    "SeriesInstanceUID",
+    "ImageOrientationPatient",
+    "PixelSpacing",
+    "ImageType",
+    "Modality",
+    "SeriesDescription",
+    "SeriesNumber",
+    "Rows",
+    "Columns",
+    "SliceThickness",
+    "ConvolutionKernel",
+    "ImagePositionPatient",
+    "InstanceNumber",
+]
+
+
 def _read_header(path: str):
     try:
-        return pydicom.dcmread(path, stop_before_pixels=True, force=False)
+        return pydicom.dcmread(
+            path,
+            stop_before_pixels=True,
+            force=False,
+            specific_tags=_DISCOVERY_TAGS,
+        )
     except Exception:
         return None
 
@@ -170,13 +192,13 @@ def _orientation_matches(a: np.ndarray, b: np.ndarray, tol_deg: float) -> bool:
     return True
 
 
-def discover(root: str) -> list[Series]:
-    """Walk ``root``, grouping instances by (SeriesInstanceUID, orientation).
+def discover_files(paths: Iterable[str]) -> list[Series]:
+    """Group candidate files by (SeriesInstanceUID, orientation).
 
     Grouping on the UID alone is not enough: a single UID may carry several
     orientations, and the slice normal taken from an arbitrary member then
-    scrambles the ordering of all the others. Directory and file names are sorted
-    so that discovery does not depend on filesystem iteration order.
+    scrambles the ordering of all the others. Paths are sorted so discovery does
+    not depend on filesystem iteration order.
     """
     groups: dict[tuple[str, int], Series] = {}
     positions: dict[tuple[str, int], list[tuple[float, str]]] = {}
@@ -184,56 +206,53 @@ def discover(root: str) -> list[Series]:
     #: Representative orientation vectors per UID, in first-seen order.
     orientations: dict[str, list[np.ndarray]] = {}
 
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames.sort()
-        for fn in sorted(filenames):
-            path = os.path.join(dirpath, fn)
-            ds = _read_header(path)
-            if ds is None or not hasattr(ds, "SeriesInstanceUID"):
-                continue
-            uid = str(ds.SeriesInstanceUID)
+    for path in sorted(paths):
+        ds = _read_header(path)
+        if ds is None or not hasattr(ds, "SeriesInstanceUID"):
+            continue
+        uid = str(ds.SeriesInstanceUID)
 
-            iop = np.asarray(
-                getattr(ds, "ImageOrientationPatient", [1, 0, 0, 0, 1, 0]), dtype=float
+        iop = np.asarray(
+            getattr(ds, "ImageOrientationPatient", [1, 0, 0, 0, 1, 0]), dtype=float
+        )
+        reps = orientations.setdefault(uid, [])
+        for index, rep in enumerate(reps):
+            if _orientation_matches(iop, rep, ORIENTATION_TOLERANCE_DEG):
+                break
+        else:
+            reps.append(iop)
+            index = len(reps) - 1
+        key = (uid, index)
+
+        if key not in groups:
+            ps = getattr(ds, "PixelSpacing", None)
+            image_type = [str(x).upper() for x in getattr(ds, "ImageType", [])]
+            groups[key] = Series(
+                uid=uid,
+                modality=str(getattr(ds, "Modality", "?")),
+                description=str(getattr(ds, "SeriesDescription", "")).strip(),
+                series_number=_as_int(getattr(ds, "SeriesNumber", None)),
+                rows=_as_int(getattr(ds, "Rows", None)),
+                columns=_as_int(getattr(ds, "Columns", None)),
+                pixel_spacing=(float(ps[0]), float(ps[1])) if ps else None,
+                slice_thickness=_as_float(getattr(ds, "SliceThickness", None)),
+                kernel=_kernel_of(ds),
+                is_localizer="LOCALIZER" in image_type,
             )
-            reps = orientations.setdefault(uid, [])
-            for index, rep in enumerate(reps):
-                if _orientation_matches(iop, rep, ORIENTATION_TOLERANCE_DEG):
-                    break
-            else:
-                reps.append(iop)
-                index = len(reps) - 1
-            key = (uid, index)
+            normals[key] = _slice_normal(iop)
+            groups[key].normal = tuple(float(v) for v in normals[key])  # type: ignore[assignment]
+            positions[key] = []
 
-            if key not in groups:
-                ps = getattr(ds, "PixelSpacing", None)
-                image_type = [str(x).upper() for x in getattr(ds, "ImageType", [])]
-                groups[key] = Series(
-                    uid=uid,
-                    modality=str(getattr(ds, "Modality", "?")),
-                    description=str(getattr(ds, "SeriesDescription", "")).strip(),
-                    series_number=_as_int(getattr(ds, "SeriesNumber", None)),
-                    rows=_as_int(getattr(ds, "Rows", None)),
-                    columns=_as_int(getattr(ds, "Columns", None)),
-                    pixel_spacing=(float(ps[0]), float(ps[1])) if ps else None,
-                    slice_thickness=_as_float(getattr(ds, "SliceThickness", None)),
-                    kernel=_kernel_of(ds),
-                    is_localizer="LOCALIZER" in image_type,
-                )
-                normals[key] = _slice_normal(iop)
-                groups[key].normal = tuple(float(v) for v in normals[key])  # type: ignore[assignment]
-                positions[key] = []
+        groups[key].files.append(path)
 
-            groups[key].files.append(path)
-
-            ipp = getattr(ds, "ImagePositionPatient", None)
-            if ipp is not None:
-                depth = float(np.dot(np.asarray(ipp, dtype=float), normals[key]))
-            else:
-                # No position: fall back to InstanceNumber, which at least beats
-                # filename order.
-                depth = float(_as_int(getattr(ds, "InstanceNumber", 0)) or 0)
-            positions[key].append((depth, path))
+        ipp = getattr(ds, "ImagePositionPatient", None)
+        if ipp is not None:
+            depth = float(np.dot(np.asarray(ipp, dtype=float), normals[key]))
+        else:
+            # No position: fall back to InstanceNumber, which at least beats
+            # filename order.
+            depth = float(_as_int(getattr(ds, "InstanceNumber", 0)) or 0)
+        positions[key].append((depth, path))
 
     for key, series in groups.items():
         _finalise(series, positions[key])
@@ -261,6 +280,15 @@ def discover(root: str) -> list[Series]:
     for row_id, series in enumerate(out, start=1):
         series.id = row_id
     return out
+
+
+def discover(root: str) -> list[Series]:
+    """Walk ``root`` and discover DICOM stacks."""
+    paths: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        paths.extend(os.path.join(dirpath, name) for name in sorted(filenames))
+    return discover_files(paths)
 
 
 def _finalise(series: Series, positions: list[tuple[float, str]]) -> None:
@@ -350,39 +378,3 @@ def rank(series: Iterable[Series]) -> list[Series]:
 
     return sorted(series, key=key)
 
-
-def _resolve(hits: list[Series], what: str) -> Series:
-    """Return one match or explain which discovery row IDs disambiguate it."""
-    if len(hits) == 1:
-        return hits[0]
-    raise ValueError(
-        "%s is ambiguous (%d rows: %s); pass a row ID from 'dicom-surface list'"
-        % (what, len(hits), ", ".join(str(s.id) for s in hits))
-    )
-
-
-def select(series: list[Series], wanted: str | None) -> Series:
-    """Resolve a discovery row ID, complete UID, or description substring."""
-    usable = [s for s in series if s.usable]
-    if not usable:
-        raise ValueError("no usable image series found")
-
-    if wanted is None:
-        return rank(usable)[0]
-
-    if wanted.isdigit():
-        row_id = int(wanted)
-        hits = [s for s in series if s.id == row_id]
-        if hits:
-            return _resolve(hits, "row ID %d" % row_id)
-
-    hits = [s for s in series if s.uid == wanted]
-    if hits:
-        return _resolve(hits, "series UID %s" % wanted)
-
-    lowered = wanted.lower()
-    hits = [s for s in series if lowered in s.description.lower()]
-    if hits:
-        return _resolve(hits, "description %r" % wanted)
-
-    raise ValueError("no series matches %r" % wanted)

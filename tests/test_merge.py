@@ -6,16 +6,17 @@ confident-looking transform over unrelated anatomy is *rejected*.
 """
 
 import math
-import os
+from pathlib import Path
 
 import numpy as np
 import pytest
 import SimpleITK as sitk
 
-from dicom_surface import merge as merge_mod
-from dicom_surface import presets, registration
-from dicom_surface.merge import MergeError
-from dicom_surface.series import Series
+from medsurface import merge as merge_mod
+from medsurface import presets, registration
+from medsurface.catalog import DicomSource, FileSource, VolumeCandidate
+from medsurface.merge import MergeError
+from medsurface.series import Series
 
 
 def _image(arr, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0)):
@@ -199,8 +200,8 @@ def test_residual_is_reported_but_not_gated():
 
 def test_geometry_alone_cannot_reject_a_similar_body():
     """Measured on a real skull scaled by 3%, within person-to-person variation:
-    overlap 0.989, dice 0.675 -- both gates pass. This is why the demographic
-    check exists, and why removing it would not be a simplification."""
+    overlap 0.989, dice 0.675 -- both gates pass. Subject identity therefore
+    remains an explicit user responsibility."""
     similar_body = _result(overlap_moving_in_fixed=0.989, overlap_fixed_in_moving=0.989,
                            shared_fov_dice=0.675)
     merge_mod.check_registration(similar_body)  # geometry waves it through
@@ -231,7 +232,7 @@ def test_surface_stage_comes_from_the_preset():
     """
     import inspect
 
-    from dicom_surface import presets
+    from medsurface import presets
 
     signature = inspect.signature(merge_mod.merge)
     for name in ("smooth_iters", "smooth_force", "simplify_error_mm", "post_smooth_iters"):
@@ -264,11 +265,26 @@ def test_unrelated_anatomy_fails_the_gates():
 
 
 # ------------------------------------------------------------- compatibility
-def _series(uid="1.2.3", modality="CT", files=(), part=1):
-    s = Series(uid=uid, modality=modality, description="d", series_number=1)
-    s.files = list(files)
-    s.part = part
-    return s
+def _candidate(uid="1.2.3", modality="CT", part=1, *, path=None):
+    series = Series(uid=uid, modality=modality, description="d", series_number=1)
+    series.files = ["slice"]
+    series.part = part
+    source = FileSource(Path(path), "NIfTI") if path else DicomSource(Path("scans"), series)
+    return VolumeCandidate(
+        id=1,
+        source=source,
+        format="NIfTI" if path else "DICOM",
+        source_name=path or "scans",
+        modality=None if path else modality,
+        description="d",
+        size=(10, 10, 10),
+        spacing=(1.0, 1.0, 1.0),
+        direction=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+        origin=(0.0, 0.0, 0.0),
+        pixel_type="16-bit signed integer",
+        components=1,
+        plane="axial",
+    )
 
 
 def test_merge_announces_volume_loading_before_it_starts(monkeypatch):
@@ -277,155 +293,40 @@ def test_merge_announces_volume_loading_before_it_starts(monkeypatch):
     class StopLoading(Exception):
         pass
 
-    def stop(_series):
-        assert messages[-1] == "load fixed DICOM volume ..."
+    def stop(_candidate):
+        assert messages[-1] == "load fixed volume ..."
         raise StopLoading
 
     monkeypatch.setattr(merge_mod.volume_mod, "load", stop)
     with pytest.raises(StopLoading):
         merge_mod.merge(
-            _series(uid="a"),
-            _series(uid="b"),
+            _candidate(uid="a"),
+            _candidate(uid="b"),
             presets.get("bone"),
             "unused.stl",
             log=messages.append,
         )
 
 
-def test_same_series_twice_is_refused():
-    s = _series()
-    with pytest.raises(MergeError, match="same series"):
-        merge_mod.check_compatible(s, s)
+def test_same_volume_twice_is_refused():
+    candidate = _candidate()
+    with pytest.raises(MergeError, match="same volume"):
+        merge_mod.check_compatible(candidate, candidate)
 
 
-def test_modality_mismatch_is_refused_but_forceable():
-    a, b = _series(uid="a", modality="CT"), _series(uid="b", modality="MR")
-    with pytest.raises(MergeError, match="modalities differ"):
-        merge_mod.check_compatible(a, b)
-    warnings = merge_mod.check_compatible(a, b, force=True)
-    assert any("modalities differ" in w for w in warnings)
+def test_modality_differences_do_not_change_merge_compatibility():
+    fixed = _candidate(uid="a", modality="CT")
+    moving = _candidate(uid="b", modality="MR")
+    warnings = merge_mod.check_compatible(fixed, moving)
+    assert any("identity is not verified" in warning for warning in warnings)
 
 
-def _dicom_with_patient(tmp_path, name, uid, **patient):
-    """A minimal 6-slice CT series carrying the given patient attributes."""
-    from pydicom.dataset import Dataset, FileMetaDataset
-    from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
-
-    d = str(tmp_path / name)
-    os.makedirs(d, exist_ok=True)
-    paths = []
-    for i in range(6):
-        fm = FileMetaDataset()
-        fm.MediaStorageSOPClassUID = CTImageStorage
-        fm.MediaStorageSOPInstanceUID = generate_uid()
-        fm.TransferSyntaxUID = ExplicitVRLittleEndian
-        ds = Dataset()
-        ds.file_meta = fm
-        ds.SOPClassUID = CTImageStorage
-        ds.SOPInstanceUID = fm.MediaStorageSOPInstanceUID
-        ds.SeriesInstanceUID = uid
-        ds.StudyInstanceUID = uid
-        ds.Modality = "CT"
-        for key, value in patient.items():
-            setattr(ds, key, value)
-        ds.Rows = ds.Columns = 4
-        ds.PixelSpacing = [0.5, 0.5]
-        ds.ImageOrientationPatient = [1, 0, 0, 0, 1, 0]
-        ds.ImagePositionPatient = [0.0, 0.0, float(i)]
-        ds.SamplesPerPixel = 1
-        ds.PhotometricInterpretation = "MONOCHROME2"
-        ds.BitsAllocated = ds.BitsStored = 16
-        ds.HighBit = 15
-        ds.PixelRepresentation = 0
-        ds.PixelData = np.zeros((4, 4), dtype=np.uint16).tobytes()
-        p = os.path.join(d, "s%d" % i)
-        ds.save_as(p, enforce_file_format=True)
-        paths.append(p)
-    return _series(uid=uid, files=paths)
-
-
-def test_same_person_across_institutions_is_accepted(tmp_path):
-    """The real case that broke a naive check: one skull, two hospitals. Medical
-    record numbers are institution-scoped, so PatientID differs; the name is
-    formatted differently; birth date and sex agree exactly."""
-    a = _dicom_with_patient(tmp_path, "a", "1.2.3", PatientID="0012345",
-                            PatientName="Doe^Jane", PatientBirthDate="19800101",
-                            PatientSex="F")
-    b = _dicom_with_patient(tmp_path, "b", "1.2.4", PatientID="X-99887766-A",
-                            PatientName="DOE  JANE", PatientBirthDate="19800101",
-                            PatientSex="F", IssuerOfPatientID="OTHER-HOSPITAL")
-
-    match = merge_mod.compare_patients(a.files[0], b.files[0])
-    assert match.verdict == "same", match
-    assert "name" in match.matched and "birth_date" in match.matched
-    assert merge_mod.check_compatible(a, b) == []
-
-
-def test_conflicting_birth_date_is_refused(tmp_path):
-    a = _dicom_with_patient(tmp_path, "a", "1.2.3", PatientID="SAME",
-                            PatientName="Doe^Jane", PatientBirthDate="19800101")
-    b = _dicom_with_patient(tmp_path, "b", "1.2.4", PatientID="SAME",
-                            PatientName="Doe^Jane", PatientBirthDate="19731224")
-    assert merge_mod.compare_patients(a.files[0], b.files[0]).verdict == "different"
-    with pytest.raises(MergeError, match="birth_date"):
-        merge_mod.check_compatible(a, b)
-
-
-def test_conflicting_name_is_refused(tmp_path):
-    a = _dicom_with_patient(tmp_path, "a", "1.2.3", PatientName="Doe^Jane")
-    b = _dicom_with_patient(tmp_path, "b", "1.2.4", PatientName="Roe^Richard")
-    with pytest.raises(MergeError, match="name"):
-        merge_mod.check_compatible(a, b)
-
-
-def test_differing_ids_with_no_corroboration_are_refused(tmp_path):
-    a = _dicom_with_patient(tmp_path, "a", "1.2.3", PatientID="PAT-AAA")
-    b = _dicom_with_patient(tmp_path, "b", "1.2.4", PatientID="PAT-BBB")
-    assert merge_mod.compare_patients(a.files[0], b.files[0]).verdict == "different"
-    with pytest.raises(MergeError, match="different patients"):
-        merge_mod.check_compatible(a, b)
-    assert any("different patients" in w
-               for w in merge_mod.check_compatible(a, b, force=True))
-
-
-def test_matching_id_is_enough(tmp_path):
-    a = _dicom_with_patient(tmp_path, "a", "1.2.3", PatientID="PAT-SAME")
-    b = _dicom_with_patient(tmp_path, "b", "1.2.4", PatientID="PAT-SAME")
-    assert merge_mod.compare_patients(a.files[0], b.files[0]).verdict == "same"
-    assert merge_mod.check_compatible(a, b) == []
-
-
-def test_matching_id_from_different_issuers_is_not_enough(tmp_path):
-    """Two hospitals can both issue MRN '12345' to different people."""
-    a = _dicom_with_patient(tmp_path, "a", "1.2.3", PatientID="12345",
-                            IssuerOfPatientID="HOSPITAL-A")
-    b = _dicom_with_patient(tmp_path, "b", "1.2.4", PatientID="12345",
-                            IssuerOfPatientID="HOSPITAL-B")
-    assert merge_mod.compare_patients(a.files[0], b.files[0]).verdict == "unknown"
-    assert any("cannot verify" in w for w in merge_mod.check_compatible(a, b))
-
-
-def test_patient_values_never_appear_in_output(tmp_path):
-    """Identifiers are compared, never surfaced -- not in the error, not in the
-    fingerprint."""
-    a = _dicom_with_patient(tmp_path, "a", "1.2.3", PatientID="PAT-SECRET",
-                            PatientName="Secretname^Alice")
-    b = _dicom_with_patient(tmp_path, "b", "1.2.4", PatientID="PAT-OTHER",
-                            PatientName="Othername^Bob")
-
-    match = merge_mod.compare_patients(a.files[0], b.files[0])
-    assert match.verdict == "different"
-    assert match.conflicts == ["name"]          # field names only, never values
-
-    with pytest.raises(MergeError) as exc:
-        merge_mod.check_compatible(a, b)
-    text = str(exc.value).upper()
-    for secret in ("SECRET", "OTHER", "ALICE", "BOB"):
-        assert secret not in text
-
-
-def test_deidentified_scans_warn_rather_than_refuse(tmp_path):
-    a = _dicom_with_patient(tmp_path, "a", "1.2.3")
-    b = _dicom_with_patient(tmp_path, "b", "1.2.4")
-    warnings = merge_mod.check_compatible(a, b)
-    assert any("cannot verify" in w for w in warnings)
+def test_same_file_via_hard_link_is_refused(tmp_path):
+    source = tmp_path / "source.nii"
+    alias = tmp_path / "alias.nii"
+    source.write_bytes(b"data")
+    alias.hardlink_to(source)
+    fixed = _candidate(path=str(source))
+    moving = _candidate(path=str(alias))
+    with pytest.raises(MergeError, match="same volume"):
+        merge_mod.check_compatible(fixed, moving)

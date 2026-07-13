@@ -44,7 +44,7 @@ _MAX_DECIMATION_REPAIR_ATTEMPTS = 8
 
 
 def index_to_physical(image: sitk.Image) -> np.ndarray:
-    """Affine mapping voxel index coordinates to DICOM LPS millimetres."""
+    """Affine mapping voxel indices to the image's physical millimetres."""
     direction = np.asarray(image.GetDirection(), dtype=float).reshape(3, 3)
     spacing = np.asarray(image.GetSpacing(), dtype=float)
     origin = np.asarray(image.GetOrigin(), dtype=float)
@@ -67,7 +67,7 @@ def marching_cubes(image: sitk.Image, isovalue: float = 0.5) -> mrmeshpy.Mesh:
 
     # MeshLib places samples at voxel-cell centers [i, i+1], while SimpleITK
     # treats array values as samples at integer indices. The half-voxel shift
-    # preserves the established index-space convention before the LPS affine.
+    # preserves the established convention before the physical-space affine.
     vertices, faces = to_arrays(mesh)
     vertices -= 0.5
     return from_arrays(vertices, faces)

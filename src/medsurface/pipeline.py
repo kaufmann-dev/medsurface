@@ -1,4 +1,4 @@
-"""End-to-end DICOM -> surface conversion."""
+"""End-to-end medical image volume to surface conversion."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from typing import Any, Callable
 import SimpleITK as sitk
 
 from . import segment, surface, volume as volume_mod
-from .presets import Preset, accepts_modality
-from .series import Series
+from .catalog import DicomSource, VolumeCandidate
+from .presets import Preset
 
 Logger = Callable[[str], None]
 StepRunner = Callable[[str, Callable[[], Any]], Any]
@@ -39,10 +39,6 @@ class SurfaceFinish:
     surface_components: int
     warnings: list[str]
     provenance: dict[str, Any]
-
-
-class ModalityMismatch(ValueError):
-    pass
 
 
 def finish_surface(
@@ -178,29 +174,81 @@ def build_mask(image: sitk.Image, preset: Preset, threshold: float,
 
 
 def resolve_threshold(
-    image: sitk.Image, series: Series, preset: Preset, override: float | None
+    image: sitk.Image, preset: Preset, override: float | str | None
 ) -> tuple[float, str]:
+    if override == "auto":
+        return segment.auto_threshold(image), "otsu"
     if override is not None:
         return float(override), "explicit"
 
     if preset.threshold == "auto":
-        return segment.auto_threshold(image, series.modality), "otsu"
-
-    if not accepts_modality(preset, series.modality):
-        raise ModalityMismatch(
-            "preset %r uses a Hounsfield-unit threshold (%g HU) which is only "
-            "meaningful for CT, but this series is %s. Use --preset auto for an "
-            "Otsu threshold, or pass --threshold with an explicit intensity."
-            % (preset.name, preset.threshold, series.modality)
-        )
+        return segment.auto_threshold(image), "otsu"
     return float(preset.threshold), "preset:%s" % preset.name
 
 
+def threshold_warnings(
+    candidate: VolumeCandidate,
+    preset: Preset,
+    override: float | str | None,
+    option_name: str = "--threshold",
+) -> list[str]:
+    if override is not None or preset.threshold_unit != "HU":
+        return []
+    if volume_mod.has_calibrated_hu(candidate):
+        return []
+    return [
+        "preset %r applies a %g HU threshold, but HU calibration cannot be verified "
+        "for %s; the value will be applied to stored intensities. Use %s "
+        "with an intentional stored value or --preset auto for Otsu."
+        % (preset.name, float(preset.threshold), candidate.source_name, option_name)
+    ]
+
+
+def source_provenance(
+    vol: volume_mod.Volume,
+    threshold: float,
+    threshold_source: str,
+) -> dict[str, Any]:
+    candidate = vol.candidate
+    if isinstance(candidate.source, DicomSource):
+        path = str(candidate.source.catalog_path)
+    else:
+        path = str(candidate.source.path)
+    record: dict[str, Any] = {
+        "id": candidate.id,
+        "format": candidate.format,
+        "path": path,
+        "source": candidate.source_name,
+        "size": list(vol.size),
+        "pixel_type": vol.image.GetPixelIDTypeAsString(),
+        "spacing_mm": list(vol.spacing),
+        "origin_mm": list(vol.image.GetOrigin()),
+        "direction": list(vol.image.GetDirection()),
+        "modality": candidate.modality,
+        "description": candidate.description,
+        "plane": candidate.plane,
+        "hu_calibration": "verified" if volume_mod.has_calibrated_hu(candidate) else "unverified",
+        "threshold": threshold,
+        "threshold_source": threshold_source,
+    }
+    if candidate.dicom is not None:
+        series = candidate.dicom
+        record["dicom"] = {
+            "series_uid": series.uid,
+            "series_orientation_part": [series.part, series.n_parts],
+            "series_number": series.series_number,
+            "description": series.description,
+            "convolution_kernel": series.kernel,
+            "slices": series.n_slices,
+        }
+    return record
+
+
 def convert(
-    series: Series,
+    candidate: VolumeCandidate,
     preset: Preset,
     output_path: str,
-    threshold: float | None = None,
+    threshold: float | str | None = None,
     cap_field_of_view: bool = True,
     log: Logger | None = None,
 ) -> Result:
@@ -217,8 +265,9 @@ def convert(
         say("  %-34s %6.1fs" % (msg, time.time() - t))
         return out
 
-    vol = step("load DICOM volume", lambda: volume_mod.load(series))
+    vol = step("load volume", lambda: volume_mod.load(candidate))
     warnings = volume_mod.warnings_for(vol)
+    warnings.extend(threshold_warnings(candidate, preset, threshold))
     lo, hi = step("measure intensity range", vol.intensity_range)
     say("volume %s  spacing %s mm  intensity %.0f..%.0f"
         % ("x".join(str(v) for v in vol.size),
@@ -226,9 +275,9 @@ def convert(
 
     value, source = step(
         "resolve threshold",
-        lambda: resolve_threshold(vol.image, series, preset, threshold),
+        lambda: resolve_threshold(vol.image, preset, threshold),
     )
-    unit = "HU" if volume_mod.has_calibrated_hu(series) else "intensity"
+    unit = "HU" if volume_mod.has_calibrated_hu(candidate) else "intensity"
     say("threshold %.1f %s (%s)" % (value, unit, source))
     if value > hi:
         raise ValueError(
@@ -297,25 +346,16 @@ def convert(
     poly = finished.poly
     surface_components = finished.surface_components
     warnings.extend(finished.warnings)
-    poly = step("index -> patient space (LPS)", lambda: surface.transform(poly, affine))
+    poly = step("index -> physical space", lambda: surface.transform(poly, affine))
 
     quality = step("validate and publish mesh", lambda: surface.write_validated(poly, output_path))
 
     provenance = {
-        "series_uid": series.uid,
-        "series_orientation_part": [series.part, series.n_parts],
-        "series_description": series.description,
-        "series_number": series.series_number,
-        "modality": series.modality,
-        "convolution_kernel": series.kernel,
-        "slices": series.n_slices,
-        "spacing_mm": list(vol.spacing),
+        "input": source_provenance(vol, value, source),
         "preset": asdict(preset),
-        "threshold": value,
-        "threshold_source": source,
         "surface_finishing": finished.provenance,
         "capped_field_of_view": bool(touches and cap_field_of_view),
-        "coordinate_system": "LPS (DICOM patient space)",
+        "coordinate_system": "SimpleITK physical space of the input volume",
     }
 
     return Result(

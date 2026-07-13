@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 
-from dicom_surface import segment, surface, validate
+from medsurface import segment, surface, validate
 from tests.mesh_helpers import (
     box,
     concatenate,
@@ -61,7 +61,7 @@ def test_uncapped_boundary_leaves_the_mesh_open(clipped_sphere, tmp_path):
     mesh unless the volume is padded with background first.
     """
     assert segment.FOREGROUND == 1
-    from dicom_surface.volume import touches_boundary
+    from medsurface.volume import touches_boundary
 
     assert touches_boundary(clipped_sphere), "fixture must actually touch the edge"
 

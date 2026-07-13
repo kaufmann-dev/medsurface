@@ -1,10 +1,4 @@
-"""Load an ordered DICOM series into a SimpleITK image.
-
-SimpleITK works in DICOM patient space (LPS), which is also the convention STL
-readers expect, so no coordinate flip is needed anywhere downstream. The reader
-applies RescaleSlope/RescaleIntercept, meaning CT pixel values arrive as
-Hounsfield units.
-"""
+"""Load a selected catalog volume into a SimpleITK image."""
 
 from __future__ import annotations
 
@@ -13,13 +7,13 @@ from dataclasses import dataclass
 import numpy as np
 import SimpleITK as sitk
 
-from .series import Series
+from .catalog import DicomSource, FileSource, VolumeCandidate, validate_image
 
 
 @dataclass
 class Volume:
     image: sitk.Image
-    series: Series
+    candidate: VolumeCandidate
 
     @property
     def spacing(self) -> tuple[float, float, float]:
@@ -39,32 +33,56 @@ class Volume:
         return sitk.GetArrayViewFromImage(self.image)
 
 
-def load(series: Series) -> Volume:
-    if series.n_slices < 2:
-        raise ValueError("series %r has %d slice(s)" % (series.description, series.n_slices))
-    reader = sitk.ImageSeriesReader()
-    reader.SetFileNames(series.files)  # already ordered by physical position
-    image = reader.Execute()
-    if image.GetDimension() != 3:
-        raise ValueError("expected a 3D volume, got %dD" % image.GetDimension())
-    return Volume(image=image, series=series)
+def load(candidate: VolumeCandidate) -> Volume:
+    """Load pixels for one already-selected candidate."""
+    if not candidate.usable:
+        raise ValueError("volume ID %d is unusable: %s" % (candidate.id, candidate.unusable_reason))
+    try:
+        if isinstance(candidate.source, DicomSource):
+            series = candidate.source.series
+            if series.n_slices < 2:
+                raise ValueError(
+                    "series %r has %d slice(s)" % (series.description, series.n_slices)
+                )
+            reader = sitk.ImageSeriesReader()
+            reader.SetFileNames(series.files)  # already ordered by physical position
+            image = reader.Execute()
+        else:
+            image = sitk.ReadImage(str(candidate.source.path))
+    except RuntimeError as exc:
+        detail = next(
+            (line.strip() for line in reversed(str(exc).splitlines()) if line.strip()),
+            "the image reader rejected the input",
+        )
+        companion = ""
+        if isinstance(candidate.source, FileSource) and candidate.source.path.name.casefold().endswith(
+            (".mhd", ".nhdr")
+        ):
+            companion = "; ensure the referenced payload exists and is readable"
+        raise ValueError("cannot load %s: %s%s" % (candidate.source_name, detail, companion)) from None
+
+    reason = validate_image(image)
+    if reason:
+        raise ValueError("volume ID %d is unusable: %s" % (candidate.id, reason))
+    return Volume(image=image, candidate=candidate)
 
 
-def has_calibrated_hu(series: Series) -> bool:
-    """Whether pixel values can be interpreted as Hounsfield units."""
-    return series.modality == "CT"
+def has_calibrated_hu(candidate: VolumeCandidate) -> bool:
+    """Whether the loader can verify that values are Hounsfield units."""
+    return bool(candidate.dicom and candidate.modality == "CT")
 
 
 def warnings_for(volume: Volume) -> list[str]:
     """Non-fatal data-quality observations worth surfacing to the user."""
     out: list[str] = []
-    s = volume.series
+    candidate = volume.candidate
+    series = candidate.dicom
 
-    if not s.spacing_uniform:
+    if series is not None and not series.spacing_uniform:
         out.append(
             "slice spacing is not uniform (spread %.3f mm); the volume will be "
             "resampled onto a regular grid and geometry may shift slightly"
-            % s.spacing_spread_mm
+            % series.spacing_spread_mm
         )
 
     sx, sy, sz = volume.spacing
@@ -75,12 +93,12 @@ def warnings_for(volume: Volume) -> list[str]:
             "expect stair-stepping along the thick axis" % (sx, sy, sz, aniso)
         )
 
-    if s.sharp_kernel:
+    if series is not None and series.sharp_kernel:
         out.append(
             "reconstruction kernel %r is a sharp/edge-enhancing kernel: it amplifies "
             "noise, so a low bone threshold will produce a spiky surface. Prefer a "
             "higher threshold (~300 HU rather than ~200 HU), or a smoother kernel "
-            "series if the study has one." % s.kernel
+            "series if the study has one." % series.kernel
         )
 
     return out

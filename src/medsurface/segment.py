@@ -52,16 +52,13 @@ def otsu_threshold(values: np.ndarray, nbins: int = 512) -> float:
     return float(centers[int(np.argmax(between))])
 
 
-def auto_threshold(image: sitk.Image, modality: str) -> float:
-    """Otsu over the voxels plausibly containing signal."""
+def auto_threshold(image: sitk.Image) -> float:
+    """Format-neutral Otsu over voxels plausibly containing signal."""
     a = sitk.GetArrayViewFromImage(image).ravel()
-    if modality == "CT":
-        # Exclude air and the reconstruction-circle padding.
-        sample = a[a > -400]
-    else:
-        sample = a[a > np.percentile(a, 50)] if a.size else a
+    finite = a[np.isfinite(a)]
+    sample = finite[finite > np.percentile(finite, 50)] if finite.size else finite
     if sample.size == 0:
-        sample = a
+        sample = finite
     # Subsample: Otsu on a histogram does not need 80M voxels.
     if sample.size > 4_000_000:
         step = sample.size // 4_000_000 + 1

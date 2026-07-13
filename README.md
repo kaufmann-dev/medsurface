@@ -1,12 +1,12 @@
-# dicom-surface
+# medsurface
 
 [Install](#install) · [Quick start](#quick-start) · [Commands](#commands) ·
 [User guide][user-guide] · [Technical reference][technical-reference]
 
-Turn a DICOM image series into an STL, PLY, or OBJ surface mesh from the
-command line.
+Turn a medical image volume into an STL, PLY, or OBJ surface mesh from the
+command line. DICOM series, NIfTI, NRRD, and MetaImage inputs are supported.
 
-> **Safety:** `dicom-surface` is not validated for diagnosis, treatment
+> **Safety:** `medsurface` is not validated for diagnosis, treatment
 > planning, or other clinical decisions. Segmentation and mesh processing can
 > change or omit anatomy. Review the source images and output independently.
 > See [Safety and privacy][safety].
@@ -24,41 +24,48 @@ OpenGL libraries are required.
 
 ## Quick start
 
-First inspect the available image series:
+First inspect the available volumes:
 
 ```sh
-dicom-surface list ~/scans/head-ct
+medsurface list ~/scans/head-ct
 ```
 
-Then convert the recommended series:
+Then convert the recommended volume:
 
 ```sh
-dicom-surface convert ~/scans/head-ct -o skull.stl
+medsurface convert ~/scans/head-ct -o skull.stl
 ```
 
-The default `bone` preset extracts CT voxels at or above 300 HU. Use the unique
-row ID in the `ID` column, a complete SeriesInstanceUID, or part of the
-description printed by `list` to select a different series:
+The default `bone` preset extracts values at or above 300. This is verified as
+HU for DICOM CT; other inputs receive a calibration warning. Use the unique
+integer ID printed by `list` to select a different volume:
 
 ```sh
-dicom-surface convert ~/scans/head-ct --series 1 -o skull.stl
+medsurface convert ~/scans/head-ct --volume 1 -o skull.stl
 ```
 
-Read [Choosing a preset][presets] before converting other tissues or non-CT
-data.
+A direct `.nii`, `.nii.gz`, `.nrrd`, `.nhdr`, `.mha`, or `.mhd` file needs no
+selector:
+
+```sh
+medsurface convert segmentation-input.nrrd -o surface.stl
+```
+
+Read [Choosing a preset][presets] before converting other tissues or
+uncalibrated data.
 
 ## Commands
 
-| command                                        | purpose                                             |
-| ---------------------------------------------- | --------------------------------------------------- |
-| `dicom-surface list DICOM_DIR`                 | Show every image series and the recommended default |
-| `dicom-surface presets`                        | Show the available tissue presets                   |
-| `dicom-surface convert DICOM_DIR -o MODEL.stl` | Convert one series to a surface mesh                |
-| `dicom-surface merge DIR_A DIR_B -o MODEL.stl` | Register and combine two scans of the same person   |
-| `dicom-surface validate MODEL.stl`             | Report mesh quality without changing the file       |
-| `dicom-surface repair MODEL.stl -o FIXED.stl`  | Repair an open or non-manifold mesh                 |
+| command                                      | purpose                                               |
+| -------------------------------------------- | ----------------------------------------------------- |
+| `medsurface list INPUT`                      | Show every supported volume and any automatic default |
+| `medsurface presets`                         | Show the available tissue presets                     |
+| `medsurface convert INPUT -o MODEL.stl`      | Convert one volume to a surface mesh                  |
+| `medsurface merge FIXED MOVING -o MODEL.stl` | Register and combine two volumes of the same subject  |
+| `medsurface validate MODEL.stl`              | Report mesh quality without changing the file         |
+| `medsurface repair MODEL.stl -o FIXED.stl`   | Repair an open or non-manifold mesh                   |
 
-Run `dicom-surface COMMAND --help` for every option. Output format follows the
+Run `medsurface COMMAND --help` for every option. Output format follows the
 extension: `.stl`, `.ply`, or `.obj`.
 
 ## Common workflows
@@ -66,20 +73,22 @@ extension: `.stl`, `.ply`, or `.obj`.
 Choose a different tissue preset or an explicit threshold:
 
 ```sh
-dicom-surface convert scans/ --preset teeth -o teeth.stl
-dicom-surface convert scans/ --threshold 250 -o bone-250hu.stl
+medsurface convert scans/ --preset teeth -o teeth.stl
+medsurface convert scans/ --threshold 250 -o bone-250hu.stl
+medsurface convert scan.mha --preset auto -o automatic.stl
 ```
 
 Merge two scans after confirming that they show the same person and anatomy:
 
 ```sh
-dicom-surface merge facial-ct/ sinus-ct/ \
-  --series-a 1 --series-b 1 -o skull.stl
+medsurface merge facial-ct/ sinus-ct/ \
+  --fixed-volume 1 --moving-volume 1 -o skull.stl
 ```
 
-The first scan defines the output coordinate frame. Identity and registration
-checks can refuse unsafe input. `--force` overrides those checks and can create
-a plausible-looking but incorrect model.
+The first input defines the output coordinate frame. `merge` cannot verify
+subject identity, so confirm it yourself. Registration-quality checks can
+refuse geometrically unsafe input; `--force` overrides only those checks and can
+create a plausible-looking but incorrect model.
 
 ## Validate and repair
 
@@ -87,21 +96,21 @@ a plausible-looking but incorrect model.
 mesh without changing it:
 
 ```sh
-dicom-surface validate model.stl
+medsurface validate model.stl
 ```
 
 Repair writes and then validates a separate output file:
 
 ```sh
-dicom-surface repair broken.stl -o repaired.stl
+medsurface repair broken.stl -o repaired.stl
 ```
 
 A valid mesh can still be anatomically wrong. Read the [input limitations][input-limitations]
 and the [validation explanation][validation] before relying on an output.
 
-[user-guide]: https://github.com/kaufmann-dev/dicom-surface/blob/main/docs/user-guide.md
-[technical-reference]: https://github.com/kaufmann-dev/dicom-surface/blob/main/docs/technical-reference.md
-[safety]: https://github.com/kaufmann-dev/dicom-surface/blob/main/docs/user-guide.md#safety-and-privacy
-[presets]: https://github.com/kaufmann-dev/dicom-surface/blob/main/docs/user-guide.md#choosing-a-preset
-[input-limitations]: https://github.com/kaufmann-dev/dicom-surface/blob/main/docs/user-guide.md#input-requirements-and-limitations
-[validation]: https://github.com/kaufmann-dev/dicom-surface/blob/main/docs/user-guide.md#understanding-validation
+[user-guide]: https://github.com/kaufmann-dev/medsurface/blob/main/docs/user-guide.md
+[technical-reference]: https://github.com/kaufmann-dev/medsurface/blob/main/docs/technical-reference.md
+[safety]: https://github.com/kaufmann-dev/medsurface/blob/main/docs/user-guide.md#safety-and-privacy
+[presets]: https://github.com/kaufmann-dev/medsurface/blob/main/docs/user-guide.md#choosing-a-preset
+[input-limitations]: https://github.com/kaufmann-dev/medsurface/blob/main/docs/user-guide.md#input-requirements-and-limitations
+[validation]: https://github.com/kaufmann-dev/medsurface/blob/main/docs/user-guide.md#understanding-validation

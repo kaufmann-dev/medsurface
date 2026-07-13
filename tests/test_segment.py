@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 
-from dicom_surface import segment
+from medsurface import segment
 
 
 def test_otsu_separates_two_modes():
@@ -39,7 +39,7 @@ def test_auto_threshold_ignores_ct_air():
     vol[arr.size :] = -1000.0
     img = sitk.GetImageFromArray(vol.reshape(side, side, side))
 
-    t = segment.auto_threshold(img, "CT")
+    t = segment.auto_threshold(img)
     assert 100 < t < 700, t
 
 
