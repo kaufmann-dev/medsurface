@@ -529,7 +529,7 @@ def test_list_command_hint_is_shell_quoted_without_hard_wrapping(tmp_path, monke
     assert "Convert the default with:  " + expected in result.stdout
 
 
-def test_list_file_volume_uses_dash_for_missing_metadata():
+def test_list_file_volume_omits_unavailable_optional_details():
     candidate = VolumeCandidate(
         id=1,
         source=FileSource(Path("scan.nii.gz"), "NIfTI"),
@@ -537,13 +537,13 @@ def test_list_file_volume_uses_dash_for_missing_metadata():
         source_name="scan.nii.gz",
         modality=None,
         description=None,
-        size=(10, 20, 30),
-        spacing=(0.5, 0.5, 1.0),
-        direction=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
-        origin=(0.0, 0.0, 0.0),
+        size=None,
+        spacing=None,
+        direction=None,
+        origin=None,
         pixel_type="16-bit signed integer",
         components=1,
-        plane="axial",
+        plane="unknown",
     )
     stream = io.StringIO()
     console = Console(file=stream, width=160, color_system=None, force_terminal=False)
@@ -552,11 +552,28 @@ def test_list_file_volume_uses_dash_for_missing_metadata():
 
     rendered = stream.getvalue()
     assert "Format: NIfTI" in rendered
-    assert "DICOM #: -" in rendered
-    assert "Modality: -" in rendered
-    assert "Description: -" in rendered
-    assert "Kernel: -" in rendered
-    assert "Plane: axial" in rendered
+    assert "Source: scan.nii.gz" in rendered
+    for unavailable in (
+        "DICOM #:",
+        "Modality:",
+        "Description:",
+        "Kernel:",
+        "Slices:",
+        "Voxel (mm):",
+        "Plane:",
+    ):
+        assert unavailable not in rendered
+
+
+def test_detail_block_omits_empty_values():
+    assert cli._detail_block(
+        [
+            ("None", None),
+            ("Empty", ""),
+            ("Whitespace", "  "),
+            ("Value", "CT"),
+        ]
+    ) == "Value: CT"
 
 
 def test_list_explains_why_mixed_dicom_modalities_have_no_default(

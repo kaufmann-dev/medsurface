@@ -74,8 +74,8 @@ and spacing diagnostics. Multi-valued kernels are arrays in JSON and provenance
 and comma-separated on the human table's `Kernel` metadata line. The status
 reports `sharp kernel` as a derived classification without repeating the raw
 value. Direction matrices provide plane metadata for file inputs; missing
-human-readable metadata remains absent in JSON and is rendered as `-` in the
-human table.
+values remain explicit as `null` or empty collections in JSON, while the human
+table omits optional fields that are unavailable.
 
 Only the displayed integer ID is accepted by `--volume`, `--fixed-volume`, and
 `--moving-volume`. UIDs, SeriesNumber values, descriptions, and paths are not
