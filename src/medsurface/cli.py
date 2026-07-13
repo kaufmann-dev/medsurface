@@ -351,6 +351,19 @@ def _plain(value: object, style: str | None = None) -> Text:
     return Text(str(value), style=style or "")
 
 
+def _detail_block(details: list[tuple[str, object | None]]) -> str:
+    """Render only human-readable details that carry an actual value."""
+    lines: list[str] = []
+    for label, value in details:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        lines.append("%s: %s" % (label, text))
+    return "\n".join(lines)
+
+
 def _format_shell_command(arguments: list[object]) -> str:
     rendered = [str(argument) for argument in arguments]
     if os.name == "nt":
@@ -395,26 +408,33 @@ def _volume_table(found: list[Any], recommended: Any | None) -> Table:
     table.add_column("Status", ratio=2, overflow="fold", min_width=16)
 
     for candidate in found:
-        voxel = "-"
+        voxel = None
         if candidate.spacing is not None and len(candidate.spacing) == 3:
             voxel = "%.3g × %.3g × %.3g" % candidate.spacing
         row_style = "bold cyan" if candidate is recommended else None
-        input_details = "Format: %s\nSource: %s" % (
-            candidate.format,
-            candidate.source_name or "-",
-        )
         series = candidate.dicom
-        kernel = series.kernel_display if series is not None and series.kernel_values else "-"
-        metadata = "DICOM #: %s\nModality: %s\nDescription: %s\nKernel: %s" % (
-            candidate.series_number if candidate.series_number is not None else "-",
-            candidate.modality or "-",
-            candidate.description or "-",
-            kernel,
+        kernel = series.kernel_display if series is not None and series.kernel_values else None
+        modality = None if candidate.modality == "?" else candidate.modality
+        plane = candidate.plane
+        if plane is not None and plane.casefold() == "unknown":
+            plane = None
+        input_details = _detail_block(
+            [("Format", candidate.format), ("Source", candidate.source_name)]
         )
-        geometry = "Slices: %s\nVoxel (mm): %s\nPlane: %s" % (
-            candidate.slices if candidate.slices is not None else "-",
-            voxel,
-            candidate.plane or "-",
+        metadata = _detail_block(
+            [
+                ("DICOM #", candidate.series_number),
+                ("Modality", modality),
+                ("Description", candidate.description),
+                ("Kernel", kernel),
+            ]
+        )
+        geometry = _detail_block(
+            [
+                ("Slices", candidate.slices),
+                ("Voxel (mm)", voxel),
+                ("Plane", plane),
+            ]
         )
         table.add_row(
             _plain(candidate.id),
