@@ -71,9 +71,11 @@ The common catalog record carries format, source, modality, description, size,
 spacing, direction, origin, pixel type, component count, plane, and usability.
 DICOM adds its UID, orientation part, SeriesNumber, convolution kernel values,
 and spacing diagnostics. Multi-valued kernels are arrays in JSON and provenance
-and comma-separated in human output. Direction matrices provide plane metadata
-for file inputs; missing human-readable metadata remains absent in JSON and is
-rendered as `-` in the human table.
+and comma-separated on the human table's `Kernel` metadata line. The status
+reports `sharp kernel` as a derived classification without repeating the raw
+value. Direction matrices provide plane metadata for file inputs; missing
+human-readable metadata remains absent in JSON and is rendered as `-` in the
+human table.
 
 Only the displayed integer ID is accepted by `--volume`, `--fixed-volume`, and
 `--moving-volume`. UIDs, SeriesNumber values, descriptions, and paths are not

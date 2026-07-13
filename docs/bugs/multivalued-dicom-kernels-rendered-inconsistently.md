@@ -23,7 +23,9 @@ the flattened representation instead of the original value structure.
 
 Series metadata now preserves convolution kernels as a tuple of DICOM values.
 Sharp-kernel classification checks each value independently, and one shared
-formatter renders human output as `Hr68f, 1`. List JSON and conversion
-provenance serialize the values as `["Hr68f", "1"]`. Regressions cover DICOM
-discovery, the list status, list JSON, the shared convert/merge warning, and
-provenance; the real 231-slice skull series verifies the same paths end to end.
+formatter renders human output as `Hr68f, 1`. The list table labels that value
+as `Kernel` under Metadata, while Status contains only the derived `sharp
+kernel` classification. List JSON and conversion provenance serialize the
+values as `["Hr68f", "1"]`. Regressions cover DICOM discovery, the list status,
+list JSON, the shared convert/merge warning, and provenance; the real 231-slice
+skull series verifies the same paths end to end.
