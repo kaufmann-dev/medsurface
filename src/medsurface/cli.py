@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -350,6 +351,19 @@ def _plain(value: object, style: str | None = None) -> Text:
     return Text(str(value), style=style or "")
 
 
+def _format_shell_command(arguments: list[object]) -> str:
+    rendered = [str(argument) for argument in arguments]
+    if os.name == "nt":
+        return subprocess.list2cmdline(rendered)
+    return shlex.join(rendered)
+
+
+def _print_command_hint(prefix: str, arguments: list[object]) -> None:
+    command = Text(prefix)
+    command.append(_format_shell_command(arguments), style="bold")
+    stdout_console.print(command, soft_wrap=True)
+
+
 def _volume_status(candidate: Any, recommended: Any | None) -> str:
     notes: list[str] = []
     if candidate is recommended:
@@ -577,21 +591,28 @@ def list_volumes(
         )
     )
     if recommended is not None:
-        command = Text("Convert the default with:  ")
-        command.append("medsurface convert %s -o out.stl" % input_path, style="bold")
-        stdout_console.print(command)
+        _print_command_hint(
+            "Convert the default with:  ",
+            ["medsurface", "convert", input_path, "-o", "out.stl"],
+        )
     elif any(candidate.usable for candidate in found):
         ambiguity = catalog.selection_ambiguity(found)
         if ambiguity is not None:
             stdout_console.print(
                 Text("No automatic default: %s." % ambiguity, style="yellow")
             )
-        command = Text("Choose a volume with:  ")
-        command.append(
-            "medsurface convert %s --volume ID -o out.stl" % input_path,
-            style="bold",
+        _print_command_hint(
+            "Choose a volume with:  ",
+            [
+                "medsurface",
+                "convert",
+                input_path,
+                "--volume",
+                "ID",
+                "-o",
+                "out.stl",
+            ],
         )
-        stdout_console.print(command)
 
 
 @app.command()
