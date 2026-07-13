@@ -22,7 +22,6 @@ from medsurface import cli
 from medsurface.catalog import DicomSource, FileSource, VolumeCandidate
 from medsurface.series import Series
 
-
 runner = CliRunner()
 
 
@@ -72,6 +71,24 @@ def _candidate(**kwargs) -> VolumeCandidate:
         components=1,
         plane=series.plane,
         unusable_reason=series.unusable_reason,
+    )
+
+
+def _file_candidate(path: Path, *, row_id: int = 1) -> VolumeCandidate:
+    return VolumeCandidate(
+        id=row_id,
+        source=FileSource(path, "MetaImage"),
+        format="MetaImage",
+        source_name=path.name,
+        modality=None,
+        description=None,
+        size=(8, 8, 8),
+        spacing=(1.0, 1.0, 1.0),
+        direction=(1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+        origin=(0.0, 0.0, 0.0),
+        pixel_type="16-bit signed integer",
+        components=1,
+        plane="axial",
     )
 
 
@@ -665,6 +682,126 @@ def test_invalid_threshold_is_exit_two_before_discovery(tmp_path, monkeypatch):
     assert "number or 'auto'" in result.stderr
 
 
+@pytest.mark.parametrize(
+    "argv,option",
+    [
+        (["convert", "INPUT", "-o", "out.stl", "--median-mm", "-1"], "--median-mm"),
+        (["convert", "INPUT", "-o", "out.stl", "--resample-mm", "nan"], "--resample-mm"),
+        (["convert", "INPUT", "-o", "out.stl", "--smooth-iters", "-1"], "--smooth-iters"),
+        (["convert", "INPUT", "-o", "out.stl", "--smooth-force", "2"], "--smooth-force"),
+        (["merge", "INPUT", "MOVING", "-o", "out.stl", "--grid-mm", "0"], "--grid-mm"),
+        (["merge", "INPUT", "MOVING", "-o", "out.stl", "--grid-mm", "inf"], "--grid-mm"),
+        (["merge", "INPUT", "MOVING", "-o", "out.stl", "--opening-mm", "-0.1"], "--opening-mm"),
+    ],
+)
+def test_invalid_processing_numbers_are_usage_errors_before_discovery(
+    tmp_path, monkeypatch, argv, option
+):
+    moving = tmp_path / "moving"
+    moving.mkdir()
+    resolved = [
+        str(tmp_path) if value == "INPUT" else str(moving) if value == "MOVING" else value
+        for value in argv
+    ]
+    monkeypatch.setattr(
+        cli,
+        "_discover",
+        lambda _root: pytest.fail("discovery should not run for invalid processing options"),
+    )
+
+    result = runner.invoke(cli.app, resolved, prog_name="medsurface")
+
+    assert result.exit_code == 2
+    assert option in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_convert_rejects_report_aliases_before_processing(tmp_path, monkeypatch):
+    source = tmp_path / "scan.mha"
+    source.write_bytes(b"original medical image")
+    alias = tmp_path / "report.json"
+    alias.hardlink_to(source)
+    candidate = _file_candidate(source)
+    monkeypatch.setattr(cli, "_discover", lambda _root: [candidate])
+    from medsurface import pipeline
+
+    monkeypatch.setattr(
+        pipeline,
+        "convert",
+        lambda **_kwargs: pytest.fail("conversion must not start for a colliding report path"),
+    )
+
+    result = runner.invoke(
+        cli.app,
+        ["convert", str(source), "-o", str(tmp_path / "out.stl"), "--json", str(alias)],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 2
+    assert "JSON report must not overwrite input" in result.stderr
+    assert source.read_bytes() == b"original medical image"
+
+
+def test_convert_rejects_report_overwriting_a_detached_payload(tmp_path, monkeypatch):
+    import numpy as np
+    import SimpleITK as sitk
+
+    source = tmp_path / "scan.mhd"
+    sitk.WriteImage(sitk.GetImageFromArray(np.ones((8, 8, 8), dtype=np.int16)), str(source))
+    candidate = cli._discover(source)[0]
+    assert isinstance(candidate.source, FileSource)
+    payload = candidate.source.payload_paths[0]
+    original = payload.read_bytes()
+    monkeypatch.setattr(cli, "_discover", lambda _root: [candidate])
+    from medsurface import pipeline
+
+    monkeypatch.setattr(
+        pipeline,
+        "convert",
+        lambda **_kwargs: pytest.fail("conversion must not start for a colliding payload"),
+    )
+
+    result = runner.invoke(
+        cli.app,
+        ["convert", str(source), "-o", str(tmp_path / "out.stl"), "--json", str(payload)],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 2
+    assert "JSON report must not overwrite input" in result.stderr
+    assert payload.read_bytes() == original
+
+
+def test_convert_rejects_one_path_for_mesh_and_json_before_processing(tmp_path, monkeypatch):
+    chosen = _candidate()
+    destination = tmp_path / "out.stl"
+    monkeypatch.setattr(cli, "_discover", lambda _root: [chosen])
+    from medsurface import pipeline
+
+    monkeypatch.setattr(
+        pipeline,
+        "convert",
+        lambda **_kwargs: pytest.fail("conversion must not start for colliding outputs"),
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "convert",
+            str(tmp_path),
+            "-o",
+            str(destination),
+            "--json",
+            str(destination),
+        ],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 2
+    assert "mesh output and JSON report must be different files" in result.stderr
+    assert not destination.exists()
+
+
 def test_selection_error_is_exit_two(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_discover", lambda _root: [_candidate()])
     result = runner.invoke(
@@ -741,8 +878,12 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
             "1.1",
             "--closing-mm",
             "2.2",
+            "--opening-mm",
+            "1.7",
             "--min-island-mm3",
             "3.3",
+            "--all-islands",
+            "--all-components",
             "--grid-mm",
             "0.8",
             "--smooth-iters",
@@ -765,6 +906,9 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
     assert captured["fixed"] is fixed
     assert captured["moving"] is moving
     assert captured["preset"].name == "teeth"
+    assert captured["preset"].opening_mm == pytest.approx(1.7)
+    assert not captured["preset"].keep_largest_island
+    assert not captured["preset"].keep_largest_component
     assert captured["fixed_threshold"] == pytest.approx(250.0)
     assert captured["moving_threshold"] == "auto"
     assert captured["grid_mm"] == pytest.approx(0.8)
@@ -786,6 +930,64 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
     )
     assert refused.exit_code == 3
     assert "registration gate refused" in refused.stderr
+
+
+def test_merge_rejects_json_overwriting_a_dicom_instance(tmp_path, monkeypatch):
+    moving_dir = tmp_path / "moving"
+    moving_dir.mkdir()
+    dicom_instance = tmp_path / "slice-001.dcm"
+    dicom_instance.write_bytes(b"original dicom")
+    fixed = _candidate(uid="1.2.3", description="fixed")
+    moving = _candidate(uid="1.2.4", description="moving")
+    assert fixed.dicom is not None
+    fixed.dicom.files[0] = str(dicom_instance)
+
+    monkeypatch.setattr(
+        cli,
+        "_discover",
+        lambda path: [moving] if path == moving_dir else [fixed],
+    )
+    from medsurface import merge as merge_mod
+
+    monkeypatch.setattr(
+        merge_mod,
+        "merge",
+        lambda **_kwargs: pytest.fail("merge must not start for a colliding report path"),
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "merge",
+            str(tmp_path),
+            str(moving_dir),
+            "-o",
+            str(tmp_path / "out.stl"),
+            "--json",
+            str(dicom_instance),
+        ],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 2
+    assert "JSON report must not overwrite input" in result.stderr
+    assert dicom_instance.read_bytes() == b"original dicom"
+
+
+def test_json_file_is_published_atomically(tmp_path, monkeypatch):
+    destination = tmp_path / "report.json"
+    destination.write_text("original", encoding="utf-8")
+
+    def fail(*_args, **_kwargs):
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(cli.json, "dump", fail)
+
+    with pytest.raises(OSError, match="simulated"):
+        cli._write_json_file(destination, {"result": "new"})
+
+    assert destination.read_text(encoding="utf-8") == "original"
+    assert not list(tmp_path.glob(".report.json.*"))
 
 
 def test_merge_without_selectors_ranks_each_dicom_directory(tmp_path, monkeypatch):
@@ -862,7 +1064,8 @@ def test_repair_json_is_plain_and_errors_are_concise(tmp_path, monkeypatch):
     mesh = tmp_path / "mesh.stl"
     output = tmp_path / "fixed.stl"
     mesh.write_text("placeholder")
-    from medsurface import repair as repair_mod, validate as validate_mod
+    from medsurface import repair as repair_mod
+    from medsurface import validate as validate_mod
 
     monkeypatch.setattr(repair_mod, "repair", lambda *_args, **_kwargs: {"holes_filled": 1})
     monkeypatch.setattr(validate_mod, "validate", lambda _path: _quality())

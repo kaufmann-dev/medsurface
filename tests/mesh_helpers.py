@@ -6,7 +6,6 @@ import meshlib.mrmeshnumpy as mrmeshnumpy
 import meshlib.mrmeshpy as mrmeshpy
 import numpy as np
 
-
 MeshArrays = tuple[np.ndarray, np.ndarray]
 
 

@@ -14,6 +14,7 @@ from .geometry import (
 )
 
 FOREGROUND = 1
+MAX_RESAMPLED_VOXELS = 800_000_000
 
 def otsu_threshold(values: np.ndarray, nbins: int = 512) -> float:
     """Otsu's threshold over a 1-D sample of intensities.
@@ -234,12 +235,20 @@ def resample_isotropic(binary: sitk.Image, mm: float, log=None,
     voxel inside the true boundary. Measured on a 20 mm sphere that shrinks the
     volume by 6%. Smoothed occupancy keeps the error under 0.5%.
     """
+    if not math.isfinite(mm) or mm <= 0:
+        raise ValueError("resample spacing must be finite and greater than zero")
     field = antialias_for_grid(binary, mm)
 
     size = [
         max(1, int(math.ceil(n * s / mm)))
         for n, s in zip(field.GetSize(), field.GetSpacing())
     ]
+    voxels = math.prod(size)
+    if voxels > MAX_RESAMPLED_VOXELS:
+        raise ValueError(
+            "resampled grid would hold %.0f M voxels at %.4g mm; raise --resample-mm"
+            % (voxels / 1e6, mm)
+        )
     r = sitk.ResampleImageFilter()
     r.SetOutputSpacing((mm, mm, mm))
     r.SetSize(size)

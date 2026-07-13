@@ -71,6 +71,12 @@ class Series:
     pixel_spacing: tuple[float, float] | None = None
     slice_thickness: float | None = None
     kernel: str | None = None
+    image_type: tuple[str, ...] = ()
+    rescale_type: str | None = None
+    rescale_slope: float | None = None
+    rescale_intercept: float | None = None
+    multi_energy_ct_acquisition: str | None = None
+    hu_calibration_consistent: bool = True
     is_localizer: bool = False
     #: Unit normal of the slice plane, in patient coordinates.
     normal: tuple[float, float, float] | None = None
@@ -99,6 +105,21 @@ class Series:
     @property
     def sharp_kernel(self) -> bool:
         return bool(self.kernel and SHARP_KERNEL_RE.search(self.kernel))
+
+    @property
+    def has_calibrated_hu(self) -> bool:
+        """Whether every discovered CT instance provides sufficient HU evidence."""
+        if self.modality.upper() != "CT" or not self.hu_calibration_consistent:
+            return False
+        if self.rescale_slope is None or self.rescale_intercept is None:
+            return False
+        if not math.isfinite(self.rescale_slope) or not math.isfinite(self.rescale_intercept):
+            return False
+        if self.rescale_type is not None:
+            return self.rescale_type.upper() == "HU"
+        if self.multi_energy_ct_acquisition == "YES":
+            return False
+        return bool(self.image_type and self.image_type[0] == "ORIGINAL" and not self.is_localizer)
 
     @property
     def plane(self) -> str:
@@ -155,6 +176,10 @@ _DISCOVERY_TAGS = [
     "ImageOrientationPatient",
     "PixelSpacing",
     "ImageType",
+    "RescaleType",
+    "RescaleSlope",
+    "RescaleIntercept",
+    "MultienergyCTAcquisition",
     "Modality",
     "SeriesDescription",
     "SeriesNumber",
@@ -237,13 +262,38 @@ def discover_files(paths: Iterable[str]) -> list[Series]:
                 pixel_spacing=(float(ps[0]), float(ps[1])) if ps else None,
                 slice_thickness=_as_float(getattr(ds, "SliceThickness", None)),
                 kernel=_kernel_of(ds),
+                image_type=tuple(image_type),
+                rescale_type=_normalised_text(getattr(ds, "RescaleType", None)),
+                rescale_slope=_as_float(getattr(ds, "RescaleSlope", None)),
+                rescale_intercept=_as_float(getattr(ds, "RescaleIntercept", None)),
+                multi_energy_ct_acquisition=_normalised_text(
+                    getattr(ds, "MultienergyCTAcquisition", None)
+                ),
                 is_localizer="LOCALIZER" in image_type,
             )
             normals[key] = _slice_normal(iop)
             groups[key].normal = tuple(float(v) for v in normals[key])  # type: ignore[assignment]
             positions[key] = []
 
-        groups[key].files.append(path)
+        series = groups[key]
+        if series.files:
+            current = (
+                tuple(str(x).upper() for x in getattr(ds, "ImageType", [])),
+                _normalised_text(getattr(ds, "RescaleType", None)),
+                _as_float(getattr(ds, "RescaleSlope", None)),
+                _as_float(getattr(ds, "RescaleIntercept", None)),
+                _normalised_text(getattr(ds, "MultienergyCTAcquisition", None)),
+            )
+            expected = (
+                series.image_type,
+                series.rescale_type,
+                series.rescale_slope,
+                series.rescale_intercept,
+                series.multi_energy_ct_acquisition,
+            )
+            if current != expected:
+                series.hu_calibration_consistent = False
+        series.files.append(path)
 
         ipp = getattr(ds, "ImagePositionPatient", None)
         if ipp is not None:
@@ -332,6 +382,13 @@ def _as_float(v):
         return None
 
 
+def _normalised_text(value) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip().upper()
+    return text or None
+
+
 def _significant(x: float, digits: int = 3) -> float:
     """Round to ``digits`` significant figures.
 
@@ -377,4 +434,3 @@ def rank(series: Iterable[Series]) -> list[Series]:
         )
 
     return sorted(series, key=key)
-

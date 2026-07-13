@@ -43,6 +43,7 @@ def _write_dicom_series(
         ds.SOPInstanceUID = meta.MediaStorageSOPInstanceUID
         ds.SeriesInstanceUID = uid
         ds.Modality = "CT"
+        ds.ImageType = ["ORIGINAL", "PRIMARY", "AXIAL"]
         ds.SeriesDescription = "axial source"
         ds.SeriesNumber = series_number
         ds.InstanceNumber = index + 1
@@ -58,6 +59,8 @@ def _write_dicom_series(
         ds.BitsStored = 16
         ds.HighBit = 15
         ds.PixelRepresentation = 1
+        ds.RescaleSlope = 1
+        ds.RescaleIntercept = -1024
         ds.PixelData = np.full((4, 5), index, dtype=np.int16).tobytes()
         pydicom.dcmwrite(path, ds, enforce_file_format=True)
     return uid
@@ -153,6 +156,7 @@ def test_dicom_only_catalog_still_automatically_ranks_the_best_stack(tmp_path):
     assert chosen.dicom is not None
     assert chosen.dicom.uid == fine
     assert chosen.dicom.uid != coarse
+    assert chosen.dicom.has_calibrated_hu
 
 
 def test_only_integer_catalog_ids_are_accepted(tmp_path):
@@ -193,3 +197,20 @@ def test_file_source_identity_detects_the_same_file(tmp_path):
     linked = catalog.discover(alias)[0]
 
     assert catalog.same_source(original, linked)
+
+
+@pytest.mark.parametrize("suffix", [".mhd", ".nhdr"])
+def test_detached_header_with_missing_payload_is_listed_as_unusable(tmp_path, suffix):
+    path = tmp_path / ("scan" + suffix)
+    sitk.WriteImage(_image(), str(path))
+    complete = catalog.discover(path)[0]
+    assert isinstance(complete.source, catalog.FileSource)
+    assert len(complete.source.payload_paths) == 1
+    complete.source.payload_paths[0].unlink()
+
+    candidate = catalog.discover(path)[0]
+
+    assert not candidate.usable
+    assert "referenced payload is missing" in candidate.unusable_reason
+    with pytest.raises(ValueError, match="no usable volumes"):
+        catalog.select([candidate], None)

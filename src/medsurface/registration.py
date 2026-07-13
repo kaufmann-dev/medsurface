@@ -113,12 +113,12 @@ class RegistrationResult:
 def _world_lattice(mask: sitk.Image, mm: float) -> tuple[np.ndarray, np.ndarray]:
     """Resample onto an axis-aligned world grid so lattices can be correlated."""
     size = np.asarray(mask.GetSize())
-    corners = []
+    corner_points = []
     for i in (0, size[0] - 1):
         for j in (0, size[1] - 1):
             for k in (0, size[2] - 1):
-                corners.append(mask.TransformIndexToPhysicalPoint((int(i), int(j), int(k))))
-    corners = np.asarray(corners, dtype=float)
+                corner_points.append(mask.TransformIndexToPhysicalPoint((int(i), int(j), int(k))))
+    corners = np.asarray(corner_points, dtype=float)
 
     lo = np.floor(corners.min(0) / mm) * mm - mm
     hi = np.ceil(corners.max(0) / mm) * mm + mm
@@ -259,15 +259,15 @@ def _shared_fov_dice(mask_a, mask_b, t, mm=1.5):
     Plain Dice over the union would punish a perfectly good registration just
     because one scan covers anatomy the other never saw.
     """
-    corners = []
+    corner_points = []
     for mask, xform in ((mask_a, None), (mask_b, t)):
         size = np.asarray(mask.GetSize()) - 1
         for i in (0, size[0]):
             for j in (0, size[1]):
                 for k in (0, size[2]):
                     p = np.asarray(mask.TransformIndexToPhysicalPoint((int(i), int(j), int(k))))
-                    corners.append(p if xform is None else xform[:3, :3] @ p + xform[:3, 3])
-    corners = np.asarray(corners)
+                    corner_points.append(p if xform is None else xform[:3, :3] @ p + xform[:3, 3])
+    corners = np.asarray(corner_points)
     lo = np.floor(corners.min(0) / mm) * mm - mm
     hi = np.ceil(corners.max(0) / mm) * mm + mm
     size = np.maximum(1, np.round((hi - lo) / mm).astype(int) + 1)

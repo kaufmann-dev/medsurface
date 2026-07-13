@@ -6,6 +6,31 @@ on:
   pull_request:
 
 jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.12"
+          version: "0.11.28"
+          enable-cache: true
+      - name: Install
+        run: uv sync --locked
+      - name: Lint
+        run: uv run ruff check .
+      - name: Type check
+        run: uv run mypy
+      - name: Build
+        run: uv build
+      - name: Install built wheel
+        run: |
+          uv venv --python 3.12 .wheel-venv
+          uv pip install --python .wheel-venv/bin/python dist/*.whl
+      - name: Smoke test installed command
+        run: .wheel-venv/bin/medsurface --help
+
   test:
     runs-on: ubuntu-latest
     strategy:

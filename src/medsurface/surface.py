@@ -177,6 +177,11 @@ def largest_component(mesh: mrmeshpy.Mesh) -> tuple[mrmeshpy.Mesh, int]:
     return mesh.cloneRegion(largest), count
 
 
+def component_count(mesh: mrmeshpy.Mesh) -> int:
+    """Count disconnected surface shells without changing the mesh."""
+    return len(mrmeshpy.getAllComponents(mrmeshpy.MeshPart(mesh)))
+
+
 def count_defects(mesh: mrmeshpy.Mesh) -> tuple[int, int]:
     """Return boundary-edge and hole counts from MeshLib topology."""
     topology = mesh.topology

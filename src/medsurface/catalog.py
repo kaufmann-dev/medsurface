@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias
@@ -19,7 +20,6 @@ import SimpleITK as sitk
 
 from . import series as series_mod
 from .series import Series
-
 
 SUPPORTED_EXTENSIONS = (".nii.gz", ".nii", ".nrrd", ".nhdr", ".mha", ".mhd")
 
@@ -34,6 +34,7 @@ class DicomSource:
 class FileSource:
     path: Path
     format: str
+    payload_paths: tuple[Path, ...] = ()
 
 
 VolumeSource: TypeAlias = DicomSource | FileSource
@@ -96,6 +97,78 @@ def _format_for(extension: str) -> str:
     if extension in (".nrrd", ".nhdr"):
         return "NRRD"
     return "MetaImage"
+
+
+def _header_value(lines: list[str], pattern: re.Pattern[str]) -> tuple[int, str] | None:
+    for index, line in enumerate(lines):
+        match = pattern.match(line.strip())
+        if match:
+            return index, match.group(1).strip()
+    return None
+
+
+def _listed_payloads(lines: list[str], start: int) -> list[str]:
+    names = []
+    for line in lines[start:]:
+        value = line.strip()
+        if not value:
+            break
+        if not value.startswith("#"):
+            names.append(value.strip('"'))
+    return names
+
+
+def _expanded_payloads(value: str) -> list[str]:
+    """Expand the integer filename sequence supported by detached image headers."""
+    parts = value.split()
+    if len(parts) < 4 or "%" not in parts[0]:
+        return [value.strip('"')]
+    try:
+        first, last, step = map(int, parts[1:4])
+    except ValueError:
+        return [value.strip('"')]
+    if step == 0 or (last - first) * step < 0:
+        return [value.strip('"')]
+    count = abs((last - first) // step) + 1
+    if count > 100_000:
+        return [value.strip('"')]
+    try:
+        return [parts[0] % index for index in range(first, last + (1 if step > 0 else -1), step)]
+    except (TypeError, ValueError):
+        return [value.strip('"')]
+
+
+def _detached_payloads(path: Path, extension: str) -> tuple[Path, ...]:
+    if extension not in (".mhd", ".nhdr"):
+        return ()
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if extension == ".mhd":
+        found = _header_value(lines, re.compile(r"elementdatafile\s*=\s*(.+)", re.I))
+    else:
+        found = _header_value(lines, re.compile(r"data\s*file\s*:\s*(.+)", re.I))
+    if found is None:
+        return ()
+    index, value = found
+    upper = value.upper()
+    if upper == "LOCAL":
+        return ()
+    if upper.startswith("LIST"):
+        names = _listed_payloads(lines, index + 1)
+    else:
+        names = _expanded_payloads(value)
+    return tuple(
+        item if item.is_absolute() else path.parent / item
+        for item in (Path(name) for name in names)
+    )
+
+
+def _payload_reason(payloads: tuple[Path, ...]) -> str | None:
+    for payload in payloads:
+        if not payload.is_file():
+            return "referenced payload is missing: %s" % payload.name
+        if not os.access(payload, os.R_OK):
+            return "referenced payload is not readable: %s" % payload.name
+    return None
 
 
 def _metadata(reader: sitk.ImageFileReader, *names: str) -> str | None:
@@ -168,6 +241,32 @@ def _file_candidate(path: Path, root: Path) -> VolumeCandidate:
     if extension is None:
         raise ValueError("unsupported input extension %r" % path.name)
     format_name = _format_for(extension)
+    payload_problem: str | None
+    try:
+        payloads = _detached_payloads(path, extension)
+    except OSError as exc:
+        payloads = ()
+        payload_problem = "cannot inspect detached header: %s" % exc
+    else:
+        payload_problem = _payload_reason(payloads)
+    source = FileSource(path=path, format=format_name, payload_paths=payloads)
+    if payload_problem is not None:
+        return VolumeCandidate(
+            id=0,
+            source=source,
+            format=format_name,
+            source_name=_relative_name(path, root),
+            modality=None,
+            description=None,
+            size=None,
+            spacing=None,
+            direction=None,
+            origin=None,
+            pixel_type=None,
+            components=None,
+            plane=None,
+            unusable_reason=payload_problem,
+        )
     try:
         reader = sitk.ImageFileReader()
         reader.SetFileName(str(path))
@@ -187,7 +286,7 @@ def _file_candidate(path: Path, root: Path) -> VolumeCandidate:
     except RuntimeError as exc:
         return VolumeCandidate(
             id=0,
-            source=FileSource(path=path, format=format_name),
+            source=source,
             format=format_name,
             source_name=_relative_name(path, root),
             modality=None,
@@ -204,7 +303,7 @@ def _file_candidate(path: Path, root: Path) -> VolumeCandidate:
 
     return VolumeCandidate(
         id=0,
-        source=FileSource(path=path, format=format_name),
+        source=source,
         format=format_name,
         source_name=_relative_name(path, root),
         modality=modality,
@@ -346,3 +445,10 @@ def same_source(a: VolumeCandidate, b: VolumeCandidate) -> bool:
         except OSError:
             return a.source.path.resolve() == b.source.path.resolve()
     return False
+
+
+def source_paths(candidate: VolumeCandidate) -> tuple[Path, ...]:
+    """Every file required to load a selected volume."""
+    if isinstance(candidate.source, DicomSource):
+        return tuple(Path(path) for path in candidate.source.series.files)
+    return (candidate.source.path, *candidate.source.payload_paths)

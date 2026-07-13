@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 import subprocess
 import sys
+import tempfile
 import warnings
 from collections import Counter
 from enum import Enum
@@ -15,11 +18,12 @@ import typer
 from rich import box
 from rich.console import Console, Group
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.progress import Progress, SpinnerColumn, TaskID, TextColumn, TimeElapsedColumn
 from rich.table import Table
 from rich.text import Text
 
-from . import defaults, presets as presets_mod
+from . import defaults
+from . import presets as presets_mod
 from .presets import PRESETS
 
 
@@ -77,7 +81,7 @@ class _ProgressDisplay:
         self.console = console
         self.interactive = enabled and console.is_terminal and console.is_interactive
         self.progress: Progress | None = None
-        self.task_id: int | None = None
+        self.task_id: TaskID | None = None
         self.renderer: subprocess.Popen[str] | None = None
 
     def _start_renderer(self) -> bool:
@@ -207,10 +211,34 @@ def _parse_threshold(value: str | None, option: str = "--threshold") -> float | 
     if value == "auto":
         return value
     try:
-        return float(value)
+        parsed = float(value)
     except ValueError:
         _error("%s must be a number or 'auto'" % option)
         raise typer.Exit(2) from None
+    if not math.isfinite(parsed):
+        _error("%s must be finite or 'auto'" % option)
+        raise typer.Exit(2)
+    return parsed
+
+
+def _validate_processing_numbers(
+    *,
+    nonnegative: list[tuple[str, float | int | None]],
+    positive: tuple[tuple[str, float | int | None], ...] = (),
+    unit_interval: tuple[tuple[str, float | int | None], ...] = (),
+) -> None:
+    for option, value in nonnegative:
+        if value is not None and (not math.isfinite(value) or value < 0):
+            _error("%s must be finite and non-negative" % option)
+            raise typer.Exit(2)
+    for option, value in positive:
+        if value is not None and (not math.isfinite(value) or value <= 0):
+            _error("%s must be finite and greater than zero" % option)
+            raise typer.Exit(2)
+    for option, value in unit_interval:
+        if value is not None and (not math.isfinite(value) or not 0 < value <= 1):
+            _error("%s must be finite, greater than zero, and at most one" % option)
+            raise typer.Exit(2)
 
 
 def _emit_discovery_warnings(captured: list[warnings.WarningMessage]) -> None:
@@ -238,7 +266,7 @@ def _discover(root: Path):
 
 
 def _plain(value: object, style: str | None = None) -> Text:
-    return Text(str(value), style=style)
+    return Text(str(value), style=style or "")
 
 
 def _volume_status(candidate: Any, recommended: Any | None) -> str:
@@ -359,9 +387,31 @@ def _print_quality(report: dict[str, Any], console: Console = stdout_console) ->
 
 
 def _write_json_file(path: Path, payload: object) -> None:
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2)
-        handle.write("\n")
+    destination = path.absolute()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".%s." % destination.name,
+        dir=destination.parent,
+        text=True,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def _protect_output_paths(candidates: list[Any], output: Path, json_file: Path | None) -> None:
+    from . import catalog
+    from .paths import protect_outputs
+
+    inputs = [path for candidate in candidates for path in catalog.source_paths(candidate)]
+    protect_outputs(inputs, output, json_file)
 
 
 @app.command("list")
@@ -419,6 +469,12 @@ def list_volumes(
                         "spacing_uniform": candidate.dicom.spacing_uniform,
                         "spacing_spread_mm": candidate.dicom.spacing_spread_mm,
                         "localizer": candidate.dicom.is_localizer,
+                        "image_type": list(candidate.dicom.image_type),
+                        "rescale_type": candidate.dicom.rescale_type,
+                        "multi_energy_ct_acquisition": (
+                            candidate.dicom.multi_energy_ct_acquisition
+                        ),
+                        "hu_calibration_verified": candidate.dicom.has_calibrated_hu,
                     }
                     if candidate.dicom is not None
                     else None
@@ -528,6 +584,19 @@ def convert(
 ) -> None:
     """Extract a surface mesh from a medical image volume."""
     threshold_value = _parse_threshold(threshold)
+    _validate_processing_numbers(
+        nonnegative=[
+            ("--median-mm", median_mm),
+            ("--closing-mm", closing_mm),
+            ("--opening-mm", opening_mm),
+            ("--min-island-mm3", min_island_mm3),
+            ("--resample-mm", resample_mm),
+            ("--smooth-iters", smooth_iters),
+            ("--simplify-error-mm", simplify_error_mm),
+            ("--post-smooth-iters", post_smooth_iters),
+        ],
+        unit_interval=(("--smooth-force", smooth_force),),
+    )
     progress = _ProgressDisplay(not quiet, "Discovering volumes ...")
     with progress:
         found = _discover(input_path)
@@ -539,6 +608,7 @@ def convert(
 
         try:
             chosen = catalog.select(found, volume_id)
+            _protect_output_paths(found, output, json_file)
         except ValueError as exc:
             _error(exc)
             raise typer.Exit(2) from None
@@ -594,7 +664,11 @@ def convert(
                 "quality": report,
             }
             progress.update("Writing JSON report ...")
-            _write_json_file(json_file, payload)
+            try:
+                _write_json_file(json_file, payload)
+            except OSError as exc:
+                _error("cannot write JSON report %s: %s" % (json_file, exc))
+                raise typer.Exit(1) from None
 
     for message in result.warnings:
         _warn(message)
@@ -658,7 +732,12 @@ def merge(
     ),
     median_mm: float | None = typer.Option(None, "--median-mm"),
     closing_mm: float | None = typer.Option(None, "--closing-mm"),
+    opening_mm: float | None = typer.Option(None, "--opening-mm"),
     min_island_mm3: float | None = typer.Option(None, "--min-island-mm3"),
+    all_islands: bool = typer.Option(False, "--all-islands", help="Keep every labelmap island."),
+    all_components: bool = typer.Option(
+        False, "--all-components", help="Keep every fused surface shell."
+    ),
     grid_mm: float = typer.Option(
         defaults.DEFAULT_MERGE_GRID_MM,
         "--grid-mm",
@@ -685,6 +764,19 @@ def merge(
     """Register two scans of the same anatomy and fuse their surfaces."""
     fixed_threshold_value = _parse_threshold(fixed_threshold, "--fixed-threshold")
     moving_threshold_value = _parse_threshold(moving_threshold, "--moving-threshold")
+    _validate_processing_numbers(
+        nonnegative=[
+            ("--median-mm", median_mm),
+            ("--closing-mm", closing_mm),
+            ("--opening-mm", opening_mm),
+            ("--min-island-mm3", min_island_mm3),
+            ("--smooth-iters", smooth_iters),
+            ("--simplify-error-mm", simplify_error_mm),
+            ("--post-smooth-iters", post_smooth_iters),
+        ],
+        positive=(("--grid-mm", grid_mm),),
+        unit_interval=(("--smooth-force", smooth_force),),
+    )
     progress = _ProgressDisplay(not quiet, "Discovering fixed volumes ...")
     with progress:
         fixed_found = _discover(fixed_input)
@@ -702,6 +794,7 @@ def merge(
         try:
             fixed_candidate = catalog.select(fixed_found, fixed_volume)
             moving_candidate = catalog.select(moving_found, moving_volume)
+            _protect_output_paths([*fixed_found, *moving_found], output, json_file)
         except ValueError as exc:
             _error(exc)
             raise typer.Exit(2) from None
@@ -711,7 +804,10 @@ def merge(
             resolved_preset,
             median_mm=median_mm,
             closing_mm=closing_mm,
+            opening_mm=opening_mm,
             min_island_mm3=min_island_mm3,
+            keep_largest_island=False if all_islands else None,
+            keep_largest_component=False if all_components else None,
         )
         progress.update("Loading merge engine ...")
         from . import merge as merge_mod
@@ -760,7 +856,11 @@ def merge(
                 "quality": report,
             }
             progress.update("Writing JSON report ...")
-            _write_json_file(json_file, payload)
+            try:
+                _write_json_file(json_file, payload)
+            except OSError as exc:
+                _error("cannot write JSON report %s: %s" % (json_file, exc))
+                raise typer.Exit(1) from None
 
     for message in result.warnings:
         _warn(message)
