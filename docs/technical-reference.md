@@ -101,9 +101,9 @@ directories still automatically choose their best stacks.
 4. Apply island filtering, median filtering, optional opening, and closing.
 5. Pad field-of-view boundaries, extract the 0.5 isosurface with MeshLib marching
    cubes, smooth, select surface components, and optionally simplify.
-6. Transform vertices into the input's SimpleITK physical coordinates; validate
-   the mesh in memory, write and validate a temporary file, then atomically
-   publish it.
+6. Transform vertices into the input's SimpleITK physical coordinates, reversing
+   face order when that affine contains a reflection; validate the mesh in
+   memory, write and validate a temporary file, then atomically publish it.
 
 The output is normally a closed surface because the mask is padded with
 background before extraction. When anatomy touches the scan boundary, the cap is
@@ -117,6 +117,15 @@ references and marks the header unusable when a required payload is absent or
 unreadable. File candidates must be scalar, real-valued 3-D images with at least
 two voxels per axis, finite origin/direction values, finite positive spacing,
 and a nonsingular 3×3 direction matrix.
+
+The selected candidate's discovered dimensions are multiplied with Python
+integers before SimpleITK reads pixels. Missing dimensions make the candidate
+unusable, and source volumes above 500 million voxels are refused by default.
+The same ceiling applies to planned conversion and merge grids. The ceiling is
+a coarse emergency guard, not a peak-memory estimate. `--allow-large-volume`
+bypasses all voxel-count checks and is recorded in provenance, but does not
+bypass malformed geometry, non-finite planning, registration gates, or output
+validation.
 
 | format    | extensions        | storage form                                     | behavior                                           |
 | --------- | ----------------- | ------------------------------------------------ | -------------------------------------------------- |
@@ -148,7 +157,7 @@ data. The loader is for classic image series, not arbitrary DICOM objects.
 | Gantry tilt or nonparallel slices           | No correction or complete geometry validation; unsupported without independent checks                  |
 | Irregular spacing                           | Warned and regularized when moderate; rejected when spread exceeds `max(0.1 mm, 0.5 × median spacing)` |
 | Duplicate positions                         | Not rejected; unsupported                                                                              |
-| Missing geometry tags or varying dimensions | May fail or load incorrectly; unsupported                                                              |
+| Missing geometry tags or varying dimensions | Missing dimensions are rejected; varying dimensions remain unsupported without independent checks      |
 | Localizers                                  | Rejected when `ImageType` contains `LOCALIZER`; short stacks are also rejected                         |
 | Reformats                                   | A consistent classic stack can load; axial data is preferred after voxel-volume ranking                |
 | Vendor mosaics                              | Unsupported                                                                                            |
@@ -182,15 +191,18 @@ Convert and merge expose the same three morphology overrides.
 Fractional occupancy is linearly interpolated and thresholded at 0.5. Resampling
 can erase thin structures or change components, cavities, tunnels, and genus. It
 does not preserve anatomical topology. Non-finite or non-positive target spacing
-is rejected, and a planned isotropic grid above 800 million voxels is refused
-before allocation.
+is rejected, and a planned isotropic grid above 500 million voxels is refused
+before allocation unless `--allow-large-volume` is given.
 
 ## Surface extraction and finishing
 
 The isosurface implementation is MeshLib `marchingCubes` at 0.5. SimpleITK arrays
 are transposed from z/y/x to x/y/z before extraction, then shifted half a voxel
 to preserve the established sample-coordinate convention. Mesh validity is
-measured rather than assumed.
+measured rather than assumed. The index-to-physical affine transforms vertices.
+When its linear component has a negative determinant, the transform also
+reverses every triangle so a left-handed image direction cannot turn an outward
+surface into an inward-wound mesh.
 
 Smoothing uses MeshLib `relaxKeepVolume`. The preset controls initial iterations,
 relaxation force, and post-simplification iterations. The `--smooth-force` option
@@ -242,8 +254,8 @@ correspondence limit and up to 80 iterations per pass.
 Point-to-plane RMS and median are reported but not gated. The thresholds were
 selected on a small exploratory development set, not clinically calibrated.
 The fused-grid spacing must be finite and positive. Grid planning uses
-non-overflowing voxel counts and refuses grids above 800 million voxels before
-resampling.
+non-overflowing voxel counts and refuses grids above 500 million voxels before
+resampling unless `--allow-large-volume` is given.
 
 ## Merge identity contract
 
@@ -255,8 +267,9 @@ never prove identity reliably.
 
 The same underlying file or DICOM UID/orientation part cannot be selected for
 both roles. `--force` overrides only failed registration-quality gates. It does
-not override duplicate selection, catalog selection, loading errors, or an
-excessive fused grid.
+not override duplicate selection, catalog selection, loading errors, or voxel
+limits. `--allow-large-volume` overrides only the shared source and processing-
+grid voxel ceiling.
 
 DICOM UIDs, descriptions, file paths, and derived anatomy can remain identifying
 even though discovery does not read patient identifiers.

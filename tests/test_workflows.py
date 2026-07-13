@@ -84,6 +84,32 @@ def test_real_dicom_stack_converts_to_a_valid_mesh(tmp_path):
     assert result.quality["triangles"] > 0
 
 
+def test_left_handed_nifti_converts_to_a_valid_outward_wound_mesh(tmp_path):
+    zz, yy, xx = np.indices((24, 24, 24))
+    pixels = np.zeros((24, 24, 24), dtype=np.int16)
+    pixels[(xx - 12) ** 2 + (yy - 12) ** 2 + (zz - 12) ** 2 <= 7**2] = 2_000
+    image = sitk.GetImageFromArray(pixels)
+    image.SetDirection((-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0))
+    source = tmp_path / "left-handed.nii.gz"
+    output = tmp_path / "left-handed.stl"
+    sitk.WriteImage(image, str(source))
+
+    candidate = catalog.discover(source)[0]
+    result = pipeline.convert(
+        candidate,
+        _minimal_preset("bone"),
+        str(output),
+        threshold=1_000.0,
+        allow_large_volume=True,
+    )
+
+    assert output.exists()
+    assert result.quality["valid"]
+    assert result.quality["winding_consistent"]
+    assert result.quality["disoriented_faces"] == 0
+    assert result.provenance["allow_large_volume"] is True
+
+
 def test_real_cross_format_merge_preserves_teeth_components(tmp_path):
     pixels = np.zeros((32, 32, 32), dtype=np.int16)
     pixels[4:12, 4:12, 4:12] = 2000
@@ -118,6 +144,7 @@ def test_real_cross_format_merge_preserves_teeth_components(tmp_path):
         smooth_force=effective_preset.smooth_force,
         simplify_error_mm=effective_preset.simplify_error_mm,
         post_smooth_iters=effective_preset.post_smooth_iters,
+        allow_large_volume=True,
     )
 
     assert output.exists()
@@ -125,6 +152,7 @@ def test_real_cross_format_merge_preserves_teeth_components(tmp_path):
     assert result.quality["components"] == 2
     assert result.surface_components == 2
     assert result.provenance["preset"] == asdict(effective_preset)
+    assert result.provenance["allow_large_volume"] is True
     finishing = result.provenance["surface_finishing"]
     assert finishing["initial_smoothing"]["requested_iterations"] == 1
     assert finishing["decimation"]["simplify_error_mm"] == 0.01

@@ -712,6 +712,11 @@ def convert(
     ),
     post_smooth_iters: int | None = typer.Option(None, "--post-smooth-iters", help="Smoothing after simplification."),
     no_cap: bool = typer.Option(False, "--no-cap", help="Do not close anatomy at the field-of-view boundary."),
+    allow_large_volume: bool = typer.Option(
+        False,
+        "--allow-large-volume",
+        help="Bypass the 500-million-voxel source and processing-grid limits; may exhaust memory.",
+    ),
     json_file: Path | None = typer.Option(None, "--json", help="Write results and provenance to this JSON file."),
     quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
 ) -> None:
@@ -779,6 +784,7 @@ def convert(
                 output_path=str(output),
                 threshold=threshold_value,
                 cap_field_of_view=not no_cap,
+                allow_large_volume=allow_large_volume,
                 log=progress.log,
                 warn=emit_warning,
             )
@@ -912,6 +918,11 @@ def merge(
         "--force",
         help="Override registration-quality gates.",
     ),
+    allow_large_volume: bool = typer.Option(
+        False,
+        "--allow-large-volume",
+        help="Bypass the 500-million-voxel source and processing-grid limits; may exhaust memory.",
+    ),
     json_file: Path | None = typer.Option(None, "--json", help="Write results and provenance to this JSON file."),
     quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
 ) -> None:
@@ -995,6 +1006,7 @@ def merge(
                 simplify_error_mm=simplify_error_mm,
                 post_smooth_iters=post_smooth_iters,
                 force=force,
+                allow_large_volume=allow_large_volume,
                 log=progress.log,
                 warn=emit_warning,
             )

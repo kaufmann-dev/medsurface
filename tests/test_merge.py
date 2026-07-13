@@ -153,7 +153,8 @@ def test_empty_mask_is_reported_not_silently_registered():
 def test_merge_translates_registration_failure_to_its_public_error(monkeypatch):
     image = _image(_ball((30, 30, 30), (15, 15, 15), 8))
 
-    def load(candidate):
+    def load(candidate, *, allow_large_volume):
+        assert not allow_large_volume
         return volume.Volume(image=image, candidate=candidate)
 
     def fail_registration(*_args, **_kwargs):
@@ -293,6 +294,30 @@ def test_common_grid_rejects_tiny_spacing_without_integer_overflow():
         merge_mod._common_grid(mask, mask, np.eye(4), 1e-12)
 
 
+def test_common_grid_accepts_exactly_the_default_voxel_limit():
+    mask = sitk.Image((2, 2, 2), sitk.sitkUInt8)
+    mask.SetSpacing((495.0, 995.0, 995.0))
+
+    size, _origin = merge_mod._common_grid(mask, mask, np.eye(4), 1.0)
+
+    assert size == (500, 1_000, 1_000)
+    assert math.prod(size) == 500_000_000
+
+
+def test_common_grid_override_allows_a_grid_above_the_default_limit():
+    mask = _image(_lumpy_shell(), spacing=(1.0, 1.0, 1.0))
+
+    size, _origin = merge_mod._common_grid(
+        mask,
+        mask,
+        np.eye(4),
+        1e-12,
+        allow_large_volume=True,
+    )
+
+    assert math.prod(size) > 500_000_000
+
+
 def test_force_overrides_the_gates():
     merge_mod.check_registration(
         _result(overlap_moving_in_fixed=0.0, overlap_fixed_in_moving=0.0,
@@ -343,8 +368,9 @@ def test_merge_announces_volume_loading_before_it_starts(monkeypatch):
     class StopLoading(Exception):
         pass
 
-    def stop(_candidate):
+    def stop(_candidate, *, allow_large_volume):
         assert messages[-1] == "load fixed volume ..."
+        assert allow_large_volume
         assert emitted_warnings[0] == (
             "subject identity is not verified; confirm that fixed and moving volumes "
             "show the same subject before using the fused surface"
@@ -360,6 +386,7 @@ def test_merge_announces_volume_loading_before_it_starts(monkeypatch):
             _candidate(uid="b"),
             presets.get("bone"),
             "unused.stl",
+            allow_large_volume=True,
             log=messages.append,
             warn=emitted_warnings.append,
         )
@@ -375,7 +402,8 @@ def test_merge_emits_fixed_volume_warnings_before_loading_moving(monkeypatch):
 
     fixed_loaded = object()
 
-    def load(candidate):
+    def load(candidate, *, allow_large_volume):
+        assert not allow_large_volume
         if candidate is fixed:
             return fixed_loaded
         assert "fixed geometry warning" in emitted_warnings

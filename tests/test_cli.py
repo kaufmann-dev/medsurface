@@ -245,6 +245,7 @@ def test_merge_help_describes_shared_processing_options():
     result = _run_cli_in_clean_interpreter(["merge", "--help"])
 
     assert result.returncode == 0
+    normalized = " ".join(result.stdout.replace("│", " ").split())
     for option, description_start in (
         ("--median-mm", "Despeckle kernel"),
         ("--closing-mm", "Pore-sealing kernel"),
@@ -254,8 +255,8 @@ def test_merge_help_describes_shared_processing_options():
         ("--smooth-force", "MeshLib relaxation"),
         ("--post-smooth-iters", "Smoothing after"),
     ):
-        assert option in result.stdout
-        assert description_start in result.stdout
+        assert option in normalized
+        assert description_start in normalized
 
 
 @pytest.mark.parametrize(
@@ -724,6 +725,7 @@ def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
             "--post-smooth-iters",
             "9",
             "--no-cap",
+            "--allow-large-volume",
             "--json",
             str(json_file),
             "-q",
@@ -744,6 +746,7 @@ def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
     assert not captured["preset"].keep_largest_component
     assert captured["threshold"] == "auto"
     assert not captured["cap_field_of_view"]
+    assert captured["allow_large_volume"]
     payload = json.loads(json_file.read_text())
     assert payload["result"]["output"] == str(output)
     assert payload["quality"]["valid"]
@@ -1155,6 +1158,7 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
             "--post-smooth-iters",
             "8",
             "--force",
+            "--allow-large-volume",
             "--json",
             str(json_file),
             "-q",
@@ -1177,6 +1181,7 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
     assert captured["simplify_error_mm"] == pytest.approx(0.2)
     assert captured["post_smooth_iters"] == 8
     assert captured["force"]
+    assert captured["allow_large_volume"]
     payload = json.loads(json_file.read_text())
     assert payload["result"]["grid_size"] == [10, 20, 30]
     assert payload["result"]["surface_components"] == 2

@@ -338,6 +338,9 @@ def _dicom_candidate(series: Series, root: Path) -> VolumeCandidate:
     size = None
     if series.columns is not None and series.rows is not None:
         size = (series.columns, series.rows, series.n_slices)
+    reason = series.unusable_reason
+    if reason is None and (size is None or any(value < 2 for value in size)):
+        reason = "missing or invalid image dimensions"
     spacing = None
     if series.pixel_spacing and series.slice_spacing:
         spacing = (
@@ -360,7 +363,7 @@ def _dicom_candidate(series: Series, root: Path) -> VolumeCandidate:
         pixel_type=None,
         components=1,
         plane=series.plane if series.normal is not None else None,
-        unusable_reason=series.unusable_reason,
+        unusable_reason=reason,
     )
 
 
