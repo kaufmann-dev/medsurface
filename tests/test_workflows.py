@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
@@ -98,10 +98,11 @@ def test_real_cross_format_merge_preserves_teeth_components(tmp_path):
     moving = catalog.discover(moving_path)[0]
     output = tmp_path / "merged.stl"
 
+    preset = _minimal_preset("teeth")
     result = merge.merge(
         fixed,
         moving,
-        _minimal_preset("teeth"),
+        preset,
         str(output),
         fixed_threshold=1000.0,
         moving_threshold=1000.0,
@@ -112,3 +113,4 @@ def test_real_cross_format_merge_preserves_teeth_components(tmp_path):
     assert result.quality["valid"]
     assert result.quality["components"] == 2
     assert result.surface_components == 2
+    assert result.provenance["preset"] == asdict(preset)

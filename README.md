@@ -103,7 +103,8 @@ mesh without changing it:
 medsurface validate model.stl
 ```
 
-Repair writes and then validates a separate output file:
+Repair validates both its in-memory result and serialized temporary file, then
+atomically publishes a separate output:
 
 ```sh
 medsurface repair broken.stl -o repaired.stl

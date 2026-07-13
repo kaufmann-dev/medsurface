@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
 import numpy as np
@@ -399,6 +399,7 @@ def merge(
     provenance = {
         "fixed": pipeline.source_provenance(fixed_volume, fixed_value, fixed_source),
         "moving": pipeline.source_provenance(moving_volume, moving_value, moving_source),
+        "preset": asdict(preset),
         "grid_mm": grid_mm,
         "surface_finishing": finished.provenance,
         "transform_moving_to_fixed": reg.transform.tolist(),

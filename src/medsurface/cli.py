@@ -926,6 +926,7 @@ def merge(
                     "volume_fixed_mm3": result.volume_fixed_mm3,
                     "volume_moving_mm3": result.volume_moving_mm3,
                     "volume_fused_mm3": result.volume_union_mm3,
+                    "surface_components": result.surface_components,
                     "seconds": result.seconds,
                     "warnings": result.warnings,
                 },
@@ -1012,25 +1013,16 @@ def repair(
 
         progress.update("Loading mesh for repair ...")
         try:
-            stats = repair_mod.repair(str(mesh), str(output), log=progress.log)
+            result = repair_mod.repair(str(mesh), str(output), log=progress.log)
         except (OSError, RuntimeError, ValueError) as exc:
             _error("cannot repair %s: %s" % (mesh, exc))
             raise typer.Exit(1) from None
 
-        progress.update("Loading validation engine ...")
-        from . import validate as validate_mod
-
-        progress.update("Validating repaired mesh ...")
-        try:
-            report = validate_mod.validate(str(output))
-        except (OSError, RuntimeError, ValueError) as exc:
-            _error("repaired mesh could not be validated: %s" % exc)
-            raise typer.Exit(1) from None
+        stats = result.stats
+        report = result.quality
 
     if json_output:
         print(json.dumps({"output": str(output), "repair": stats, "quality": report}, indent=2))
     elif not quiet:
         _success("wrote %s" % output)
         _print_quality(report)
-    _warn_if_invalid(report, "repaired output")
-    _exit_for_quality(report)

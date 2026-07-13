@@ -6,15 +6,26 @@ module repairs meshes from elsewhere or an output that still contains a defect.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Any
+
 import meshlib.mrmeshpy as mm
 
+from . import surface
 from .paths import same_file
 
 
-def repair(in_path: str, out_path: str, log=None) -> dict:
+@dataclass
+class RepairResult:
+    stats: dict[str, int]
+    quality: dict[str, Any]
+
+
+def repair(in_path: str, out_path: str, log=None) -> RepairResult:
     """Weld, fix multiple edges, collapse degeneracies, fill every hole."""
     if same_file(in_path, out_path):
         raise ValueError("input and output must be different files; repair is not in-place")
+    surface.validate_output_path(out_path)
 
     def say(msg):
         if log:
@@ -59,14 +70,13 @@ def repair(in_path: str, out_path: str, log=None) -> dict:
             pass
     say("filled %d/%d holes" % (filled, holes.size()))
 
-    say("write repaired mesh ...")
-    mm.saveMesh(mesh, out_path)
-    say("wrote repaired mesh")
-
     stats.update(
         faces_out=int(mesh.topology.numValidFaces()),
         holes_out=int(mesh.topology.findNumHoles()),
         holes_filled=filled,
         vertices_united=int(united),
     )
-    return stats
+    say("validate and publish repaired mesh ...")
+    quality = surface.write_validated(mesh, out_path)
+    say("published repaired mesh")
+    return RepairResult(stats=stats, quality=quality)

@@ -201,10 +201,11 @@ if the planned volume is too large.
 
 ## Understanding validation
 
-Conversion and merging validate the in-memory surface, write a temporary file
-in the destination directory, validate that serialized file, and atomically
-publish it only when both checks pass. `repair` validates the file it writes;
-`validate` runs the same checks without changing its input.
+Conversion, merging, and repair validate the in-memory surface, write a
+temporary file in the destination directory, validate that serialized file,
+and atomically publish it only when both checks pass. A failed operation leaves
+an existing destination unchanged. `validate` runs the same checks without
+changing its input.
 
 `convert --json FILE` and `merge --json FILE` publish the report atomically too.
 The report and mesh must be different files, and neither may overwrite a
