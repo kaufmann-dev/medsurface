@@ -25,7 +25,10 @@ surface.
   that both inputs show the same subject before merging them.
 - `--force` can bypass failed registration-quality checks and produce a
   plausible-looking but incorrect fusion. It does not bypass selection, loading,
-  duplicate-input, or size errors.
+  duplicate-input, or voxel-count errors.
+- `--allow-large-volume` bypasses the default voxel-count guard for source,
+  resampled, and fused grids. It does not make the operation memory-safe; the
+  process or operating system may still terminate when memory is exhausted.
 - Series UIDs, descriptions, file paths, and derived anatomy can remain
   identifying even when demographic fields have been removed.
 - Treat source data, logs, provenance, and output meshes according to the same
@@ -153,6 +156,14 @@ and a nonsingular direction matrix. Supported-format files that violate these
 constraints can still appear in `list` with a reason when their header is
 readable. A detached `.mhd` or `.nhdr` whose referenced payload is absent or
 unreadable is listed as unusable instead of being selected and failing later.
+
+Source volumes and planned conversion or merge grids above 500 million voxels
+are refused before their corresponding pixel read or allocation. This is a
+coarse emergency ceiling rather than a memory guarantee: pixel types and
+processing stages use different amounts of memory per voxel. Prefer resampling
+to a coarser spacing. Expert users can pass `--allow-large-volume` to `convert`
+or `merge` to bypass every voxel-count ceiling at the risk of swapping, an
+allocation failure, or an operating-system OOM termination.
 
 Classic single-frame DICOM stacks additionally have these limitations:
 

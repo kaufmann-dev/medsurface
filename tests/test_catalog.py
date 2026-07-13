@@ -10,6 +10,7 @@ from pydicom.dataset import FileDataset, FileMetaDataset
 from pydicom.uid import ExplicitVRLittleEndian, generate_uid
 
 from medsurface import catalog, volume
+from medsurface.defaults import MAX_VOXELS
 
 
 def _image() -> sitk.Image:
@@ -97,6 +98,53 @@ def test_direct_file_is_one_physical_volume(tmp_path, suffix, format_name):
     assert candidate.usable
     assert catalog.select(found, None) is candidate
     assert volume.load(candidate).image.GetSize() == (6, 5, 4)
+
+
+@pytest.mark.parametrize(
+    "size",
+    [
+        (1_000, 1_000, 499),
+        (1_000, 1_000, 500),
+    ],
+)
+def test_native_volume_limit_accepts_counts_at_or_below_the_boundary(
+    tmp_path, monkeypatch, size
+):
+    path = tmp_path / "scan.mha"
+    sitk.WriteImage(_image(), str(path))
+    candidate = catalog.discover(path)[0]
+    candidate.size = size
+    loaded = _image()
+    monkeypatch.setattr(sitk, "ReadImage", lambda _path: loaded)
+
+    assert volume.load(candidate).image is loaded
+    assert np.prod(size, dtype=object) <= MAX_VOXELS
+
+
+def test_native_volume_limit_refuses_before_reading_pixels(tmp_path, monkeypatch):
+    path = tmp_path / "scan.mha"
+    sitk.WriteImage(_image(), str(path))
+    candidate = catalog.discover(path)[0]
+    candidate.size = (1_000, 1_000, 501)
+    monkeypatch.setattr(
+        sitk,
+        "ReadImage",
+        lambda _path: pytest.fail("pixel reading must not start above the voxel limit"),
+    )
+
+    with pytest.raises(ValueError, match="500,000,000.*--allow-large-volume"):
+        volume.load(candidate)
+
+
+def test_native_volume_override_allows_pixel_loading(tmp_path, monkeypatch):
+    path = tmp_path / "scan.mha"
+    sitk.WriteImage(_image(), str(path))
+    candidate = catalog.discover(path)[0]
+    candidate.size = (1_000, 1_000, 501)
+    loaded = _image()
+    monkeypatch.setattr(sitk, "ReadImage", lambda _path: loaded)
+
+    assert volume.load(candidate, allow_large_volume=True).image is loaded
 
 
 def test_file_metadata_is_shown_when_the_format_preserves_it(tmp_path):

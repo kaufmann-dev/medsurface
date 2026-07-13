@@ -67,8 +67,9 @@ def test_conversion_announces_volume_loading_before_it_starts(monkeypatch):
     class StopLoading(Exception):
         pass
 
-    def stop(_candidate):
+    def stop(_candidate, *, allow_large_volume):
         assert messages[-1] == "load volume ..."
+        assert allow_large_volume
         raise StopLoading
 
     monkeypatch.setattr(pipeline_mod.volume_mod, "load", stop)
@@ -77,6 +78,7 @@ def test_conversion_announces_volume_loading_before_it_starts(monkeypatch):
             _candidate(),
             presets.get("bone"),
             "unused.stl",
+            allow_large_volume=True,
             log=messages.append,
         )
 
@@ -87,9 +89,10 @@ def test_conversion_emits_threshold_warning_before_loading(monkeypatch):
     class StopLoading(Exception):
         pass
 
-    def stop(_candidate):
+    def stop(_candidate, *, allow_large_volume):
         assert len(emitted_warnings) == 1
         assert "HU calibration cannot be verified" in emitted_warnings[0]
+        assert not allow_large_volume
         raise StopLoading
 
     monkeypatch.setattr(pipeline_mod.volume_mod, "load", stop)

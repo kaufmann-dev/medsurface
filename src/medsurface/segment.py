@@ -7,6 +7,7 @@ import math
 import numpy as np
 import SimpleITK as sitk
 
+from .defaults import MAX_VOXELS
 from .geometry import (
     kernel_extent_mm,
     kernel_radius_voxels,
@@ -14,7 +15,6 @@ from .geometry import (
 )
 
 FOREGROUND = 1
-MAX_RESAMPLED_VOXELS = 800_000_000
 
 def otsu_threshold(values: np.ndarray, nbins: int = 512) -> float:
     """Otsu's threshold over a 1-D sample of intensities.
@@ -222,8 +222,14 @@ def antialias_for_grid(image: sitk.Image, grid_mm: float) -> sitk.Image:
     return out
 
 
-def resample_isotropic(binary: sitk.Image, mm: float, log=None,
-                       pad_border: bool = True) -> sitk.Image:
+def resample_isotropic(
+    binary: sitk.Image,
+    mm: float,
+    log=None,
+    pad_border: bool = True,
+    *,
+    allow_large_volume: bool = False,
+) -> sitk.Image:
     """Resample the mask onto an isotropic grid as a fractional-occupancy field.
 
     Resampling can reduce triangle count but can erase thin structures and change
@@ -237,18 +243,20 @@ def resample_isotropic(binary: sitk.Image, mm: float, log=None,
     """
     if not math.isfinite(mm) or mm <= 0:
         raise ValueError("resample spacing must be finite and greater than zero")
-    field = antialias_for_grid(binary, mm)
 
     size = [
         max(1, int(math.ceil(n * s / mm)))
-        for n, s in zip(field.GetSize(), field.GetSpacing())
+        for n, s in zip(binary.GetSize(), binary.GetSpacing())
     ]
     voxels = math.prod(size)
-    if voxels > MAX_RESAMPLED_VOXELS:
+    if voxels > MAX_VOXELS and not allow_large_volume:
         raise ValueError(
-            "resampled grid would hold %.0f M voxels at %.4g mm; raise --resample-mm"
-            % (voxels / 1e6, mm)
+            "resampled grid would hold %s voxels at %.4g mm, above the default "
+            "limit of %s; raise --resample-mm or pass --allow-large-volume "
+            "to attempt it (this may exhaust memory)"
+            % (f"{voxels:,}", mm, f"{MAX_VOXELS:,}")
         )
+    field = antialias_for_grid(binary, mm)
     r = sitk.ResampleImageFilter()
     r.SetOutputSpacing((mm, mm, mm))
     r.SetSize(size)

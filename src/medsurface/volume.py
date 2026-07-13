@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
 import SimpleITK as sitk
 
 from .catalog import DicomSource, FileSource, VolumeCandidate, validate_image
+from .defaults import MAX_VOXELS
 
 
 @dataclass
@@ -33,10 +35,28 @@ class Volume:
         return sitk.GetArrayViewFromImage(self.image)
 
 
-def load(candidate: VolumeCandidate) -> Volume:
+def _voxel_count(candidate: VolumeCandidate) -> int:
+    size = candidate.size
+    if size is None or len(size) != 3 or any(value < 2 for value in size):
+        raise ValueError(
+            "volume ID %d has no complete positive 3D dimensions; "
+            "pixel data will not be loaded without a usable header" % candidate.id
+        )
+    return math.prod(int(value) for value in size)
+
+
+def load(candidate: VolumeCandidate, *, allow_large_volume: bool = False) -> Volume:
     """Load pixels for one already-selected candidate."""
     if not candidate.usable:
         raise ValueError("volume ID %d is unusable: %s" % (candidate.id, candidate.unusable_reason))
+    voxels = _voxel_count(candidate)
+    if voxels > MAX_VOXELS and not allow_large_volume:
+        raise ValueError(
+            "volume contains %s voxels, above the default limit of %s; resample it "
+            "to a coarser spacing before processing, or pass --allow-large-volume "
+            "to attempt it (this may exhaust memory)"
+            % (f"{voxels:,}", f"{MAX_VOXELS:,}")
+        )
     try:
         if isinstance(candidate.source, DicomSource):
             series = candidate.source.series

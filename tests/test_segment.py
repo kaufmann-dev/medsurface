@@ -142,3 +142,37 @@ def test_resample_rejects_invalid_target_spacing(spacing):
 def test_resample_rejects_an_excessive_target_grid_before_allocating():
     with pytest.raises(ValueError, match="resampled grid would hold"):
         segment.resample_isotropic(_two_blobs(), 0.001)
+
+
+def test_resample_accepts_exactly_the_default_voxel_limit(monkeypatch):
+    image = sitk.Image((2, 2, 2), sitk.sitkUInt8)
+    image.SetSpacing((250.0, 500.0, 500.0))
+
+    class AllocationReached(Exception):
+        pass
+
+    monkeypatch.setattr(
+        segment,
+        "antialias_for_grid",
+        lambda _image, _spacing: (_ for _ in ()).throw(AllocationReached),
+    )
+
+    with pytest.raises(AllocationReached):
+        segment.resample_isotropic(image, 1.0)
+
+
+def test_resample_override_reaches_the_large_grid_allocation(monkeypatch):
+    class AllocationReached(Exception):
+        pass
+
+    def stop_before_allocation(_image, _spacing):
+        raise AllocationReached
+
+    monkeypatch.setattr(segment, "antialias_for_grid", stop_before_allocation)
+
+    with pytest.raises(AllocationReached):
+        segment.resample_isotropic(
+            _two_blobs(),
+            0.001,
+            allow_large_volume=True,
+        )

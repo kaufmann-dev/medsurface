@@ -258,6 +258,7 @@ def convert(
     output_path: str,
     threshold: float | str | None = None,
     cap_field_of_view: bool = True,
+    allow_large_volume: bool = False,
     log: Logger | None = None,
     warn: Logger | None = None,
 ) -> Result:
@@ -288,7 +289,10 @@ def convert(
             add_warning(message)
 
     add_warnings(threshold_warnings(candidate, preset, threshold))
-    vol = step("load volume", lambda: volume_mod.load(candidate))
+    vol = step(
+        "load volume",
+        lambda: volume_mod.load(candidate, allow_large_volume=allow_large_volume),
+    )
     add_warnings(volume_mod.warnings_for(vol))
     lo, hi = step("measure intensity range", vol.intensity_range)
     say("volume %s  spacing %s mm  intensity %.0f..%.0f"
@@ -342,7 +346,12 @@ def convert(
                 % (preset.resample_mm, native)
             )
         grid = step("resample isotropic",
-                    lambda: segment.resample_isotropic(binary, preset.resample_mm, say))
+                    lambda: segment.resample_isotropic(
+                        binary,
+                        preset.resample_mm,
+                        say,
+                        allow_large_volume=allow_large_volume,
+                    ))
         isovalue = segment.ISO_OCCUPANCY
     else:
         grid = binary
@@ -377,6 +386,7 @@ def convert(
         "preset": asdict(preset),
         "surface_finishing": finished.provenance,
         "capped_field_of_view": bool(touches and cap_field_of_view),
+        "allow_large_volume": bool(allow_large_volume),
         "coordinate_system": "SimpleITK physical space of the input volume",
     }
 

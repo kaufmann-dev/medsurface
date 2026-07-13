@@ -129,6 +129,32 @@ def test_index_to_physical_matches_simpleitk():
         assert got == pytest.approx(list(expected), abs=1e-9)
 
 
+def test_reflecting_transform_reverses_faces_and_preserves_valid_winding():
+    vertices, faces = box()
+    mesh = surface.from_arrays(vertices, faces)
+    reflection = np.diag([-1.0, 1.0, 1.0, 1.0])
+
+    reflected = surface.transform(mesh, reflection)
+    reflected_vertices, reflected_faces = surface.to_arrays(reflected)
+    report = validate.validate_arrays(reflected_vertices, reflected_faces)
+
+    assert np.array_equal(reflected_faces, faces[:, ::-1])
+    assert report["valid"]
+    assert report["winding_consistent"]
+
+
+def test_orientation_preserving_transform_keeps_face_order():
+    vertices, faces = box()
+    mesh = surface.from_arrays(vertices, faces)
+    translation = np.eye(4)
+    translation[:3, 3] = (3.0, -2.0, 7.0)
+
+    transformed_mesh = surface.transform(mesh, translation)
+    _transformed_vertices, transformed_faces = surface.to_arrays(transformed_mesh)
+
+    assert np.array_equal(transformed_faces, faces)
+
+
 def test_padding_preserves_physical_coordinates(solid_sphere):
     image, _ = solid_sphere
     padded = segment.pad(image, 1)

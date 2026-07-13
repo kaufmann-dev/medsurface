@@ -75,8 +75,11 @@ def marching_cubes(image: sitk.Image, isovalue: float = 0.5) -> mrmeshpy.Mesh:
 
 def transform(mesh: mrmeshpy.Mesh, matrix: np.ndarray) -> mrmeshpy.Mesh:
     vertices, faces = to_arrays(mesh)
-    transformed = vertices @ np.asarray(matrix[:3, :3], dtype=float).T
+    linear = np.asarray(matrix[:3, :3], dtype=float)
+    transformed = vertices @ linear.T
     transformed += np.asarray(matrix[:3, 3], dtype=float)
+    if np.linalg.det(linear) < 0:
+        faces = faces[:, ::-1]
     return from_arrays(transformed, faces)
 
 

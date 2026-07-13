@@ -37,7 +37,7 @@ import SimpleITK as sitk
 from . import pipeline, registration, segment, surface
 from . import volume as volume_mod
 from .catalog import VolumeCandidate, same_source
-from .defaults import DEFAULT_MERGE_GRID_MM
+from .defaults import DEFAULT_MERGE_GRID_MM, MAX_VOXELS
 from .presets import Preset
 from .presets import override as override_preset
 from .presets import validate as validate_preset
@@ -72,7 +72,6 @@ MIN_SHARED_FOV_DICE = 0.55
 #: If the scans barely see the same space, there is nothing to register on --
 #: and Dice over a few cubic centimetres proves nothing either way.
 MIN_SHARED_FOV_MM3 = 20_000.0
-MAX_FUSED_VOXELS = 800_000_000
 
 # There is deliberately no gate on the ICP residual. It never discriminated: the
 # impostor scored 0.43 mm and a 5%-oversized skull 0.41 mm, both well inside any
@@ -160,7 +159,14 @@ def _corners(image: sitk.Image) -> np.ndarray:
     return np.asarray(pts, dtype=float)
 
 
-def _common_grid(fixed_mask, moving_mask, transform, grid_mm):
+def _common_grid(
+    fixed_mask,
+    moving_mask,
+    transform,
+    grid_mm,
+    *,
+    allow_large_volume: bool = False,
+):
     rot, trans = transform[:3, :3], transform[:3, 3]
     pts = np.vstack([_corners(fixed_mask), (rot @ _corners(moving_mask).T).T + trans])
     scaled = pts / grid_mm
@@ -169,14 +175,21 @@ def _common_grid(fixed_mask, moving_mask, transform, grid_mm):
     lo_index = np.floor(scaled.min(0)) - 2
     hi_index = np.ceil(scaled.max(0)) + 2
     planned = hi_index - lo_index + 1
-    if not np.all(np.isfinite(planned)) or np.any(planned > MAX_FUSED_VOXELS):
+    if not np.all(np.isfinite(planned)):
         raise MergeError("the fused grid is too large at %.4g mm; raise --grid-mm" % grid_mm)
+    if not allow_large_volume and np.any(planned > MAX_VOXELS):
+        raise MergeError(
+            "the fused grid is too large at %.4g mm; raise --grid-mm or pass "
+            "--allow-large-volume" % grid_mm
+        )
     size = tuple(int(value) for value in planned)
     voxels = math.prod(size)
-    if voxels > MAX_FUSED_VOXELS:
+    if voxels > MAX_VOXELS and not allow_large_volume:
         raise MergeError(
-            "the fused grid would hold %.0f M voxels at %.4g mm; raise --grid-mm"
-            % (voxels / 1e6, grid_mm)
+            "the fused grid would hold %s voxels at %.4g mm, above the default "
+            "limit of %s; raise --grid-mm or pass --allow-large-volume to attempt "
+            "it (this may exhaust memory)"
+            % (f"{voxels:,}", grid_mm, f"{MAX_VOXELS:,}")
         )
     return size, lo_index * grid_mm
 
@@ -206,6 +219,7 @@ def merge(
     simplify_error_mm: float | None = None,
     post_smooth_iters: int | None = None,
     force: bool = False,
+    allow_large_volume: bool = False,
     log: Logger | None = None,
     warn: Logger | None = None,
 ) -> MergeResult:
@@ -265,9 +279,15 @@ def merge(
     say("fixed  ID %d  %s  %s" % (fixed.id, fixed.format, fixed.source_name))
     say("moving ID %d  %s  %s" % (moving.id, moving.format, moving.source_name))
 
-    fixed_volume = step("load fixed volume", lambda: volume_mod.load(fixed))
+    fixed_volume = step(
+        "load fixed volume",
+        lambda: volume_mod.load(fixed, allow_large_volume=allow_large_volume),
+    )
     add_warnings(volume_mod.warnings_for(fixed_volume))
-    moving_volume = step("load moving volume", lambda: volume_mod.load(moving))
+    moving_volume = step(
+        "load moving volume",
+        lambda: volume_mod.load(moving, allow_large_volume=allow_large_volume),
+    )
     add_warnings(volume_mod.warnings_for(moving_volume))
 
     fixed_value, fixed_source = step(
@@ -306,16 +326,17 @@ def merge(
 
     size, origin = step(
         "plan fused grid",
-        lambda: _common_grid(fixed_mask, moving_mask, reg.transform, grid_mm),
+        lambda: _common_grid(
+            fixed_mask,
+            moving_mask,
+            reg.transform,
+            grid_mm,
+            allow_large_volume=allow_large_volume,
+        ),
     )
     voxels = math.prod(size)
     say("fused grid %s at %.2f mm isotropic (%.0f M voxels)"
         % ("x".join(str(v) for v in size), grid_mm, voxels / 1e6))
-    if voxels > MAX_FUSED_VOXELS:
-        raise MergeError(
-            "the fused grid would hold %.0f M voxels at %.2f mm; raise --grid-mm"
-            % (voxels / 1e6, grid_mm))
-
     identity = sitk.Transform(3, sitk.sitkIdentity)
     inverse = registration.inverse_transform(reg.transform)
 
@@ -397,6 +418,7 @@ def merge(
         },
         "coordinate_system": "SimpleITK physical space of the fixed volume",
         "forced": bool(force),
+        "allow_large_volume": bool(allow_large_volume),
     }
 
     return MergeResult(
