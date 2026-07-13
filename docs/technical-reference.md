@@ -10,8 +10,9 @@ guide](user-guide.md) for presets, input limitations, and safety.
 The console script points directly to a Typer application. Typer owns command
 dispatch, Rich-formatted help, required input path validation, typed preset
 choices, and usage errors. The root callback prints help and
-returns success when no command is supplied. Shell completion options are not
-installed by the application.
+returns success when no command is supplied; `--version` prints the installed
+package version without loading processing modules. Shell completion options
+are not installed by the application.
 
 The CLI module imports only Typer, Rich, defaults, and preset registries while
 constructing commands. MeshLib, registration, validation, and processing
@@ -31,7 +32,11 @@ so native MeshLib calls that hold Python's interpreter lock cannot freeze its
 animation. Redirected output receives persistent ANSI-free stage lines. No
 percentage is shown because the processing libraries do not expose a reliable
 completed-work total. Normal progress can be suppressed with `--quiet`, while
-warnings and failures remain visible.
+warnings and failures remain visible. Processing functions retain warnings in
+their result objects and stream them through a callback as soon as each warning
+becomes known. Subject-identity and unverified-HU warnings therefore precede
+volume loading, while later geometry and surface warnings appear at their
+corresponding stages without being printed twice by the CLI.
 
 JSON is a separate plain-output contract. `list --json`, `validate --json`, and
 `repair --json` write only JSON to stdout. `convert --json FILE` and
@@ -40,8 +45,9 @@ shares the JSON destination, and JSON contains no ANSI control sequences.
 Convert and merge reject mesh or report paths that alias each other or any
 discovered input file through a lexical path, symlink, or hard link. This
 includes every DICOM instance and each payload referenced by a detached image
-header. JSON reports are written to a temporary sibling and atomically
-published, so a failed report write preserves an existing report.
+header. Convert, merge, and repair reject unsupported output extensions before
+discovery or processing. JSON reports are written to a temporary sibling and
+atomically published, so a failed report write preserves an existing report.
 Warnings raised by pydicom during discovery are captured, deduplicated with
 their occurrence counts preserved, and rendered concisely on stderr without
 Python source locations.
@@ -66,10 +72,13 @@ Only the displayed integer ID is accepted by `--volume`, `--fixed-volume`, and
 `--moving-volume`. UIDs, SeriesNumber values, descriptions, and paths are not
 selectors. Provenance records the chosen catalog ID plus stable source metadata.
 
-Selection without an ID follows three rules: one usable candidate is automatic;
-multiple usable DICOM candidates retain the DICOM ranking; every other
-multi-volume catalog requires an explicit ID. `merge` builds or reuses a catalog
-for each positional input and applies those rules independently, so two DICOM-only
+Selection without an ID follows four rules: one usable candidate is automatic;
+multiple usable DICOM candidates with one shared modality retain the DICOM
+ranking; DICOM candidates spanning modalities require an explicit ID; and every
+other multi-volume catalog also requires an explicit ID. Missing DICOM modality
+metadata is treated as its own `unknown` modality, so it cannot silently compete
+with known modalities. `merge` builds or reuses a catalog for each positional
+input and applies these rules independently, so two same-modality DICOM-only
 directories still automatically choose their best stacks.
 
 ## Processing pipeline

@@ -81,6 +81,27 @@ def test_conversion_announces_volume_loading_before_it_starts(monkeypatch):
         )
 
 
+def test_conversion_emits_threshold_warning_before_loading(monkeypatch):
+    emitted_warnings = []
+
+    class StopLoading(Exception):
+        pass
+
+    def stop(_candidate):
+        assert len(emitted_warnings) == 1
+        assert "HU calibration cannot be verified" in emitted_warnings[0]
+        raise StopLoading
+
+    monkeypatch.setattr(pipeline_mod.volume_mod, "load", stop)
+    with pytest.raises(StopLoading):
+        pipeline_mod.convert(
+            _candidate(file=True),
+            presets.get("bone"),
+            "unused.stl",
+            warn=emitted_warnings.append,
+        )
+
+
 def test_explicit_threshold_wins_over_preset():
     v, src = resolve_threshold(_ct_image(), presets.get("bone"), 123.0)
     assert v == 123.0 and src == "explicit"

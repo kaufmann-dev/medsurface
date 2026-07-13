@@ -11,7 +11,7 @@ import meshlib.mrmeshpy as mrmeshpy
 import numpy as np
 import SimpleITK as sitk
 
-_SUPPORTED_EXTENSIONS = (".obj", ".ply", ".stl")
+from .defaults import SUPPORTED_MESH_EXTENSIONS
 
 
 @dataclass(frozen=True)
@@ -374,13 +374,18 @@ def vertex_normals(mesh: mrmeshpy.Mesh) -> tuple[np.ndarray, np.ndarray]:
     return vertices, normals
 
 
-def write(mesh: mrmeshpy.Mesh, path: str) -> None:
+def validate_output_path(path: str) -> None:
+    """Reject unsupported mesh destinations before expensive processing."""
     ext = os.path.splitext(path)[1].lower()
-    if ext not in _SUPPORTED_EXTENSIONS:
+    if ext not in SUPPORTED_MESH_EXTENSIONS:
         raise ValueError(
             "unsupported output extension %r; supported: %s"
-            % (ext, ", ".join(_SUPPORTED_EXTENSIONS))
+            % (ext, ", ".join(SUPPORTED_MESH_EXTENSIONS))
         )
+
+
+def write(mesh: mrmeshpy.Mesh, path: str) -> None:
+    validate_output_path(path)
     parent = os.path.dirname(os.path.abspath(path))
     os.makedirs(parent, exist_ok=True)
     mrmeshpy.saveMesh(mesh, path)
@@ -389,6 +394,7 @@ def write(mesh: mrmeshpy.Mesh, path: str) -> None:
 def write_validated(mesh: mrmeshpy.Mesh, path: str) -> dict:
     from . import validate
 
+    validate_output_path(path)
     vertices, faces = to_arrays(mesh)
     in_memory = validate.validate_arrays(vertices, faces)
     if not in_memory["valid"]:

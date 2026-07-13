@@ -60,9 +60,11 @@ Selection stays automatic in the unambiguous cases:
 
 - A direct supported file or any catalog with exactly one usable volume is
   selected automatically.
-- A directory whose usable entries are all DICOM retains the established DICOM
-  ranking: usable stacks first, then smaller voxels, axial plane, and finally
-  slice count.
+- A directory whose usable entries are all DICOM with the same modality retains
+  the established DICOM ranking: usable stacks first, then smaller voxels,
+  axial plane, and finally slice count.
+- A DICOM-only catalog spanning multiple modalities has no implicit winner.
+  `list` explains the ambiguity and shows every modality; pass the intended ID.
 - A catalog with multiple usable entries that includes a file volume has no
   implicit winner. Run `list` and pass its ID.
 
@@ -185,14 +187,17 @@ written as persistent plain-text lines without animation or ANSI control
 sequences.
 
 Use `--quiet` with `convert`, `merge`, or `repair` to suppress normal progress;
-warnings and failures remain visible. Machine-readable `list --json`,
-`validate --json`, and `repair --json` suppress progress so stdout contains only
-JSON.
+warnings and failures remain visible. Warnings are printed when they become
+known, so subject-identity and unverified-HU warnings appear before loading and
+segmentation rather than after an output has been written. Machine-readable
+`list --json`, `validate --json`, and `repair --json` suppress progress so stdout
+contains only JSON.
 
 Numeric processing options reject non-finite and out-of-range values as usage
-errors. Grid and resampling allocations are also bounded before the image
-toolkit is asked to allocate them; increase the requested voxel spacing if the
-planned volume is too large.
+errors. Unsupported mesh output extensions are rejected before discovery or
+image processing. Grid and resampling allocations are also bounded before the
+image toolkit is asked to allocate them; increase the requested voxel spacing
+if the planned volume is too large.
 
 ## Understanding validation
 
