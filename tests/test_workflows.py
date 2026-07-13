@@ -99,6 +99,13 @@ def test_real_cross_format_merge_preserves_teeth_components(tmp_path):
     output = tmp_path / "merged.stl"
 
     preset = _minimal_preset("teeth")
+    effective_preset = replace(
+        preset,
+        smooth_iters=1,
+        smooth_force=0.05,
+        simplify_error_mm=0.01,
+        post_smooth_iters=1,
+    )
     result = merge.merge(
         fixed,
         moving,
@@ -107,10 +114,18 @@ def test_real_cross_format_merge_preserves_teeth_components(tmp_path):
         fixed_threshold=1000.0,
         moving_threshold=1000.0,
         grid_mm=1.0,
+        smooth_iters=effective_preset.smooth_iters,
+        smooth_force=effective_preset.smooth_force,
+        simplify_error_mm=effective_preset.simplify_error_mm,
+        post_smooth_iters=effective_preset.post_smooth_iters,
     )
 
     assert output.exists()
     assert result.quality["valid"]
     assert result.quality["components"] == 2
     assert result.surface_components == 2
-    assert result.provenance["preset"] == asdict(preset)
+    assert result.provenance["preset"] == asdict(effective_preset)
+    finishing = result.provenance["surface_finishing"]
+    assert finishing["initial_smoothing"]["requested_iterations"] == 1
+    assert finishing["decimation"]["simplify_error_mm"] == 0.01
+    assert finishing["post_smoothing"]["requested_iterations"] == 1
