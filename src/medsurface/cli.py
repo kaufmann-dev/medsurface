@@ -49,6 +49,15 @@ app = typer.Typer(
     pretty_exceptions_show_locals=False,
     rich_markup_mode="rich",
 )
+labelmap_app = typer.Typer(
+    add_completion=False,
+    help="Create surfaces from externally segmented labelmaps.",
+    invoke_without_command=True,
+    no_args_is_help=False,
+    pretty_exceptions_show_locals=False,
+    rich_markup_mode="rich",
+)
+app.add_typer(labelmap_app, name="labelmap")
 
 
 def _version_callback(value: bool) -> None:
@@ -69,6 +78,13 @@ def root(
     ),
 ) -> None:
     """Turn a medical image volume into a watertight 3D surface mesh."""
+    if ctx.invoked_subcommand is None:
+        stdout_console.print(ctx.get_help())
+
+
+@labelmap_app.callback()
+def labelmap_root(ctx: typer.Context) -> None:
+    """Create surfaces from externally segmented labelmaps."""
     if ctx.invoked_subcommand is None:
         stdout_console.print(ctx.get_help())
 
@@ -345,6 +361,26 @@ def _discover(root: Path):
         found = catalog.discover(root)
     _emit_discovery_warnings(captured)
     return found
+
+
+def _select_labelmap(path: Path, role: str | None = None):
+    """Resolve one direct self-describing image file as a labelmap candidate."""
+    found = _discover(path)
+    prefix = "%s input: " % role if role else ""
+    if not found:
+        _error("%sno supported NIfTI, NRRD, or MetaImage volume found" % prefix)
+        raise typer.Exit(1)
+    if len(found) != 1 or found[0].dicom is not None:
+        _error("%slabelmap must be one NIfTI, NRRD, or MetaImage file" % prefix)
+        raise typer.Exit(2)
+
+    from . import catalog
+
+    try:
+        return catalog.select(found, None), found
+    except ValueError as exc:
+        _error("%s%s" % (prefix, exc))
+        raise typer.Exit(1) from None
 
 
 def _plain(value: object, style: str | None = None) -> Text:
@@ -831,6 +867,281 @@ def convert(
 
     _warn_if_invalid(report, "output")
 
+    _exit_for_quality(report)
+
+
+@labelmap_app.command("convert")
+def convert_labelmap(
+    input_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Direct NIfTI, NRRD, or MetaImage labelmap file.",
+    ),
+    output: Path = typer.Option(..., "-o", "--output", help="Output .stl/.ply/.obj file."),
+    resample_mm: float | None = typer.Option(
+        None,
+        "--resample-mm",
+        help="Isotropic surface-grid voxel size in mm (0 = native).",
+    ),
+    smooth_iters: int | None = typer.Option(
+        None, "--smooth-iters", help="MeshLib relaxation iterations."
+    ),
+    smooth_force: float | None = typer.Option(
+        None, "--smooth-force", help="MeshLib relaxation strength per iteration."
+    ),
+    simplify_error_mm: float | None = typer.Option(
+        None,
+        "--simplify-error-mm",
+        help="MeshLib estimated surface-deviation/QEM limit in model mm (0 = off).",
+    ),
+    post_smooth_iters: int | None = typer.Option(
+        None, "--post-smooth-iters", help="Smoothing after simplification."
+    ),
+    no_cap: bool = typer.Option(
+        False, "--no-cap", help="Do not close foreground at the labelmap boundary."
+    ),
+    allow_large_volume: bool = typer.Option(
+        False,
+        "--allow-large-volume",
+        help="Bypass the 500-million-voxel limits; may exhaust memory.",
+    ),
+    json_file: Path | None = typer.Option(
+        None, "--json", help="Write results and provenance to this JSON file."
+    ),
+    quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
+) -> None:
+    """Create one mesh from every nonzero voxel in a labelmap."""
+    _validate_mesh_output(output)
+    _validate_processing_numbers(
+        nonnegative=[
+            ("--resample-mm", resample_mm),
+            ("--smooth-iters", smooth_iters),
+            ("--simplify-error-mm", simplify_error_mm),
+            ("--post-smooth-iters", post_smooth_iters),
+        ],
+        unit_interval=(("--smooth-force", smooth_force),),
+    )
+    emitted_warnings: list[str] = []
+
+    def emit_warning(message: str) -> None:
+        emitted_warnings.append(message)
+        _warn(message)
+
+    progress = _ProgressDisplay(not quiet, "Discovering labelmap ...")
+    with progress:
+        chosen, found = _select_labelmap(input_path)
+        try:
+            _protect_output_paths(found, output, json_file)
+        except ValueError as exc:
+            _error(exc)
+            raise typer.Exit(2) from None
+
+        progress.update("Loading labelmap conversion engine ...")
+        from . import labelmap as labelmap_mod
+
+        try:
+            result = labelmap_mod.convert(
+                candidate=chosen,
+                output_path=str(output),
+                resample_mm=resample_mm,
+                smooth_iters=smooth_iters,
+                smooth_force=smooth_force,
+                simplify_error_mm=simplify_error_mm,
+                post_smooth_iters=post_smooth_iters,
+                cap_field_of_view=not no_cap,
+                allow_large_volume=allow_large_volume,
+                log=progress.log,
+                warn=emit_warning,
+            )
+        except ValueError as exc:
+            _error(exc)
+            raise typer.Exit(1) from None
+
+        report = result.quality
+        if json_file is not None:
+            payload = {
+                "result": {
+                    "output": result.output_path,
+                    "triangles": result.triangles,
+                    "vertices": result.vertices,
+                    "bounds_mm": list(result.bounds_mm),
+                    "seconds": result.seconds,
+                    "capped_field_of_view": result.capped_field_of_view,
+                    "labelmap_components": result.labelmap_components,
+                    "surface_components": result.surface_components,
+                    "warnings": result.warnings,
+                },
+                "provenance": result.provenance,
+                "quality": report,
+            }
+            progress.update("Writing JSON report ...")
+            try:
+                _write_json_file(json_file, payload)
+            except OSError as exc:
+                _error("cannot write JSON report %s: %s" % (json_file, exc))
+                raise typer.Exit(1) from None
+
+    _emit_remaining_warnings(result.warnings, emitted_warnings)
+    if not quiet:
+        _success("wrote %s" % result.output_path)
+        _log(
+            "triangles %s   vertices %s   %.1fs"
+            % (f"{result.triangles:,}", f"{result.vertices:,}", result.seconds)
+        )
+        _print_quality(report)
+        if json_file is not None:
+            _success("wrote %s" % json_file)
+    _warn_if_invalid(report, "output")
+    _exit_for_quality(report)
+
+
+@labelmap_app.command("merge")
+def merge_labelmaps(
+    fixed_input: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Fixed labelmap; defines the output coordinate frame.",
+    ),
+    moving_input: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Moving labelmap to register to the fixed labelmap.",
+    ),
+    output: Path = typer.Option(..., "-o", "--output", help="Output .stl/.ply/.obj file."),
+    grid_mm: float = typer.Option(
+        defaults.DEFAULT_MERGE_GRID_MM,
+        "--grid-mm",
+        help="Isotropic fused-grid voxel size in mm.",
+    ),
+    smooth_iters: int | None = typer.Option(
+        None, "--smooth-iters", help="MeshLib relaxation iterations."
+    ),
+    smooth_force: float | None = typer.Option(
+        None, "--smooth-force", help="MeshLib relaxation strength per iteration."
+    ),
+    simplify_error_mm: float | None = typer.Option(
+        None,
+        "--simplify-error-mm",
+        help="MeshLib estimated surface-deviation/QEM limit in model mm (0 = off).",
+    ),
+    post_smooth_iters: int | None = typer.Option(
+        None, "--post-smooth-iters", help="Smoothing after simplification."
+    ),
+    force: bool = typer.Option(False, "--force", help="Override registration-quality gates."),
+    allow_large_volume: bool = typer.Option(
+        False,
+        "--allow-large-volume",
+        help="Bypass the 500-million-voxel limits; may exhaust memory.",
+    ),
+    json_file: Path | None = typer.Option(
+        None, "--json", help="Write results and provenance to this JSON file."
+    ),
+    quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
+) -> None:
+    """Rigidly register two labelmaps and fuse their nonzero foreground."""
+    _validate_mesh_output(output)
+    _validate_processing_numbers(
+        nonnegative=[
+            ("--smooth-iters", smooth_iters),
+            ("--simplify-error-mm", simplify_error_mm),
+            ("--post-smooth-iters", post_smooth_iters),
+        ],
+        positive=(("--grid-mm", grid_mm),),
+        unit_interval=(("--smooth-force", smooth_force),),
+    )
+    emitted_warnings: list[str] = []
+
+    def emit_warning(message: str) -> None:
+        emitted_warnings.append(message)
+        _warn(message)
+
+    progress = _ProgressDisplay(not quiet, "Discovering fixed labelmap ...")
+    with progress:
+        fixed, fixed_found = _select_labelmap(fixed_input, "fixed")
+        if fixed_input.resolve() == moving_input.resolve():
+            moving, moving_found = fixed, fixed_found
+        else:
+            progress.update("Discovering moving labelmap ...")
+            moving, moving_found = _select_labelmap(moving_input, "moving")
+        try:
+            _protect_output_paths([*fixed_found, *moving_found], output, json_file)
+        except ValueError as exc:
+            _error(exc)
+            raise typer.Exit(2) from None
+
+        progress.update("Loading labelmap merge engine ...")
+        from . import labelmap as labelmap_mod
+        from . import merge as merge_mod
+
+        try:
+            result = labelmap_mod.merge(
+                fixed=fixed,
+                moving=moving,
+                output_path=str(output),
+                grid_mm=grid_mm,
+                smooth_iters=smooth_iters,
+                smooth_force=smooth_force,
+                simplify_error_mm=simplify_error_mm,
+                post_smooth_iters=post_smooth_iters,
+                force=force,
+                allow_large_volume=allow_large_volume,
+                log=progress.log,
+                warn=emit_warning,
+            )
+        except merge_mod.MergeError as exc:
+            _error(exc)
+            raise typer.Exit(3) from None
+        except ValueError as exc:
+            _error(exc)
+            raise typer.Exit(1) from None
+
+        report = result.quality
+        if json_file is not None:
+            payload = {
+                "result": {
+                    "output": result.output_path,
+                    "triangles": result.triangles,
+                    "vertices": result.vertices,
+                    "bounds_mm": list(result.bounds_mm),
+                    "grid_mm": result.grid_mm,
+                    "grid_size": list(result.grid_size),
+                    "volume_fixed_mm3": result.volume_fixed_mm3,
+                    "volume_moving_mm3": result.volume_moving_mm3,
+                    "volume_fused_mm3": result.volume_union_mm3,
+                    "surface_components": result.surface_components,
+                    "seconds": result.seconds,
+                    "warnings": result.warnings,
+                },
+                "provenance": result.provenance,
+                "quality": report,
+            }
+            progress.update("Writing JSON report ...")
+            try:
+                _write_json_file(json_file, payload)
+            except OSError as exc:
+                _error("cannot write JSON report %s: %s" % (json_file, exc))
+                raise typer.Exit(1) from None
+
+    _emit_remaining_warnings(result.warnings, emitted_warnings)
+    if not quiet:
+        _success("wrote %s" % result.output_path)
+        _log(
+            "triangles %s   vertices %s   %.1fs"
+            % (f"{result.triangles:,}", f"{result.vertices:,}", result.seconds)
+        )
+        _print_quality(report)
+        if json_file is not None:
+            _success("wrote %s" % json_file)
+    _warn_if_invalid(report, "fused output")
     _exit_for_quality(report)
 
 

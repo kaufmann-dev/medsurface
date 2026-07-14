@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import asdict, dataclass
 from typing import Any, Callable
@@ -41,6 +42,62 @@ class SurfaceFinish:
     surface_components: int
     warnings: list[str]
     provenance: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class SurfaceSettings:
+    """Mask-to-mesh controls shared by conversion and fusion workflows."""
+
+    resample_mm: float
+    smooth_iters: int
+    smooth_force: float
+    simplify_error_mm: float
+    post_smooth_iters: int
+    keep_largest_component: bool
+
+
+@dataclass
+class MaskSurfaceResult:
+    triangles: int
+    vertices: int
+    bounds_mm: tuple[float, ...]
+    labelmap_components: int
+    surface_components: int
+    capped_field_of_view: bool
+    surface_finishing: dict[str, Any]
+    quality: dict[str, Any]
+
+
+def surface_settings(preset: Preset, *, keep_largest_component: bool | None = None) -> SurfaceSettings:
+    """Extract only the mask-to-mesh portion of a conversion preset."""
+    return SurfaceSettings(
+        resample_mm=preset.resample_mm,
+        smooth_iters=preset.smooth_iters,
+        smooth_force=preset.smooth_force,
+        simplify_error_mm=preset.simplify_error_mm,
+        post_smooth_iters=preset.post_smooth_iters,
+        keep_largest_component=(
+            preset.keep_largest_component
+            if keep_largest_component is None
+            else keep_largest_component
+        ),
+    )
+
+
+def validate_surface_settings(settings: SurfaceSettings) -> None:
+    nonnegative = {
+        "resample_mm": settings.resample_mm,
+        "smooth_iters": settings.smooth_iters,
+        "simplify_error_mm": settings.simplify_error_mm,
+        "post_smooth_iters": settings.post_smooth_iters,
+    }
+    for name, value in nonnegative.items():
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("%s must be finite and non-negative" % name)
+    if not math.isfinite(settings.smooth_force) or not 0 < settings.smooth_force <= 1:
+        raise ValueError(
+            "smooth_force must be finite, greater than zero, and at most one"
+        )
 
 
 def finish_surface(
@@ -154,6 +211,102 @@ def finish_surface(
     )
 
 
+def mesh_binary_mask(
+    binary: sitk.Image,
+    output_path: str,
+    *,
+    settings: SurfaceSettings,
+    cap_field_of_view: bool,
+    allow_large_volume: bool,
+    step: StepRunner,
+    log: Logger,
+    warn: Logger,
+) -> MaskSurfaceResult:
+    """Extract, finish, validate, and publish one already-binary mask."""
+    validate_surface_settings(settings)
+    surface.validate_output_path(output_path)
+
+    def count_components() -> int:
+        label_stats = sitk.LabelShapeStatisticsImageFilter()
+        label_stats.Execute(sitk.ConnectedComponent(binary))
+        return len(label_stats.GetLabels())
+
+    labelmap_components = step("analyse components", count_components)
+    touches = volume_mod.touches_boundary(binary)
+    if touches and not cap_field_of_view:
+        warn(
+            "segmented foreground reaches the input boundary and --no-cap was given, "
+            "so the surface will be left open there"
+        )
+    if touches and cap_field_of_view:
+        warn(
+            "segmented foreground reaches the input boundary; the opening has been "
+            "capped flat. Missing anatomy cannot be recovered."
+        )
+
+    if cap_field_of_view:
+        binary = segment.pad(binary, 1)
+
+    if settings.resample_mm > 0:
+        native = min(binary.GetSpacing())
+        if settings.resample_mm > native:
+            warn(
+                "--resample-mm %.2f is coarser than the native %.3f mm voxel, so "
+                "structures thinner than the target voxel can be erased. Use "
+                "--simplify-error-mm to reduce triangles without changing the grid."
+                % (settings.resample_mm, native)
+            )
+        grid = step(
+            "resample isotropic",
+            lambda: segment.resample_isotropic(
+                binary,
+                settings.resample_mm,
+                log,
+                allow_large_volume=allow_large_volume,
+            ),
+        )
+        isovalue = segment.ISO_OCCUPANCY
+    else:
+        grid = binary
+        isovalue = 0.5
+
+    affine = surface.index_to_physical(grid)
+    poly = step("marching cubes", lambda: surface.marching_cubes(grid, isovalue))
+    raw_faces = int(poly.topology.numValidFaces())
+    log("  raw triangles: %s" % f"{raw_faces:,}")
+    if raw_faces == 0:
+        raise ValueError("marching cubes produced no triangles")
+
+    finished = finish_surface(
+        poly,
+        smooth_iters=settings.smooth_iters,
+        smooth_force=settings.smooth_force,
+        simplify_error_mm=settings.simplify_error_mm,
+        post_smooth_iters=settings.post_smooth_iters,
+        keep_largest_component=settings.keep_largest_component,
+        step=step,
+        log=log,
+    )
+    for message in finished.warnings:
+        warn(message)
+    poly = step("index -> physical space", lambda: surface.transform(finished.poly, affine))
+    quality = step(
+        "validate and publish mesh",
+        lambda: surface.write_validated(poly, output_path),
+    )
+
+    return MaskSurfaceResult(
+        triangles=int(poly.topology.numValidFaces()),
+        vertices=int(poly.topology.numValidVerts()),
+        bounds_mm=surface.bounds_mm(poly),
+        labelmap_components=labelmap_components,
+        surface_components=finished.surface_components,
+        capped_field_of_view=bool(touches and cap_field_of_view),
+        surface_finishing=finished.provenance,
+        quality=quality,
+    )
+
+
 def build_mask(image: sitk.Image, preset: Preset, threshold: float,
                log: Callable[[str], None] | None = None) -> sitk.Image:
     """Threshold and clean a volume into a binary bone mask.
@@ -208,11 +361,8 @@ def threshold_warnings(
     ]
 
 
-def source_provenance(
-    vol: volume_mod.Volume,
-    threshold: float,
-    threshold_source: str,
-) -> dict[str, Any]:
+def volume_provenance(vol: volume_mod.Volume) -> dict[str, Any]:
+    """Format-neutral provenance shared by intensity and labelmap inputs."""
     candidate = vol.candidate
     if isinstance(candidate.source, DicomSource):
         path = str(candidate.source.catalog_path)
@@ -231,9 +381,6 @@ def source_provenance(
         "modality": candidate.modality,
         "description": candidate.description,
         "plane": candidate.plane,
-        "hu_calibration": "verified" if volume_mod.has_calibrated_hu(candidate) else "unverified",
-        "threshold": threshold,
-        "threshold_source": threshold_source,
     }
     if candidate.dicom is not None:
         series = candidate.dicom
@@ -249,6 +396,24 @@ def source_provenance(
             "multi_energy_ct_acquisition": series.multi_energy_ct_acquisition,
             "hu_calibration_consistent": series.hu_calibration_consistent,
         }
+    return record
+
+
+def source_provenance(
+    vol: volume_mod.Volume,
+    threshold: float,
+    threshold_source: str,
+) -> dict[str, Any]:
+    record = volume_provenance(vol)
+    record.update(
+        {
+            "hu_calibration": (
+                "verified" if volume_mod.has_calibrated_hu(vol.candidate) else "unverified"
+            ),
+            "threshold": threshold,
+            "threshold_source": threshold_source,
+        }
+    )
     return record
 
 
@@ -312,96 +477,38 @@ def convert(
         )
 
     binary = step("segment", lambda: build_mask(vol.image, preset, value, say))
-
-    def count_components() -> int:
-        label_stats = sitk.LabelShapeStatisticsImageFilter()
-        label_stats.Execute(sitk.ConnectedComponent(binary))
-        return len(label_stats.GetLabels())
-
-    labelmap_components = step("analyse components", count_components)
-
-    touches = volume_mod.touches_boundary(binary)
-    if touches and not cap_field_of_view:
-        add_warning(
-            "anatomy reaches the edge of the scanned volume and --no-cap was given, "
-            "so the surface will be left open there"
-        )
-    if touches and cap_field_of_view:
-        add_warning(
-            "anatomy is truncated by the scanner's field of view; the opening has "
-            "been capped flat. The missing anatomy cannot be recovered."
-        )
-
-    if cap_field_of_view:
-        binary = segment.pad(binary, 1)
-
-    if preset.resample_mm > 0:
-        native = min(vol.spacing)
-        if preset.resample_mm > native:
-            add_warning(
-                "--resample-mm %.2f is coarser than the native %.3f mm voxel, so structures "
-                "thinner than the target voxel are erased. On a head CT, resampling to 0.6 mm "
-                "reopened 257 pores that the morphological closing had sealed, and terraced "
-                "the vault. Use --simplify-error-mm to shed triangles without touching the grid."
-                % (preset.resample_mm, native)
-            )
-        grid = step("resample isotropic",
-                    lambda: segment.resample_isotropic(
-                        binary,
-                        preset.resample_mm,
-                        say,
-                        allow_large_volume=allow_large_volume,
-                    ))
-        isovalue = segment.ISO_OCCUPANCY
-    else:
-        grid = binary
-        isovalue = 0.5
-
-    affine = surface.index_to_physical(grid)
-    poly = step("marching cubes", lambda: surface.marching_cubes(grid, isovalue))
-    raw_faces = int(poly.topology.numValidFaces())
-    say("  raw triangles: %s" % f"{raw_faces:,}")
-    if raw_faces == 0:
-        raise ValueError("marching cubes produced no triangles")
-
-    finished = finish_surface(
-        poly,
-        smooth_iters=preset.smooth_iters,
-        smooth_force=preset.smooth_force,
-        simplify_error_mm=preset.simplify_error_mm,
-        post_smooth_iters=preset.post_smooth_iters,
-        keep_largest_component=preset.keep_largest_component,
+    meshed = mesh_binary_mask(
+        binary,
+        output_path,
+        settings=surface_settings(preset),
+        cap_field_of_view=cap_field_of_view,
+        allow_large_volume=allow_large_volume,
         step=step,
         log=say,
+        warn=add_warning,
     )
-    poly = finished.poly
-    surface_components = finished.surface_components
-    add_warnings(finished.warnings)
-    poly = step("index -> physical space", lambda: surface.transform(poly, affine))
-
-    quality = step("validate and publish mesh", lambda: surface.write_validated(poly, output_path))
 
     provenance = {
         "input": source_provenance(vol, value, source),
         "preset": asdict(preset),
-        "surface_finishing": finished.provenance,
-        "capped_field_of_view": bool(touches and cap_field_of_view),
+        "surface_finishing": meshed.surface_finishing,
+        "capped_field_of_view": meshed.capped_field_of_view,
         "allow_large_volume": bool(allow_large_volume),
         "coordinate_system": "SimpleITK physical space of the input volume",
     }
 
     return Result(
         output_path=output_path,
-        triangles=int(poly.topology.numValidFaces()),
-        vertices=int(poly.topology.numValidVerts()),
-        bounds_mm=surface.bounds_mm(poly),
+        triangles=meshed.triangles,
+        vertices=meshed.vertices,
+        bounds_mm=meshed.bounds_mm,
         threshold_used=value,
         threshold_source=source,
-        labelmap_components=labelmap_components,
-        surface_components=surface_components,
-        capped_field_of_view=bool(touches and cap_field_of_view),
+        labelmap_components=meshed.labelmap_components,
+        surface_components=meshed.surface_components,
+        capped_field_of_view=meshed.capped_field_of_view,
         seconds=time.time() - t0,
         warnings=warnings,
         provenance=provenance,
-        quality=quality,
+        quality=meshed.quality,
     )

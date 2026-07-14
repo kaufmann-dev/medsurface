@@ -2,6 +2,7 @@
 
 [Project README](../README.md) · [Choosing a volume](#choosing-a-volume) ·
 [Choosing a preset](#choosing-a-preset) ·
+[Using an external labelmap](#using-an-external-labelmap) ·
 [Input limitations](#input-requirements-and-limitations) ·
 [Long-running commands](#long-running-commands) ·
 [Safety and privacy](#safety-and-privacy) · [Technical reference](technical-reference.md)
@@ -23,6 +24,11 @@ surface.
   be recovered from the input.
 - `merge` does not read identity fields or establish subject identity. Confirm
   that both inputs show the same subject before merging them.
+- Both merge commands use rigid registration and are intended for matching
+  non-deforming anatomy such as bone. Movement or deformation between
+  acquisitions can produce a plausible but incorrect fusion.
+- Before `labelmap merge`, also confirm that both masks contain the same selected
+  structures. Label values and structure names are not inspected.
 - `--force` can bypass failed registration-quality checks and produce a
   plausible-looking but incorrect fusion. It does not bypass selection, loading,
   duplicate-input, or voxel-count errors.
@@ -141,6 +147,60 @@ An explicit CLI value overrides the corresponding preset value. Run
 overrides. Both commands accept the shared median, opening, closing, island and
 component selection, smoothing, and simplification controls.
 
+## Using an external labelmap
+
+Use `labelmap convert` when TotalSegmentator or another program has already
+segmented the image:
+
+```sh
+medsurface labelmap convert segmentation.nii.gz -o surface.stl
+```
+
+This starts after segmentation. It loads the labelmap, treats zero as background
+and every nonzero value as foreground, then extracts, finishes, validates, and
+writes one surface mesh. It does not threshold image intensities, run Otsu,
+apply median/opening/closing filters, remove mask islands, or interpret label
+numbers. Separate nonzero regions are all retained, so one multilabel file can
+produce one STL containing multiple structures.
+
+The input must be one direct NIfTI, NRRD, or MetaImage file. Its voxels must be
+finite, non-negative integers; integer-valued floating-point images are
+accepted, but probability maps and fractional labels are not. Directories,
+DICOM, selectors, presets, and structure-name flags are deliberately absent.
+The surface uses the normal `bone` finishing defaults and retains every surface
+component. Surface controls such as `--smooth-iters`, `--smooth-force`, and
+`--simplify-error-mm` remain available.
+
+TotalSegmentator is not installed or run by medsurface. Its default output is a
+directory containing one binary `.nii.gz` file per structure; pass any one of
+those files directly. To put several selected structures in one mesh, ask
+TotalSegmentator for one multilabel file and select the structures there:
+
+```sh
+TotalSegmentator -i scan.nii.gz -o selected.nii.gz \
+  --ml --roi_subset skull vertebrae_C1
+medsurface labelmap convert selected.nii.gz -o selected.stl
+```
+
+All nonzero labels in `selected.nii.gz` become one mesh. Selecting every
+structure is the same workflow without `--roi_subset`, although a whole-body
+surface can be large and contain many disconnected components.
+
+Use `labelmap merge` only for matching segmentations from two acquisitions:
+
+```sh
+medsurface labelmap merge fixed-selected.nii.gz moving-selected.nii.gz \
+  -o fused.stl
+```
+
+It rigidly registers the moving foreground to the fixed foreground, checks the
+registration, unions the masks on the shared fusion grid, and creates one mesh
+in the fixed labelmap's physical coordinate system. Confirm that both inputs
+belong to the same subject and contain the same selected, non-deforming
+structures. `--force` bypasses only failed registration-quality gates. Do not
+use this command merely to combine separate structure files from one scan;
+create one multilabel file upstream instead.
+
 ## Input requirements and limitations
 
 Supported file volumes are NIfTI (`.nii`, `.nii.gz`), NRRD (`.nrrd`, `.nhdr`),
@@ -161,9 +221,9 @@ Source volumes and planned conversion or merge grids above 500 million voxels
 are refused before their corresponding pixel read or allocation. This is a
 coarse emergency ceiling rather than a memory guarantee: pixel types and
 processing stages use different amounts of memory per voxel. Prefer resampling
-to a coarser spacing. Expert users can pass `--allow-large-volume` to `convert`
-or `merge` to bypass every voxel-count ceiling at the risk of swapping, an
-allocation failure, or an operating-system OOM termination.
+to a coarser spacing. Expert users can pass `--allow-large-volume` to any
+`convert` or `merge` command to bypass every voxel-count ceiling at the risk of
+swapping, an allocation failure, or an operating-system OOM termination.
 
 Classic single-frame DICOM stacks additionally have these limitations:
 
@@ -190,19 +250,19 @@ gives the exact behavior for each known case.
 
 ## Long-running commands
 
-`list`, `convert`, `merge`, `validate`, and `repair` show the current stage while
-they work. On an interactive terminal, an indeterminate spinner and elapsed
-time make activity visible without inventing a percentage that the processing
-libraries cannot measure. When output is redirected, the same stage changes are
-written as persistent plain-text lines without animation or ANSI control
-sequences.
+`list`, both `convert` commands, both `merge` commands, `validate`, and `repair`
+show the current stage while they work. On an interactive terminal, an
+indeterminate spinner and elapsed time make activity visible without inventing
+a percentage that the processing libraries cannot measure. When output is
+redirected, the same stage changes are written as persistent plain-text lines
+without animation or ANSI control sequences.
 
-Use `--quiet` with `convert`, `merge`, or `repair` to suppress normal progress;
-warnings and failures remain visible. Warnings are printed when they become
-known, so subject-identity and unverified-HU warnings appear before loading and
-segmentation rather than after an output has been written. Machine-readable
-`list --json`, `validate --json`, and `repair --json` suppress progress so stdout
-contains only JSON.
+Use `--quiet` with either `convert`, either `merge`, or `repair` to suppress
+normal progress; warnings and failures remain visible. Warnings are printed
+when they become known, so identity, rigid-registration, structure-content, and
+unverified-HU warnings appear before loading and processing rather than after an
+output has been written. Machine-readable `list --json`, `validate --json`, and
+`repair --json` suppress progress so stdout contains only JSON.
 
 Numeric processing options reject non-finite and out-of-range values as usage
 errors. Unsupported mesh output extensions are rejected before discovery or
@@ -218,9 +278,10 @@ and atomically publish it only when both checks pass. A failed operation leaves
 an existing destination unchanged. `validate` runs the same checks without
 changing its input.
 
-`convert --json FILE` and `merge --json FILE` publish the report atomically too.
-The report and mesh must be different files, and neither may overwrite a
-discovered image header, detached payload, or DICOM instance.
+Both `convert` commands and both `merge` commands accept `--json FILE` and
+publish the report atomically. The report and mesh must be different files, and
+neither may overwrite a discovered image header, detached payload, or DICOM
+instance.
 
 A report is valid only when MeshLib imports the mesh as watertight, consistently
 wound, and enclosing a volume, with no holes, boundary edges, disoriented faces,

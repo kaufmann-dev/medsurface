@@ -206,7 +206,7 @@ def test_surface_overlap_is_the_weaker_direction():
     [
         ({"overlap_fixed_in_moving": 0.02}, "surfaces agree over only"),
         ({"overlap_moving_in_fixed": 0.02}, "surfaces agree over only"),
-        ({"shared_fov_dice": 0.05}, "bone agreement"),
+        ({"shared_fov_dice": 0.05}, "foreground agreement"),
         ({"shared_fov_mm3": 100.0}, "share only"),
     ],
 )
@@ -359,6 +359,13 @@ def _candidate(uid="1.2.3", modality="CT", part=1, *, path=None):
         components=1,
         plane="axial",
     )
+
+
+def test_every_merge_warns_that_registration_requires_rigid_anatomy():
+    warnings = merge_mod.check_compatible(_candidate(uid="a"), _candidate(uid="b"))
+
+    assert any("rigid registration" in warning for warning in warnings)
+    assert any("non-deforming anatomy" in warning for warning in warnings)
 
 
 def test_merge_announces_volume_loading_before_it_starts(monkeypatch):

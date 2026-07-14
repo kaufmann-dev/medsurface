@@ -102,13 +102,37 @@ class MergeResult:
     quality: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class MaskMergeResult:
+    triangles: int
+    vertices: int
+    bounds_mm: tuple[float, ...]
+    grid_size: tuple[int, int, int]
+    registration: RegistrationResult
+    volume_fixed_mm3: float
+    volume_moving_mm3: float
+    volume_union_mm3: float
+    surface_components: int
+    warnings: list[str]
+    surface_finishing: dict[str, Any]
+    quality: dict[str, Any]
+
+
+RIGID_REGISTRATION_WARNING = (
+    "merge uses rigid registration and is intended for matching non-deforming "
+    "anatomy such as bone; anatomy that moved or deformed between acquisitions "
+    "can produce a plausible but incorrect fusion"
+)
+
+
 def check_compatible(fixed: VolumeCandidate, moving: VolumeCandidate) -> list[str]:
     """Reject duplicate inputs and state the format-neutral identity contract."""
     if same_source(fixed, moving):
         raise MergeError("fixed and moving inputs resolve to the same volume")
     return [
         "subject identity is not verified; confirm that fixed and moving volumes "
-        "show the same subject before using the fused surface"
+        "show the same subject before using the fused surface",
+        RIGID_REGISTRATION_WARNING,
     ]
 
 
@@ -134,7 +158,7 @@ def check_registration(result: RegistrationResult, force: bool = False) -> None:
                100 * MIN_SURFACE_OVERLAP))
     if result.shared_fov_dice < MIN_SHARED_FOV_DICE:
         problems.append(
-            "bone agreement in the shared field of view is %.3f (need %.2f)"
+            "foreground agreement in the shared field of view is %.3f (need %.2f)"
             % (result.shared_fov_dice, MIN_SHARED_FOV_DICE))
 
     if not problems:
@@ -204,6 +228,185 @@ def _resample_field(image, size, origin, grid_mm, transform):
     r.SetDefaultPixelValue(0.0)
     r.SetTransform(transform)
     return r.Execute(image)
+
+
+def fuse_masks(
+    fixed_mask: sitk.Image,
+    moving_mask: sitk.Image,
+    output_path: str,
+    *,
+    settings: pipeline.SurfaceSettings,
+    grid_mm: float = DEFAULT_MERGE_GRID_MM,
+    force: bool = False,
+    allow_large_volume: bool = False,
+    log: Logger | None = None,
+    warn: Logger | None = None,
+) -> MaskMergeResult:
+    """Register two binary masks, fuse their occupancy, and publish one mesh."""
+    surface.validate_output_path(output_path)
+    if not math.isfinite(grid_mm) or grid_mm <= 0:
+        raise ValueError("grid_mm must be finite and greater than zero")
+    pipeline.validate_surface_settings(settings)
+
+    def say(message: str) -> None:
+        if log:
+            log(message)
+
+    def step(message: str, function):
+        say("%s ..." % message)
+        before = time.time()
+        value = function()
+        say("  %-36s %6.1fs" % (message, time.time() - before))
+        return value
+
+    warnings: list[str] = []
+
+    def add_warning(message: str) -> None:
+        warnings.append(message)
+        if warn:
+            warn(message)
+
+    say("registering ...")
+    try:
+        reg = registration.rigid_register(
+            fixed_mask,
+            moving_mask,
+            log=lambda message: say("  " + message),
+        )
+    except registration.RegistrationError as exc:
+        raise MergeError(str(exc)) from None
+    for line in reg.summary().splitlines():
+        say("  " + line.strip() if line.startswith(" ") else "  " + line)
+    check_registration(reg, force=force)
+
+    finest = min(min(fixed_mask.GetSpacing()), min(moving_mask.GetSpacing()))
+    if grid_mm > finest:
+        add_warning(
+            "the fused grid is %.2f mm but the finest input voxel is %.3f mm; "
+            "structures thinner than the grid are lost. Lower --grid-mm to keep "
+            "them, at cubic cost in memory." % (grid_mm, finest)
+        )
+
+    size, origin = step(
+        "plan fused grid",
+        lambda: _common_grid(
+            fixed_mask,
+            moving_mask,
+            reg.transform,
+            grid_mm,
+            allow_large_volume=allow_large_volume,
+        ),
+    )
+    voxels = math.prod(size)
+    say(
+        "fused grid %s at %.2f mm isotropic (%.0f M voxels)"
+        % ("x".join(str(value) for value in size), grid_mm, voxels / 1e6)
+    )
+    identity = sitk.Transform(3, sitk.sitkIdentity)
+    inverse = registration.inverse_transform(reg.transform)
+
+    fixed_field = step(
+        "resample fixed",
+        lambda: _resample_field(
+            segment.antialias_for_grid(fixed_mask, grid_mm),
+            size,
+            origin,
+            grid_mm,
+            identity,
+        ),
+    )
+    moving_field = step(
+        "resample moving",
+        lambda: _resample_field(
+            segment.antialias_for_grid(moving_mask, grid_mm),
+            size,
+            origin,
+            grid_mm,
+            inverse,
+        ),
+    )
+    fused = step(
+        "fuse occupancy fields",
+        lambda: sitk.Clamp(
+            sitk.Maximum(fixed_field, moving_field),
+            sitk.sitkFloat32,
+            0.0,
+            1.0,
+        ),
+    )
+
+    voxel_mm3 = grid_mm**3
+
+    def measure_volumes() -> tuple[float, float, float]:
+        return (
+            float((sitk.GetArrayViewFromImage(fixed_field) > 0.5).sum()) * voxel_mm3,
+            float((sitk.GetArrayViewFromImage(moving_field) > 0.5).sum()) * voxel_mm3,
+            float((sitk.GetArrayViewFromImage(fused) > 0.5).sum()) * voxel_mm3,
+        )
+
+    fixed_volume_mm3, moving_volume_mm3, union_volume_mm3 = step(
+        "measure fused volumes",
+        measure_volumes,
+    )
+    say(
+        "foreground: fixed %.0f cm3 | moving %.0f cm3 | fused %.0f cm3"
+        % (
+            fixed_volume_mm3 / 1000,
+            moving_volume_mm3 / 1000,
+            union_volume_mm3 / 1000,
+        )
+    )
+
+    fused = segment.pad(fused, 1)
+    affine = surface.index_to_physical(fused)
+    poly = step(
+        "marching cubes",
+        lambda: surface.marching_cubes(fused, segment.ISO_OCCUPANCY),
+    )
+    if poly.topology.numValidFaces() == 0:
+        raise MergeError("the fused volume produced no surface")
+    say("  raw triangles %s" % f"{poly.topology.numValidFaces():,}")
+
+    finished = pipeline.finish_surface(
+        poly,
+        smooth_iters=settings.smooth_iters,
+        smooth_force=settings.smooth_force,
+        simplify_error_mm=settings.simplify_error_mm,
+        post_smooth_iters=settings.post_smooth_iters,
+        keep_largest_component=settings.keep_largest_component,
+        step=step,
+        log=say,
+    )
+    for message in finished.warnings:
+        add_warning(message)
+    poly = step(
+        "index -> fixed physical space",
+        lambda: surface.transform(finished.poly, affine),
+    )
+
+    boundary, holes = step("check surface defects", lambda: surface.count_defects(poly))
+    if boundary or holes:
+        add_warning(
+            "fused surface has %d boundary edge(s) and %d hole(s)" % (boundary, holes)
+        )
+    quality = step(
+        "validate and publish mesh",
+        lambda: surface.write_validated(poly, output_path),
+    )
+    return MaskMergeResult(
+        triangles=int(poly.topology.numValidFaces()),
+        vertices=int(poly.topology.numValidVerts()),
+        bounds_mm=surface.bounds_mm(poly),
+        grid_size=size,
+        registration=reg,
+        volume_fixed_mm3=fixed_volume_mm3,
+        volume_moving_mm3=moving_volume_mm3,
+        volume_union_mm3=union_volume_mm3,
+        surface_components=finished.surface_components,
+        warnings=warnings,
+        surface_finishing=finished.provenance,
+        quality=quality,
+    )
 
 
 def merge(
@@ -302,119 +505,33 @@ def merge(
 
     fixed_mask = step("segment fixed", lambda: pipeline.build_mask(fixed_volume.image, preset, fixed_value))
     moving_mask = step("segment moving", lambda: pipeline.build_mask(moving_volume.image, preset, moving_value))
-
-    say("registering ...")
-    try:
-        reg = registration.rigid_register(
-            fixed_mask,
-            moving_mask,
-            log=lambda m: say("  " + m),
-        )
-    except registration.RegistrationError as exc:
-        raise MergeError(str(exc)) from None
-    for line in reg.summary().splitlines():
-        say("  " + line.strip() if line.startswith(" ") else "  " + line)
-    check_registration(reg, force=force)
-
-    finest = min(min(fixed_volume.spacing), min(moving_volume.spacing))
-    if grid_mm > finest:
-        add_warning(
-            "the fused grid is %.2f mm but the finest input voxel is %.3f mm; "
-            "structures thinner than the grid are lost. Lower --grid-mm to keep "
-            "them, at cubic cost in memory." % (grid_mm, finest)
-        )
-
-    size, origin = step(
-        "plan fused grid",
-        lambda: _common_grid(
-            fixed_mask,
-            moving_mask,
-            reg.transform,
-            grid_mm,
-            allow_large_volume=allow_large_volume,
-        ),
-    )
-    voxels = math.prod(size)
-    say("fused grid %s at %.2f mm isotropic (%.0f M voxels)"
-        % ("x".join(str(v) for v in size), grid_mm, voxels / 1e6))
-    identity = sitk.Transform(3, sitk.sitkIdentity)
-    inverse = registration.inverse_transform(reg.transform)
-
-    fixed_field = step("resample fixed",
-                   lambda: _resample_field(segment.antialias_for_grid(fixed_mask, grid_mm), size, origin,
-                                           grid_mm, identity))
-    moving_field = step("resample moving",
-                   lambda: _resample_field(segment.antialias_for_grid(moving_mask, grid_mm), size, origin,
-                                           grid_mm, inverse))
-
-    # Union of occupancy, not of labels: keeps the sub-voxel boundary each scan
-    # carries, so the fused surface is not quantised to the grid.
-    fused = step(
-        "fuse occupancy fields",
-        lambda: sitk.Clamp(sitk.Maximum(fixed_field, moving_field), sitk.sitkFloat32, 0.0, 1.0),
-    )
-
-    voxel_mm3 = grid_mm ** 3
-
-    def measure_volumes() -> tuple[float, float, float]:
-        return (
-            float((sitk.GetArrayViewFromImage(fixed_field) > 0.5).sum()) * voxel_mm3,
-            float((sitk.GetArrayViewFromImage(moving_field) > 0.5).sum()) * voxel_mm3,
-            float((sitk.GetArrayViewFromImage(fused) > 0.5).sum()) * voxel_mm3,
-        )
-
-    fixed_volume_mm3, moving_volume_mm3, union_volume_mm3 = step("measure fused volumes", measure_volumes)
-    say("bone: fixed %.0f cm3 | moving %.0f cm3 | fused %.0f cm3"
-        % (fixed_volume_mm3 / 1000, moving_volume_mm3 / 1000, union_volume_mm3 / 1000))
-
-    fused = segment.pad(fused, 1)
-
-    affine = surface.index_to_physical(fused)
-    poly = step(
-        "marching cubes",
-        lambda: surface.marching_cubes(fused, segment.ISO_OCCUPANCY),
-    )
-    if poly.topology.numValidFaces() == 0:
-        raise MergeError("the fused volume produced no surface")
-    say("  raw triangles %s" % f"{poly.topology.numValidFaces():,}")
-
-    finished = pipeline.finish_surface(
-        poly,
-        smooth_iters=preset.smooth_iters,
-        smooth_force=preset.smooth_force,
-        simplify_error_mm=preset.simplify_error_mm,
-        post_smooth_iters=preset.post_smooth_iters,
-        keep_largest_component=preset.keep_largest_component,
-        step=step,
+    fused = fuse_masks(
+        fixed_mask,
+        moving_mask,
+        output_path,
+        settings=pipeline.surface_settings(preset),
+        grid_mm=grid_mm,
+        force=force,
+        allow_large_volume=allow_large_volume,
         log=say,
+        warn=warn,
     )
-    poly = finished.poly
-    shells = finished.surface_components
-    add_warnings(finished.warnings)
-    poly = step("index -> fixed physical space", lambda: surface.transform(poly, affine))
-
-    boundary, holes = step("check surface defects", lambda: surface.count_defects(poly))
-    if boundary or holes:
-        add_warning(
-            "fused surface has %d boundary edge(s) and %d hole(s)" % (boundary, holes)
-        )
-
-    quality = step("validate and publish mesh", lambda: surface.write_validated(poly, output_path))
+    warnings.extend(fused.warnings)
 
     provenance = {
         "fixed": pipeline.source_provenance(fixed_volume, fixed_value, fixed_source),
         "moving": pipeline.source_provenance(moving_volume, moving_value, moving_source),
         "preset": asdict(preset),
         "grid_mm": grid_mm,
-        "surface_finishing": finished.provenance,
-        "transform_moving_to_fixed": reg.transform.tolist(),
-        "rotation_deg": reg.rotation_deg,
+        "surface_finishing": fused.surface_finishing,
+        "transform_moving_to_fixed": fused.registration.transform.tolist(),
+        "rotation_deg": fused.registration.rotation_deg,
         "registration": {
-            "inlier_rms_mm": reg.inlier_rms_mm,
-            "inlier_median_mm": reg.inlier_median_mm,
-            "surface_overlap": reg.surface_overlap,
-            "shared_fov_dice": reg.shared_fov_dice,
-            "shared_fov_mm3": reg.shared_fov_mm3,
+            "inlier_rms_mm": fused.registration.inlier_rms_mm,
+            "inlier_median_mm": fused.registration.inlier_median_mm,
+            "surface_overlap": fused.registration.surface_overlap,
+            "shared_fov_dice": fused.registration.shared_fov_dice,
+            "shared_fov_mm3": fused.registration.shared_fov_mm3,
         },
         "coordinate_system": "SimpleITK physical space of the fixed volume",
         "forced": bool(force),
@@ -423,18 +540,18 @@ def merge(
 
     return MergeResult(
         output_path=output_path,
-        triangles=int(poly.topology.numValidFaces()),
-        vertices=int(poly.topology.numValidVerts()),
-        bounds_mm=surface.bounds_mm(poly),
+        triangles=fused.triangles,
+        vertices=fused.vertices,
+        bounds_mm=fused.bounds_mm,
         grid_mm=grid_mm,
-        grid_size=size,
-        registration=reg,
-        volume_fixed_mm3=fixed_volume_mm3,
-        volume_moving_mm3=moving_volume_mm3,
-        volume_union_mm3=union_volume_mm3,
-        surface_components=shells,
+        grid_size=fused.grid_size,
+        registration=fused.registration,
+        volume_fixed_mm3=fused.volume_fixed_mm3,
+        volume_moving_mm3=fused.volume_moving_mm3,
+        volume_union_mm3=fused.volume_union_mm3,
+        surface_components=fused.surface_components,
         seconds=time.time() - started,
         warnings=warnings,
         provenance=provenance,
-        quality=quality,
+        quality=fused.quality,
     )

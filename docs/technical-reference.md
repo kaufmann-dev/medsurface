@@ -43,17 +43,20 @@ loading, while later geometry and surface warnings appear at their corresponding
 stages without being printed twice by the CLI.
 
 JSON is a separate plain-output contract. `list --json`, `validate --json`, and
-`repair --json` write only JSON to stdout. `convert --json FILE` and
-`merge --json FILE` write JSON only to the requested file. Human output never
-shares the JSON destination, and JSON contains no ANSI control sequences.
-Convert and merge reports both include the complete effective preset and the
-measured number of output surface components.
-Convert and merge reject mesh or report paths that alias each other or any
-discovered input file through a lexical path, symlink, or hard link. This
-includes every DICOM instance and each payload referenced by a detached image
-header. Convert, merge, and repair reject unsupported output extensions before
-discovery or processing. JSON reports are written to a temporary sibling and
-atomically published, so a failed report write preserves an existing report.
+`repair --json` write only JSON to stdout. The intensity-volume and labelmap
+`convert --json FILE` and `merge --json FILE` commands write JSON only to the
+requested file. Human output never shares the JSON destination, and JSON
+contains no ANSI control sequences. Intensity-volume reports include the
+complete effective preset; labelmap reports instead record their surface
+settings and all-nonzero foreground rule. Every conversion and merge report
+includes the measured number of output surface components.
+All convert and merge commands reject mesh or report paths that alias each
+other or any discovered input file through a lexical path, symlink, or hard
+link. This includes every DICOM instance and each payload referenced by a
+detached image header. Convert, merge, and repair reject unsupported output
+extensions before discovery or processing. JSON reports are written to a
+temporary sibling and atomically published, so a failed report write preserves
+an existing report.
 Warnings raised by pydicom during discovery are captured, deduplicated with
 their occurrence counts preserved, and rendered concisely on stderr without
 Python source locations.
@@ -90,6 +93,12 @@ with known modalities. `merge` builds or reuses a catalog for each positional
 input and applies these rules independently, so two same-modality DICOM-only
 directories still automatically choose their best stacks.
 
+The `labelmap` command group is intentionally narrower. `labelmap convert`
+accepts exactly one direct NIfTI, NRRD, or MetaImage file. `labelmap merge`
+accepts exactly one such file for each role. Directories, DICOM, catalog IDs,
+presets, and label selectors are rejected because selection belongs to the
+program that produced the segmentation.
+
 ## Processing pipeline
 
 `convert` performs these stages:
@@ -109,6 +118,22 @@ The output is normally a closed surface because the mask is padded with
 background before extraction. When anatomy touches the scan boundary, the cap is
 flat and a warning explains that missing anatomy was not recovered.
 
+`labelmap convert` starts at the binary-mask boundary:
+
+1. Discover and load one direct self-describing image file.
+2. Verify that every voxel is finite, non-negative, and integer-valued, then
+   convert every nonzero label to one shared foreground mask.
+3. Optionally resample, pad field-of-view boundaries, and extract the 0.5
+   isosurface.
+4. Smooth, retain every surface component, optionally simplify, transform to
+   the labelmap's physical coordinates, validate, and atomically publish.
+
+It therefore skips threshold selection, intensity segmentation, morphology,
+mask-island removal, and label interpretation. A binary per-structure mask and
+a multilabel file follow the same path. TotalSegmentator and other segmenters
+remain external dependencies of the user's workflow, not medsurface runtime
+dependencies.
+
 ## File-volume compatibility
 
 SimpleITK reads image headers during discovery and pixel data only after
@@ -117,6 +142,12 @@ references and marks the header unusable when a required payload is absent or
 unreadable. File candidates must be scalar, real-valued 3-D images with at least
 two voxels per axis, finite origin/direction values, finite positive spacing,
 and a nonsingular 3×3 direction matrix.
+
+Labelmap commands add value constraints after loading: values must be finite,
+non-negative integers, at least one voxel must be nonzero, and fractional
+probability maps are unsupported. Integer-valued floating-point labelmaps are
+accepted. Label numbers and semantic names are not interpreted; all nonzero
+values are unioned.
 
 The selected candidate's discovered dimensions are multiplied with Python
 integers before SimpleITK reads pixels. Missing dimensions make the candidate
@@ -188,6 +219,10 @@ axis is floored to the largest integer radius whose realized `(2r+1) × spacing`
 does not exceed the request. A zero radius is an identity operation on that axis.
 Convert and merge expose the same three morphology overrides.
 
+Labelmap commands do not run morphology or mask-island filtering. Their input is
+treated as the final segmentation, and every disconnected nonzero region is
+preserved through mask processing.
+
 Fractional occupancy is linearly interpolated and thresholded at 0.5. Resampling
 can erase thin structures or change components, cavities, tunnels, and genus. It
 does not preserve anatomical topology. Non-finite or non-positive target spacing
@@ -231,10 +266,16 @@ manifold checks fail, a collision patch cannot be mapped, or all protection
 passes are exhausted, the valid pre-decimation mesh is retained and the command
 reports a warning. The resulting face count and MeshLib's introduced-error
 estimate are reported. Conversion and merging use this same finishing path.
+Labelmap commands use the `bone` preset's surface-only defaults—native grid,
+20 initial smoothing iterations at force 0.1, a 0.25 mm simplification limit,
+and 40 final smoothing iterations—but always retain every surface component.
 
 ## Merge registration and gates
 
-Registration uses thresholded and morphologically cleaned anatomical masks:
+Both merge commands share one mask-registration and fusion implementation. The
+top-level `merge` supplies thresholded, morphologically cleaned intensity-volume
+masks. `labelmap merge` supplies the validated all-nonzero masks directly. The
+shared implementation then:
 
 1. Resample each mask onto a separate axis-aligned 2.0 mm world lattice.
 2. Find the best integer 3-D translation with FFT cross-correlation.
@@ -257,13 +298,20 @@ The fused-grid spacing must be finite and positive. Grid planning uses
 non-overflowing voxel counts and refuses grids above 500 million voxels before
 resampling unless `--allow-large-volume` is given.
 
+Registration is rigid and intended for matching non-deforming anatomy such as
+bone. Both merge commands warn that movement or deformation between acquisitions
+can create a plausible but incorrect fusion. `labelmap merge` additionally
+warns that both masks must represent the same selected structures; the command
+does not compare label values or names. It unions foreground after registration,
+so different positive label IDs are equivalent.
+
 ## Merge identity contract
 
-All input formats follow the same rule: `merge` does not inspect patient fields,
-does not compare modalities, and cannot establish subject identity. Every merge
-warns that the operator must confirm both volumes show the same subject. This
-avoids a DICOM-only trust signal that file formats cannot provide and that could
-never prove identity reliably.
+All input formats follow the same rule: neither merge command inspects patient
+fields or can establish subject identity. The intensity-volume command also does
+not compare modalities. Every merge warns that the operator must confirm both
+inputs show the same subject. This avoids a DICOM-only trust signal that file
+formats cannot provide and that could never prove identity reliably.
 
 The same underlying file or DICOM UID/orientation part cannot be selected for
 both roles. `--force` overrides only failed registration-quality gates. It does
@@ -279,17 +327,18 @@ even though discovery does not read patient identifiers.
 Validation reports MeshLib-imported triangle/vertex counts, components,
 watertightness, winding, holes, boundary edges, disoriented faces, genus when
 defined, volume when closed, bounding box, and self-intersecting faces. The same
-complete check runs after `convert`, `merge`, and `repair`, and for `validate`.
+complete check runs after both `convert` commands, both `merge` commands, and
+`repair`, and for `validate`.
 
 A report is valid only when MeshLib imports the mesh as watertight, consistently
 wound, and enclosing a volume, with zero holes, boundary edges, disoriented
 faces, and self-intersecting faces. Multiple closed components are allowed.
 MeshLib can normalize raw face configurations while loading, so validation does
 not expose separate non-manifold or degenerate-face counters. A failed
-self-intersection measurement is invalid. `convert`, `merge`, and `repair` have
-no validation bypass: they validate both the in-memory mesh and the serialized
-temporary file, then atomically replace the requested destination only with a
-valid output.
+self-intersection measurement is invalid. All convert and merge commands, plus
+`repair`, have no validation bypass: they validate both the in-memory mesh and
+the serialized temporary file, then atomically replace the requested destination
+only with a valid output.
 
 STL, PLY, and OBJ are loaded directly by MeshLib. VTP is not supported. All
 metrics describe the MeshLib-imported representation, and self-intersections
