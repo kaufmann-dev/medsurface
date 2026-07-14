@@ -165,8 +165,9 @@ multilabel file can produce one STL containing multiple surviving structures.
 
 The input must be one direct NIfTI, NRRD, or MetaImage file. Its voxels must be
 finite, non-negative integers; integer-valued floating-point images are
-accepted, but probability maps and fractional labels are not. Directories,
-DICOM, selectors, presets, and structure-name flags are deliberately absent.
+accepted, but probability maps and fractional labels are not. Every dimension
+must contain at least four voxels, even with `--smooth-mm 0`. Directories, DICOM,
+selectors, presets, and structure-name flags are deliberately absent.
 Labelmaps have independent surface defaults: native grid, a `0.8 mm` Gaussian
 sigma applied in physical space before meshing, light internal surface
 relaxation, a `0.25 mm` simplification limit, and every surviving surface

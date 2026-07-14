@@ -59,6 +59,81 @@ def test_invalid_labelmap_values_are_rejected(values, message):
         labelmap._binary_mask(_image(values))
 
 
+@pytest.mark.parametrize(
+    "shape,dimensions",
+    [
+        ((2, 2, 2), "2x2x2"),
+        ((4, 4, 3), "3x4x4"),
+        ((4, 3, 4), "4x3x4"),
+        ((3, 4, 4), "4x4x3"),
+    ],
+)
+def test_labelmap_convert_rejects_short_dimensions_before_meshing(
+    tmp_path, monkeypatch, shape, dimensions
+):
+    candidate = _write(tmp_path / "short.nii.gz", np.ones(shape, dtype=np.uint8))
+    monkeypatch.setattr(
+        labelmap.pipeline,
+        "mesh_binary_mask",
+        lambda *_args, **_kwargs: pytest.fail("meshing must not start"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"labelmap dimensions must each contain at least 4 voxels; got %s$"
+        % dimensions,
+    ):
+        labelmap.convert(
+            candidate,
+            str(tmp_path / "out.stl"),
+            smooth_mm=0,
+        )
+
+
+@pytest.mark.parametrize("invalid_role", ["fixed", "moving"])
+def test_labelmap_merge_rejects_short_dimensions_before_registration(
+    tmp_path, monkeypatch, invalid_role
+):
+    valid = _write(tmp_path / "valid.nii.gz", np.ones((4, 4, 4), dtype=np.uint8))
+    short = _write(tmp_path / "short.nii.gz", np.ones((4, 4, 2), dtype=np.uint8))
+    fixed, moving = (short, valid) if invalid_role == "fixed" else (valid, short)
+    monkeypatch.setattr(
+        labelmap.merge_mod,
+        "fuse_masks",
+        lambda *_args, **_kwargs: pytest.fail("registration must not start"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"labelmap dimensions must each contain at least 4 voxels; got 2x4x4$"
+        ),
+    ):
+        labelmap.merge(
+            fixed,
+            moving,
+            str(tmp_path / "out.stl"),
+            smooth_mm=0,
+        )
+
+
+def test_four_voxel_labelmap_is_accepted_with_recursive_smoothing(tmp_path):
+    candidate = _write(
+        tmp_path / "minimum.nii.gz",
+        np.ones((4, 4, 4), dtype=np.uint8),
+    )
+    output = tmp_path / "minimum.stl"
+
+    result = labelmap.convert(
+        candidate,
+        str(output),
+        simplify_error_mm=0,
+    )
+
+    assert output.exists()
+    assert result.quality["valid"]
+
+
 def test_default_finishing_is_independent_and_keeps_all_shells():
     settings = labelmap.default_surface_settings()
 

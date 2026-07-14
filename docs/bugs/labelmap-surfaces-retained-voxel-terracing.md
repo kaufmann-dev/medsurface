@@ -36,3 +36,15 @@ On the reported masks, the default produced a valid, watertight,
 self-intersection-free 298,600-triangle STL of 14.2 MB. The fused voxel volume
 changed from approximately 731,201 mm³ without field smoothing to 729,975 mm³
 with it, about 0.17%.
+
+## Follow-up: recursive Gaussian input contract
+
+Revised: 2026-07-15 01:45:26 CEST (+0200)
+
+Baseline commit: `45016b0e088f10125dc981636742ae388fadd620`
+
+The physical smoothing path now uses `SmoothingRecursiveGaussian` exclusively.
+Labelmap conversion and merge reject any input with fewer than four voxels on
+an axis before meshing or registration, even when `--smooth-mm 0` is selected.
+The error reports the actual dimensions. The ordinary intensity-volume contract
+remains at least two voxels per axis.

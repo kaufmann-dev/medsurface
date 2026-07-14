@@ -19,6 +19,7 @@ Logger = Callable[[str], None]
 
 _LABELMAP_RELAX_ITERS = 20
 _LABELMAP_RELAX_FORCE = 0.1
+_MIN_AXIS_VOXELS = 4
 
 
 @dataclass
@@ -122,6 +123,18 @@ def _binary_mask(image: sitk.Image) -> sitk.Image:
     return sitk.Cast(sitk.NotEqual(image, 0), sitk.sitkUInt8)
 
 
+def _validate_dimensions(size: tuple[int, ...] | None) -> None:
+    """Enforce the recursive Gaussian's labelmap input contract."""
+    if size is None or len(size) != 3:
+        return
+    dimensions = tuple(int(value) for value in size)
+    if any(value < _MIN_AXIS_VOXELS for value in dimensions):
+        raise ValueError(
+            "labelmap dimensions must each contain at least 4 voxels; got %s"
+            % "x".join(str(value) for value in dimensions)
+        )
+
+
 def load(
     candidate: VolumeCandidate,
     *,
@@ -129,6 +142,7 @@ def load(
 ) -> LoadedLabelmap:
     if isinstance(candidate.source, DicomSource):
         raise ValueError("labelmap input must be a NIfTI, NRRD, or MetaImage file, not DICOM")
+    _validate_dimensions(candidate.size)
     volume = volume_mod.load(candidate, allow_large_volume=allow_large_volume)
     mask = _binary_mask(volume.image)
     provenance = pipeline.volume_provenance(volume)
