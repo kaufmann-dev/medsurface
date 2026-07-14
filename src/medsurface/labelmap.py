@@ -13,9 +13,12 @@ from . import merge as merge_mod
 from . import pipeline, surface
 from . import volume as volume_mod
 from .catalog import DicomSource, VolumeCandidate, same_source
-from .defaults import DEFAULT_MERGE_GRID_MM
+from .defaults import DEFAULT_LABELMAP_SMOOTH_MM, DEFAULT_MERGE_GRID_MM
 
 Logger = Callable[[str], None]
+
+_LABELMAP_RELAX_ITERS = 20
+_LABELMAP_RELAX_FORCE = 0.1
 
 
 @dataclass
@@ -44,8 +47,9 @@ def default_surface_settings() -> pipeline.SurfaceSettings:
     """Return independent finishing defaults for an external segmentation."""
     return pipeline.SurfaceSettings(
         resample_mm=0.0,
-        smooth_iters=60,
-        smooth_force=0.1,
+        field_smooth_mm=DEFAULT_LABELMAP_SMOOTH_MM,
+        smooth_iters=_LABELMAP_RELAX_ITERS,
+        smooth_force=_LABELMAP_RELAX_FORCE,
         simplify_error_mm=0.25,
         keep_largest_component=False,
     )
@@ -54,16 +58,18 @@ def default_surface_settings() -> pipeline.SurfaceSettings:
 def resolve_surface_settings(
     *,
     resample_mm: float | None = None,
-    smooth_iters: int | None = None,
-    smooth_force: float | None = None,
+    smooth_mm: float | None = None,
     simplify_error_mm: float | None = None,
 ) -> pipeline.SurfaceSettings:
     base = default_surface_settings()
+    resolved_smooth_mm = (
+        base.field_smooth_mm if smooth_mm is None else float(smooth_mm)
+    )
     settings = replace(
         base,
         resample_mm=base.resample_mm if resample_mm is None else resample_mm,
-        smooth_iters=base.smooth_iters if smooth_iters is None else smooth_iters,
-        smooth_force=base.smooth_force if smooth_force is None else smooth_force,
+        field_smooth_mm=resolved_smooth_mm,
+        smooth_iters=_LABELMAP_RELAX_ITERS if resolved_smooth_mm > 0 else 0,
         simplify_error_mm=(
             base.simplify_error_mm
             if simplify_error_mm is None
@@ -72,6 +78,24 @@ def resolve_surface_settings(
     )
     pipeline.validate_surface_settings(settings)
     return settings
+
+
+def smoothing_warning(smooth_mm: float) -> str | None:
+    """Explain the intentional geometry tradeoff of field smoothing."""
+    if smooth_mm <= 0:
+        return None
+    return (
+        "labelmap smoothing uses a Gaussian sigma of %.2f mm before meshing; "
+        "it can round boundaries, merge narrow gaps, or erase structures near "
+        "this scale. Use --smooth-mm 0 to disable it" % smooth_mm
+    )
+
+
+def surface_provenance(settings: pipeline.SurfaceSettings) -> dict[str, Any]:
+    """Expose the physical user control while retaining internal finishing data."""
+    record = asdict(settings)
+    record["smooth_mm"] = record.pop("field_smooth_mm")
+    return record
 
 
 def _binary_mask(image: sitk.Image) -> sitk.Image:
@@ -122,8 +146,7 @@ def convert(
     output_path: str,
     *,
     resample_mm: float | None = None,
-    smooth_iters: int | None = None,
-    smooth_force: float | None = None,
+    smooth_mm: float | None = None,
     simplify_error_mm: float | None = None,
     cap_field_of_view: bool = True,
     allow_large_volume: bool = False,
@@ -132,8 +155,7 @@ def convert(
 ) -> Result:
     settings = resolve_surface_settings(
         resample_mm=resample_mm,
-        smooth_iters=smooth_iters,
-        smooth_force=smooth_force,
+        smooth_mm=smooth_mm,
         simplify_error_mm=simplify_error_mm,
     )
     surface.validate_output_path(output_path)
@@ -156,6 +178,10 @@ def convert(
         warnings.append(message)
         if warn:
             warn(message)
+
+    smoothing_message = smoothing_warning(settings.field_smooth_mm)
+    if smoothing_message:
+        add_warning(smoothing_message)
 
     loaded = step(
         "load labelmap",
@@ -183,7 +209,7 @@ def convert(
     )
     provenance = {
         "input": loaded.provenance,
-        "surface": asdict(settings),
+        "surface": surface_provenance(settings),
         "surface_finishing": meshed.surface_finishing,
         "capped_field_of_view": meshed.capped_field_of_view,
         "allow_large_volume": bool(allow_large_volume),
@@ -210,8 +236,7 @@ def merge(
     output_path: str,
     *,
     grid_mm: float = DEFAULT_MERGE_GRID_MM,
-    smooth_iters: int | None = None,
-    smooth_force: float | None = None,
+    smooth_mm: float | None = None,
     simplify_error_mm: float | None = None,
     force: bool = False,
     allow_large_volume: bool = False,
@@ -219,8 +244,7 @@ def merge(
     warn: Logger | None = None,
 ) -> merge_mod.MergeResult:
     settings = resolve_surface_settings(
-        smooth_iters=smooth_iters,
-        smooth_force=smooth_force,
+        smooth_mm=smooth_mm,
         simplify_error_mm=simplify_error_mm,
     )
     surface.validate_output_path(output_path)
@@ -254,6 +278,9 @@ def merge(
         "labelmap contents are not verified; confirm that fixed and moving masks "
         "represent the same rigid structures before using the fused surface"
     )
+    smoothing_message = smoothing_warning(settings.field_smooth_mm)
+    if smoothing_message:
+        add_warning(smoothing_message)
 
     say("fixed  ID %d  %s  %s" % (fixed.id, fixed.format, fixed.source_name))
     say("moving ID %d  %s  %s" % (moving.id, moving.format, moving.source_name))
@@ -286,7 +313,7 @@ def merge(
     provenance = {
         "fixed": fixed_loaded.provenance,
         "moving": moving_loaded.provenance,
-        "surface": asdict(settings),
+        "surface": surface_provenance(settings),
         "grid_mm": grid_mm,
         "surface_finishing": fused.surface_finishing,
         "transform_moving_to_fixed": registration.transform.tolist(),

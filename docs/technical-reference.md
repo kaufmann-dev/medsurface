@@ -124,16 +124,26 @@ flat and a warning explains that missing anatomy was not recovered.
 1. Discover and load one direct self-describing image file.
 2. Verify that every voxel is finite, non-negative, and integer-valued, then
    convert every nonzero label to one shared foreground mask.
-3. Optionally resample, pad field-of-view boundaries, extract the 0.5 isosurface,
-   and transform it into the labelmap's physical coordinates.
-4. Smooth once, retain every surface component, optionally simplify, validate,
-   and atomically publish.
+3. Optionally resample, smooth the occupancy field with a physical-space
+   Gaussian, pad field-of-view boundaries, extract the 0.5 isosurface, and
+   transform it into the labelmap's physical coordinates.
+4. Apply light intersection-safe surface relaxation, retain every surviving
+   surface component, optionally simplify, validate, and atomically publish.
 
 It therefore skips threshold selection, intensity segmentation, morphology,
 mask-island removal, and label interpretation. A binary per-structure mask and
 a multilabel file follow the same path. TotalSegmentator and other segmenters
 remain external dependencies of the user's workflow, not medsurface runtime
 dependencies.
+
+Labelmap occupancy smoothing uses SimpleITK's recursive Gaussian with sigma in
+physical millimetres; volumes smaller than four voxels on an axis use the
+spacing-aware discrete Gaussian fallback. The default sigma is `0.8 mm`, and
+`--smooth-mm 0` bypasses both this field operation and the subsequent internal
+relaxation. The 0.5 isovalue keeps a straight binary boundary centered, but
+curved boundaries and features near the sigma can move, merge, or disappear.
+The command warns whenever smoothing is enabled and records `smooth_mm` in JSON
+provenance.
 
 ## File-volume compatibility
 
@@ -271,8 +281,9 @@ reports a warning. The resulting face count and MeshLib's introduced-error
 estimate are reported. Because simplification is the last geometry-changing
 stage, its estimate is not invalidated by later smoothing. Conversion and
 merging use this same finishing path. Labelmap commands use independent defaults:
-native grid, 60 smoothing iterations at force 0.1, a 0.25 mm simplification
-limit, and every surface component retained.
+native grid, a 0.8 mm physical Gaussian, 20 internal relaxation iterations at
+force 0.1, a 0.25 mm simplification limit, and every surviving surface
+component retained.
 
 ## Merge registration and gates
 
@@ -289,6 +300,13 @@ shared implementation then:
 
 Moving vertices are sampled to at most 60,000 with seed 0. ICP uses a 4 mm
 correspondence limit and up to 80 iterations per pass.
+
+After registration, both paths resample their masks as fractional occupancy onto
+the isotropic fusion grid and take their voxelwise maximum. `labelmap merge`
+then applies its physical Gaussian to that fused field before volume measurement
+and marching cubes; the intensity-volume merge leaves this extra field
+smoothing disabled. Applying it after the union attenuates both source-grid
+terracing and small boundary disagreements between the registered masks.
 
 | gate                      | definition                                                                                                           |  threshold |
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------: |
