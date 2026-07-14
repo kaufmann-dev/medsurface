@@ -47,26 +47,35 @@ comparable acquisitions:
 medsurface convert ~/scans/head-ct --volume 1 -o skull.stl
 ```
 
-A direct `.nii`, `.nii.gz`, `.nrrd`, `.nhdr`, `.mha`, or `.mhd` file needs no
-selector:
+A direct `.nii`, `.nii.gz`, `.nrrd`, `.nhdr`, `.mha`, or `.mhd` intensity
+volume needs no selector:
 
 ```sh
-medsurface convert segmentation-input.nrrd -o surface.stl
+medsurface convert scan.nrrd -o surface.stl
 ```
 
 Read [Choosing a preset][presets] before converting other tissues or
 uncalibrated data.
 
+If another tool already created a segmentation labelmap, skip medsurface's
+thresholding and cleanup stages:
+
+```sh
+medsurface labelmap convert segmentation.nii.gz -o surface.stl
+```
+
 ## Commands
 
-| command                                      | purpose                                               |
-| -------------------------------------------- | ----------------------------------------------------- |
-| `medsurface list INPUT`                      | Show every supported volume and any automatic default |
-| `medsurface presets`                         | Show the available tissue presets                     |
-| `medsurface convert INPUT -o MODEL.stl`      | Convert one volume to a surface mesh                  |
-| `medsurface merge FIXED MOVING -o MODEL.stl` | Register and combine two volumes of the same subject  |
-| `medsurface validate MODEL.stl`              | Report mesh quality without changing the file         |
-| `medsurface repair MODEL.stl -o FIXED.stl`   | Repair an open or non-manifold mesh                   |
+| command                                                         | purpose                                                        |
+| --------------------------------------------------------------- | -------------------------------------------------------------- |
+| `medsurface list INPUT`                                         | Show every supported volume and any automatic default          |
+| `medsurface presets`                                            | Show the available tissue presets                              |
+| `medsurface convert INPUT -o MODEL.stl`                         | Segment one intensity volume and create a surface mesh         |
+| `medsurface merge FIXED MOVING -o MODEL.stl`                    | Segment, register, and combine two volumes of the same subject |
+| `medsurface labelmap convert MASK -o MODEL.stl`                 | Create one surface from all nonzero labels in one mask         |
+| `medsurface labelmap merge FIXED_MASK MOVING_MASK -o MODEL.stl` | Register two matching labelmaps and create their fused surface |
+| `medsurface validate MODEL.stl`                                 | Report mesh quality without changing the file                  |
+| `medsurface repair MODEL.stl -o FIXED.stl`                      | Repair an open or non-manifold mesh                            |
 
 Run `medsurface COMMAND --help` for every option and `medsurface --version` for
 the installed version. Output format follows the extension: `.stl`, `.ply`, or
@@ -90,14 +99,39 @@ medsurface merge facial-ct/ sinus-ct/ \
 ```
 
 The first input defines the output coordinate frame. `merge` cannot verify
-subject identity, so confirm it yourself. Registration-quality checks can
-refuse geometrically unsafe input; `--force` overrides only those checks and can
-create a plausible-looking but incorrect model.
+subject identity, so confirm it yourself. Its rigid registration is intended
+for matching non-deforming anatomy such as bone. Registration-quality checks
+can refuse geometrically unsafe input; `--force` overrides only those checks
+and can create a plausible-looking but incorrect model.
+
+Use a segmentation made by another tool, including multiple structures in one
+mesh. For example, TotalSegmentator normally writes one binary NIfTI per
+structure; `--ml` instead writes one multilabel NIfTI. Select the desired
+structures there, then medsurface unions every nonzero label:
+
+```sh
+TotalSegmentator -i scan.nii.gz -o selected.nii.gz \
+  --ml --roi_subset skull vertebrae_C1
+medsurface labelmap convert selected.nii.gz -o selected.stl
+```
+
+TotalSegmentator remains a separate, optional program. A single per-structure
+file from its default output can also be passed directly. To fuse matching
+segmentations from two acquisitions, use:
+
+```sh
+medsurface labelmap merge fixed-selected.nii.gz moving-selected.nii.gz \
+  -o fused.stl
+```
+
+Both labelmaps must contain the same selected structures. This command performs
+rigid registration, so it is not a shortcut for combining separate structure
+files from one acquisition; create one multilabel input upstream for that case.
 
 ## Validate and repair
 
-`convert` and `merge` validate the written mesh by default. Inspect an existing
-mesh without changing it:
+Every `convert` and `merge` command validates the written mesh. Inspect an
+existing mesh without changing it:
 
 ```sh
 medsurface validate model.stl

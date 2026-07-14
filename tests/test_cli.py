@@ -172,6 +172,7 @@ from typer.testing import CliRunner
 from medsurface import cli
 
 heavy_modules = {
+    "medsurface.labelmap",
     "medsurface.merge",
     "medsurface.pipeline",
     "medsurface.registration",
@@ -207,7 +208,7 @@ def test_root_command_without_arguments_is_lightweight_help():
     assert result.stderr == ""
     assert "\x1b" not in result.stdout
     assert "Usage: medsurface [OPTIONS] [COMMAND]" in result.stdout
-    for command in ("list", "presets", "convert", "merge", "validate", "repair"):
+    for command in ("list", "presets", "convert", "merge", "validate", "repair", "labelmap"):
         assert command in result.stdout
 
 
@@ -229,6 +230,9 @@ def test_version_is_lightweight_and_public():
         ["merge", "--help"],
         ["validate", "--help"],
         ["repair", "--help"],
+        ["labelmap", "--help"],
+        ["labelmap", "convert", "--help"],
+        ["labelmap", "merge", "--help"],
     ],
 )
 def test_every_help_surface_is_lightweight(argv):
@@ -270,6 +274,8 @@ def test_merge_help_describes_shared_processing_options():
         ["merge"],
         ["validate"],
         ["repair", "broken.stl"],
+        ["labelmap", "convert"],
+        ["labelmap", "merge"],
     ],
 )
 def test_malformed_invocations_fail_before_heavy_imports(argv):
@@ -1057,6 +1063,171 @@ def test_quiet_suppresses_progress_but_not_warnings(tmp_path, monkeypatch):
     assert result.stdout == ""
     assert "Warning: sampling warning" in result.stderr
     assert result.stderr.count("sampling warning") == 1
+
+
+def test_labelmap_convert_accepts_surface_flags_and_writes_json(tmp_path, monkeypatch):
+    source = tmp_path / "labels.nii.gz"
+    source.write_bytes(b"labelmap")
+    chosen = _file_candidate(source)
+    output = tmp_path / "surface.stl"
+    json_file = tmp_path / "result.json"
+    captured = {}
+    monkeypatch.setattr(cli, "_select_labelmap", lambda _path, _role=None: (chosen, [chosen]))
+
+    from medsurface import labelmap as labelmap_mod
+
+    def fake_convert(**kwargs):
+        captured.update(kwargs)
+        result = _convert_result(str(output))
+        result.provenance = {
+            "input": {"input_kind": "labelmap", "foreground": "all nonzero voxels"}
+        }
+        return result
+
+    monkeypatch.setattr(labelmap_mod, "convert", fake_convert)
+    result = runner.invoke(
+        cli.app,
+        [
+            "labelmap",
+            "convert",
+            str(source),
+            "-o",
+            str(output),
+            "--resample-mm",
+            "0.8",
+            "--smooth-iters",
+            "11",
+            "--smooth-force",
+            "0.12",
+            "--simplify-error-mm",
+            "0.18",
+            "--post-smooth-iters",
+            "9",
+            "--no-cap",
+            "--allow-large-volume",
+            "--json",
+            str(json_file),
+            "-q",
+        ],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert captured["candidate"] is chosen
+    assert captured["resample_mm"] == pytest.approx(0.8)
+    assert captured["smooth_iters"] == 11
+    assert captured["smooth_force"] == pytest.approx(0.12)
+    assert captured["simplify_error_mm"] == pytest.approx(0.18)
+    assert captured["post_smooth_iters"] == 9
+    assert not captured["cap_field_of_view"]
+    assert captured["allow_large_volume"]
+    payload = json.loads(json_file.read_text())
+    assert payload["provenance"]["input"]["input_kind"] == "labelmap"
+    assert payload["quality"]["valid"]
+
+
+def test_labelmap_merge_accepts_fusion_flags_and_writes_json(tmp_path, monkeypatch):
+    fixed_path = tmp_path / "fixed.nii.gz"
+    moving_path = tmp_path / "moving.nii.gz"
+    fixed_path.write_bytes(b"fixed")
+    moving_path.write_bytes(b"moving")
+    fixed = _file_candidate(fixed_path, row_id=1)
+    moving = _file_candidate(moving_path, row_id=1)
+    output = tmp_path / "surface.stl"
+    json_file = tmp_path / "result.json"
+    captured = {}
+
+    def select(path, role=None):
+        candidate = fixed if path == fixed_path else moving
+        return candidate, [candidate]
+
+    monkeypatch.setattr(cli, "_select_labelmap", select)
+    from medsurface import labelmap as labelmap_mod
+
+    def fake_merge(**kwargs):
+        captured.update(kwargs)
+        kwargs["warn"]("rigid anatomy warning")
+        return _merge_result(
+            str(output),
+            warnings_=["rigid anatomy warning"],
+        )
+
+    monkeypatch.setattr(labelmap_mod, "merge", fake_merge)
+    result = runner.invoke(
+        cli.app,
+        [
+            "labelmap",
+            "merge",
+            str(fixed_path),
+            str(moving_path),
+            "-o",
+            str(output),
+            "--grid-mm",
+            "0.7",
+            "--smooth-iters",
+            "12",
+            "--smooth-force",
+            "0.13",
+            "--simplify-error-mm",
+            "0.19",
+            "--post-smooth-iters",
+            "8",
+            "--force",
+            "--allow-large-volume",
+            "--json",
+            str(json_file),
+            "-q",
+        ],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert result.stderr.count("rigid anatomy warning") == 1
+    assert captured["fixed"] is fixed
+    assert captured["moving"] is moving
+    assert captured["grid_mm"] == pytest.approx(0.7)
+    assert captured["smooth_iters"] == 12
+    assert captured["smooth_force"] == pytest.approx(0.13)
+    assert captured["force"]
+    assert captured["allow_large_volume"]
+    payload = json.loads(json_file.read_text())
+    assert payload["result"]["grid_mm"] == pytest.approx(0.8)
+    assert payload["quality"]["valid"]
+
+
+@pytest.mark.parametrize(
+    "argv,option",
+    [
+        (["labelmap", "convert", "INPUT", "-o", "out.stl", "--smooth-iters", "-1"], "--smooth-iters"),
+        (["labelmap", "convert", "INPUT", "-o", "out.stl", "--smooth-force", "2"], "--smooth-force"),
+        (["labelmap", "merge", "INPUT", "MOVING", "-o", "out.stl", "--grid-mm", "0"], "--grid-mm"),
+    ],
+)
+def test_invalid_labelmap_processing_options_fail_before_discovery(
+    tmp_path, monkeypatch, argv, option
+):
+    source = tmp_path / "input.nii.gz"
+    moving = tmp_path / "moving.nii.gz"
+    source.write_bytes(b"input")
+    moving.write_bytes(b"moving")
+    resolved = [
+        str(source) if value == "INPUT" else str(moving) if value == "MOVING" else value
+        for value in argv
+    ]
+    monkeypatch.setattr(
+        cli,
+        "_select_labelmap",
+        lambda *_args: pytest.fail("labelmap discovery must not start"),
+    )
+
+    result = runner.invoke(cli.app, resolved, prog_name="medsurface")
+
+    assert result.exit_code == 2
+    assert option in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_convert_requires_id_for_multiple_dicom_modalities(tmp_path, monkeypatch):

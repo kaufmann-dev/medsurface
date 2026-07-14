@@ -1,7 +1,7 @@
 # Documentation
 
-- [User guide](user-guide.md): volume selection, presets, input limitations,
-  safety, privacy, and validation guidance.
+- [User guide](user-guide.md): volume selection, presets, external labelmaps,
+  input limitations, safety, privacy, and validation guidance.
 - [Technical reference](technical-reference.md): CLI architecture,
   implementation details, compatibility, metrics, and validation
   semantics.
