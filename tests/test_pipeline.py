@@ -7,7 +7,7 @@ import pytest
 import SimpleITK as sitk
 
 from medsurface import pipeline as pipeline_mod
-from medsurface import presets, validate
+from medsurface import presets, segment, surface, validate
 from medsurface.catalog import DicomSource, FileSource, VolumeCandidate
 from medsurface.pipeline import resolve_threshold
 from medsurface.series import Series
@@ -203,6 +203,92 @@ def test_every_preset_is_self_consistent():
             assert p.threshold_unit == "auto"
         else:
             assert p.threshold_unit == "HU"
+
+    assert {
+        name: preset.smooth_iters for name, preset in presets.PRESETS.items()
+    } == {
+        "bone": 60,
+        "teeth": 10,
+        "skin": 35,
+        "auto": 60,
+    }
+
+
+def test_mask_surface_is_finished_once_in_physical_coordinates(monkeypatch):
+    values = np.zeros((12, 12, 12), dtype=np.uint8)
+    values[3:9, 2:10, 4:8] = 1
+    image = sitk.GetImageFromArray(values)
+    image.SetSpacing((0.5, 1.5, 3.0))
+    image.SetOrigin((10.0, 20.0, 30.0))
+    image.SetDirection((-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0))
+    padded = segment.pad(image, 1)
+    expected = surface.transform(
+        surface.marching_cubes(padded),
+        surface.index_to_physical(padded),
+    )
+    expected_bounds = surface.bounds_mm(expected)
+    captured = {}
+
+    def capture(poly, **_kwargs):
+        captured["bounds"] = surface.bounds_mm(poly)
+        return pipeline_mod.SurfaceFinish(
+            poly=poly,
+            surface_components=surface.component_count(poly),
+            warnings=[],
+            provenance={},
+        )
+
+    monkeypatch.setattr(pipeline_mod, "finish_surface", capture)
+    monkeypatch.setattr(
+        surface,
+        "write_validated",
+        lambda _poly, _path: {"valid": True},
+    )
+    result = pipeline_mod.mesh_binary_mask(
+        image,
+        "unused.stl",
+        settings=pipeline_mod.SurfaceSettings(
+            resample_mm=0,
+            smooth_iters=0,
+            smooth_force=0.1,
+            simplify_error_mm=0,
+            keep_largest_component=False,
+        ),
+        cap_field_of_view=True,
+        allow_large_volume=False,
+        step=lambda _name, function: function(),
+        log=lambda _message: None,
+        warn=lambda _message: None,
+    )
+
+    assert captured["bounds"] == pytest.approx(expected_bounds)
+    assert result.bounds_mm == pytest.approx(expected_bounds)
+
+
+def test_zero_simplification_does_not_disable_smoothing():
+    vertices, faces = (
+        np.asarray(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        ),
+        np.asarray([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]], dtype=np.int32),
+    )
+    finished = pipeline_mod.finish_surface(
+        surface.from_arrays(vertices, faces),
+        smooth_iters=7,
+        smooth_force=0.1,
+        simplify_error_mm=0,
+        keep_largest_component=False,
+        step=lambda _name, function: function(),
+        log=lambda _message: None,
+    )
+
+    assert finished.provenance["smoothing"]["requested_iterations"] == 7
+    assert finished.provenance["decimation"]["attempted"] is False
 
 
 def test_override_ignores_none_and_applies_values():

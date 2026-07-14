@@ -109,10 +109,11 @@ program that produced the segmentation.
 3. Load the selected candidate with SimpleITK and resolve the intensity threshold.
 4. Apply island filtering, median filtering, optional opening, and closing.
 5. Pad field-of-view boundaries, extract the 0.5 isosurface with MeshLib marching
-   cubes, smooth, select surface components, and optionally simplify.
-6. Transform vertices into the input's SimpleITK physical coordinates, reversing
-   face order when that affine contains a reflection; validate the mesh in
-   memory, write and validate a temporary file, then atomically publish it.
+   cubes, and transform it into the input's SimpleITK physical coordinates,
+   reversing face order when that affine contains a reflection.
+6. Smooth once, select surface components, optionally simplify, validate the
+   mesh in memory, write and validate a temporary file, then atomically publish
+   it.
 
 The output is normally a closed surface because the mask is padded with
 background before extraction. When anatomy touches the scan boundary, the cap is
@@ -123,10 +124,10 @@ flat and a warning explains that missing anatomy was not recovered.
 1. Discover and load one direct self-describing image file.
 2. Verify that every voxel is finite, non-negative, and integer-valued, then
    convert every nonzero label to one shared foreground mask.
-3. Optionally resample, pad field-of-view boundaries, and extract the 0.5
-   isosurface.
-4. Smooth, retain every surface component, optionally simplify, transform to
-   the labelmap's physical coordinates, validate, and atomically publish.
+3. Optionally resample, pad field-of-view boundaries, extract the 0.5 isosurface,
+   and transform it into the labelmap's physical coordinates.
+4. Smooth once, retain every surface component, optionally simplify, validate,
+   and atomically publish.
 
 It therefore skips threshold selection, intensity segmentation, morphology,
 mask-island removal, and label interpretation. A binary per-structure mask and
@@ -234,27 +235,29 @@ before allocation unless `--allow-large-volume` is given.
 The isosurface implementation is MeshLib `marchingCubes` at 0.5. SimpleITK arrays
 are transposed from z/y/x to x/y/z before extraction, then shifted half a voxel
 to preserve the established sample-coordinate convention. Mesh validity is
-measured rather than assumed. The index-to-physical affine transforms vertices.
-When its linear component has a negative determinant, the transform also
-reverses every triangle so a left-handed image direction cannot turn an outward
-surface into an inward-wound mesh.
+measured rather than assumed. The index-to-physical affine transforms vertices
+before finishing. When its linear component has a negative determinant, the
+transform also reverses every triangle so a left-handed image direction cannot
+turn an outward surface into an inward-wound mesh. Smoothing and simplification
+therefore operate in physical model millimetres instead of voxel-index units.
 
-Smoothing uses MeshLib `relaxKeepVolume`. The preset controls initial iterations,
-relaxation force, and post-simplification iterations. The `--smooth-force` option
-replaces the former backend-specific passband. Smoothing moves surfaces, and the
-project does not provide a general deviation bound. Every requested
+Smoothing uses one MeshLib `relaxKeepVolume` pass before simplification. The
+preset controls its total iterations and relaxation force. The `--smooth-force`
+option replaces the former backend-specific passband. Smoothing moves surfaces,
+and the project does not provide a general deviation bound. Every requested
 iteration runs before self-intersection detection. If smoothing makes
 non-adjacent faces collide, vertices in those collision patches return to their
 pre-smooth positions. The protected set grows by topological rings until the
 mesh is collision-free. Smoothing is therefore retained globally instead of
 reducing the iteration count for the whole surface.
 
-Simplification uses MeshLib's quadric edge-collapse implementation with
-`DecimateStrategy.MinimizeError`. `--simplify-error-mm` sets the estimated
-surface-deviation/QEM limit in model millimetres; this is not a certified
-Hausdorff bound, and `0` disables simplification. A candidate is accepted only
-when it preserves the component/hole/Euler signature, does not increase boundary
-or non-manifold edges, and has no self-intersections. If a candidate
+Simplification runs after smoothing and uses MeshLib's quadric edge-collapse
+implementation with `DecimateStrategy.MinimizeError`. `--simplify-error-mm`
+sets the estimated surface-deviation/QEM limit in physical model millimetres;
+this is not a certified Hausdorff bound, and `0` disables simplification without
+disabling smoothing. A candidate is accepted only when it preserves the
+component/hole/Euler signature, does not increase boundary or non-manifold
+edges, and has no self-intersections. If a candidate
 contains collisions, the colliding triangles are projected back onto the
 pre-decimation source mesh. Four-ring source neighborhoods around those
 locations are excluded from collapse and decimation restarts. Up to eight local
@@ -265,10 +268,11 @@ This keeps simplification active outside small unsafe patches. If topology or
 manifold checks fail, a collision patch cannot be mapped, or all protection
 passes are exhausted, the valid pre-decimation mesh is retained and the command
 reports a warning. The resulting face count and MeshLib's introduced-error
-estimate are reported. Conversion and merging use this same finishing path.
-Labelmap commands use the `bone` preset's surface-only defaults—native grid,
-20 initial smoothing iterations at force 0.1, a 0.25 mm simplification limit,
-and 40 final smoothing iterations—but always retain every surface component.
+estimate are reported. Because simplification is the last geometry-changing
+stage, its estimate is not invalidated by later smoothing. Conversion and
+merging use this same finishing path. Labelmap commands use independent defaults:
+native grid, 60 smoothing iterations at force 0.1, a 0.25 mm simplification
+limit, and every surface component retained.
 
 ## Merge registration and gates
 

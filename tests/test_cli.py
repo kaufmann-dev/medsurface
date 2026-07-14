@@ -245,6 +245,39 @@ def test_every_help_surface_is_lightweight(argv):
     assert "Traceback" not in result.stdout
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["convert", "INPUT", "-o", "out.stl", "--post-smooth-iters", "1"],
+        ["merge", "INPUT", "INPUT", "-o", "out.stl", "--post-smooth-iters", "1"],
+        ["labelmap", "convert", "MASK", "-o", "out.stl", "--post-smooth-iters", "1"],
+        [
+            "labelmap",
+            "merge",
+            "MASK",
+            "MASK",
+            "-o",
+            "out.stl",
+            "--post-smooth-iters",
+            "1",
+        ],
+    ],
+)
+def test_post_smoothing_option_is_removed(tmp_path, argv):
+    mask = tmp_path / "mask.nii.gz"
+    mask.write_bytes(b"mask")
+    resolved = [
+        str(tmp_path) if value == "INPUT" else str(mask) if value == "MASK" else value
+        for value in argv
+    ]
+
+    result = runner.invoke(cli.app, resolved, prog_name="medsurface")
+
+    assert result.exit_code == 2
+    assert "--post-smooth-iters" in result.stderr
+    assert "No such option" in result.stderr
+
+
 def test_merge_help_describes_shared_processing_options():
     result = _run_cli_in_clean_interpreter(["merge", "--help"])
 
@@ -257,7 +290,6 @@ def test_merge_help_describes_shared_processing_options():
         ("--min-island-mm3", "Drop blobs smaller"),
         ("--smooth-iters", "MeshLib relaxation"),
         ("--smooth-force", "MeshLib relaxation"),
-        ("--post-smooth-iters", "Smoothing after"),
     ):
         assert option in normalized
         assert description_start in normalized
@@ -728,8 +760,6 @@ def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
             "0.12",
             "--simplify-error-mm",
             "0.18",
-            "--post-smooth-iters",
-            "9",
             "--no-cap",
             "--allow-large-volume",
             "--json",
@@ -1101,8 +1131,6 @@ def test_labelmap_convert_accepts_surface_flags_and_writes_json(tmp_path, monkey
             "0.12",
             "--simplify-error-mm",
             "0.18",
-            "--post-smooth-iters",
-            "9",
             "--no-cap",
             "--allow-large-volume",
             "--json",
@@ -1120,7 +1148,6 @@ def test_labelmap_convert_accepts_surface_flags_and_writes_json(tmp_path, monkey
     assert captured["smooth_iters"] == 11
     assert captured["smooth_force"] == pytest.approx(0.12)
     assert captured["simplify_error_mm"] == pytest.approx(0.18)
-    assert captured["post_smooth_iters"] == 9
     assert not captured["cap_field_of_view"]
     assert captured["allow_large_volume"]
     payload = json.loads(json_file.read_text())
@@ -1172,8 +1199,6 @@ def test_labelmap_merge_accepts_fusion_flags_and_writes_json(tmp_path, monkeypat
             "0.13",
             "--simplify-error-mm",
             "0.19",
-            "--post-smooth-iters",
-            "8",
             "--force",
             "--allow-large-volume",
             "--json",
@@ -1326,8 +1351,6 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
             "0.1",
             "--simplify-error-mm",
             "0.2",
-            "--post-smooth-iters",
-            "8",
             "--force",
             "--allow-large-volume",
             "--json",
@@ -1350,7 +1373,6 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
     assert captured["smooth_iters"] == 12
     assert captured["smooth_force"] == pytest.approx(0.1)
     assert captured["simplify_error_mm"] == pytest.approx(0.2)
-    assert captured["post_smooth_iters"] == 8
     assert captured["force"]
     assert captured["allow_large_volume"]
     payload = json.loads(json_file.read_text())

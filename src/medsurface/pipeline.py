@@ -52,7 +52,6 @@ class SurfaceSettings:
     smooth_iters: int
     smooth_force: float
     simplify_error_mm: float
-    post_smooth_iters: int
     keep_largest_component: bool
 
 
@@ -75,7 +74,6 @@ def surface_settings(preset: Preset, *, keep_largest_component: bool | None = No
         smooth_iters=preset.smooth_iters,
         smooth_force=preset.smooth_force,
         simplify_error_mm=preset.simplify_error_mm,
-        post_smooth_iters=preset.post_smooth_iters,
         keep_largest_component=(
             preset.keep_largest_component
             if keep_largest_component is None
@@ -89,7 +87,6 @@ def validate_surface_settings(settings: SurfaceSettings) -> None:
         "resample_mm": settings.resample_mm,
         "smooth_iters": settings.smooth_iters,
         "simplify_error_mm": settings.simplify_error_mm,
-        "post_smooth_iters": settings.post_smooth_iters,
     }
     for name, value in nonnegative.items():
         if not math.isfinite(value) or value < 0:
@@ -106,7 +103,6 @@ def finish_surface(
     smooth_iters: int,
     smooth_force: float,
     simplify_error_mm: float,
-    post_smooth_iters: int,
     keep_largest_component: bool,
     step: StepRunner,
     log: Logger,
@@ -114,19 +110,19 @@ def finish_surface(
     """Shared, intersection-safe finishing for conversion and fusion."""
     warnings = []
 
-    poly, initial = step(
+    poly, smoothing = step(
         "smooth",
         lambda: surface.smooth_safely(poly, smooth_iters, smooth_force),
     )
-    if initial.initial_self_intersecting_faces:
+    if smoothing.initial_self_intersecting_faces:
         warnings.append(
-            "initial smoothing kept %s vertices at their pre-smooth positions "
+            "smoothing kept %s vertices at their pre-smooth positions "
             "to prevent %d self-intersecting face(s); all %d requested iterations "
             "were retained elsewhere"
             % (
-                f"{initial.protected_vertices:,}",
-                initial.initial_self_intersecting_faces,
-                initial.requested_iterations,
+                f"{smoothing.protected_vertices:,}",
+                smoothing.initial_self_intersecting_faces,
+                smoothing.requested_iterations,
             )
         )
 
@@ -183,30 +179,13 @@ def finish_surface(
             )
         )
 
-    poly, final = step(
-        "post-smooth",
-        lambda: surface.smooth_safely(poly, post_smooth_iters, smooth_force),
-    )
-    if final.initial_self_intersecting_faces:
-        warnings.append(
-            "post-smoothing kept %s vertices at their pre-smooth positions "
-            "to prevent %d self-intersecting face(s); all %d requested iterations "
-            "were retained elsewhere"
-            % (
-                f"{final.protected_vertices:,}",
-                final.initial_self_intersecting_faces,
-                final.requested_iterations,
-            )
-        )
-
     return SurfaceFinish(
         poly=poly,
         surface_components=surface_components,
         warnings=warnings,
         provenance={
-            "initial_smoothing": asdict(initial),
+            "smoothing": asdict(smoothing),
             "decimation": asdict(decimation),
-            "post_smoothing": asdict(final),
         },
     )
 
@@ -276,20 +255,20 @@ def mesh_binary_mask(
     log("  raw triangles: %s" % f"{raw_faces:,}")
     if raw_faces == 0:
         raise ValueError("marching cubes produced no triangles")
+    poly = step("index -> physical space", lambda: surface.transform(poly, affine))
 
     finished = finish_surface(
         poly,
         smooth_iters=settings.smooth_iters,
         smooth_force=settings.smooth_force,
         simplify_error_mm=settings.simplify_error_mm,
-        post_smooth_iters=settings.post_smooth_iters,
         keep_largest_component=settings.keep_largest_component,
         step=step,
         log=log,
     )
     for message in finished.warnings:
         warn(message)
-    poly = step("index -> physical space", lambda: surface.transform(finished.poly, affine))
+    poly = finished.poly
     quality = step(
         "validate and publish mesh",
         lambda: surface.write_validated(poly, output_path),

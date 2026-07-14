@@ -13,7 +13,7 @@ import pytest
 import SimpleITK as sitk
 
 from medsurface import merge as merge_mod
-from medsurface import presets, registration, volume
+from medsurface import pipeline, presets, registration, surface, volume
 from medsurface.catalog import DicomSource, FileSource, VolumeCandidate
 from medsurface.merge import MergeError
 from medsurface.series import Series
@@ -260,13 +260,13 @@ def test_surface_stage_comes_from_the_preset():
     from medsurface import presets
 
     signature = inspect.signature(merge_mod.merge)
-    for name in ("smooth_iters", "smooth_force", "simplify_error_mm", "post_smooth_iters"):
+    for name in ("smooth_iters", "smooth_force", "simplify_error_mm"):
         assert signature.parameters[name].default is None, (
             "%s must default to the preset, not to a merge-specific constant" % name
         )
 
     bone = presets.get("bone")
-    assert (bone.smooth_iters, bone.smooth_force, bone.post_smooth_iters) == (20, 0.1, 40)
+    assert (bone.smooth_iters, bone.smooth_force) == (60, 0.1)
 
 
 @pytest.mark.parametrize("grid_mm", [0.0, -0.4, float("nan"), float("inf")])
@@ -322,6 +322,49 @@ def test_force_overrides_the_gates():
     merge_mod.check_registration(
         _result(overlap_moving_in_fixed=0.0, overlap_fixed_in_moving=0.0,
                 shared_fov_dice=0.0), force=True)
+
+
+def test_fused_surface_is_finished_in_fixed_physical_coordinates(monkeypatch):
+    values = np.zeros((12, 12, 12), dtype=np.uint8)
+    values[3:9, 3:9, 3:9] = 1
+    mask = _image(values, origin=(100.0, 200.0, 300.0))
+    captured = {}
+
+    monkeypatch.setattr(merge_mod.registration, "rigid_register", lambda *_a, **_k: _result())
+
+    def capture(poly, **_kwargs):
+        captured["bounds"] = surface.bounds_mm(poly)
+        return pipeline.SurfaceFinish(
+            poly=poly,
+            surface_components=surface.component_count(poly),
+            warnings=[],
+            provenance={},
+        )
+
+    monkeypatch.setattr(merge_mod.pipeline, "finish_surface", capture)
+    monkeypatch.setattr(
+        merge_mod.surface,
+        "write_validated",
+        lambda _poly, _path: {"valid": True},
+    )
+    result = merge_mod.fuse_masks(
+        mask,
+        mask,
+        "unused.stl",
+        settings=pipeline.SurfaceSettings(
+            resample_mm=0,
+            smooth_iters=0,
+            smooth_force=0.1,
+            simplify_error_mm=0,
+            keep_largest_component=False,
+        ),
+        grid_mm=1.0,
+    )
+
+    assert captured["bounds"][0] > 100
+    assert captured["bounds"][2] > 200
+    assert captured["bounds"][4] > 300
+    assert result.bounds_mm == pytest.approx(captured["bounds"])
 
 
 def test_unrelated_anatomy_fails_the_gates():
