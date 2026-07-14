@@ -4,7 +4,9 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 
-from medsurface import segment
+from medsurface import segment, surface
+
+from .mesh_helpers import mean_adjacency_angle, volume
 
 
 def test_otsu_separates_two_modes():
@@ -131,6 +133,56 @@ def test_pad_adds_background_border():
     assert padded[0, 0, 0] == 0
     assert padded[2, 2, 2] == 1
     assert padded.sum() == 27
+
+
+def test_physical_occupancy_smoothing_removes_anisotropic_terracing():
+    spacing = (0.4, 0.4, 0.8)
+    shape = (40, 80, 80)
+    zz, yy, xx = np.meshgrid(
+        np.arange(shape[0]) * spacing[2],
+        np.arange(shape[1]) * spacing[1],
+        np.arange(shape[2]) * spacing[0],
+        indexing="ij",
+    )
+    values = (
+        (zz - 16.0) ** 2 + (yy - 16.0) ** 2 + (xx - 16.0) ** 2 <= 12.0**2
+    ).astype(np.uint8)
+    image = sitk.GetImageFromArray(values)
+    image.SetSpacing(spacing)
+    image = segment.pad(image, 4)
+    affine = surface.index_to_physical(image)
+
+    raw = surface.transform(surface.marching_cubes(image), affine)
+    relaxed = surface.smooth(raw, 20, 0.1)
+    field = segment.smooth_occupancy(image, 0.8)
+    physically_smoothed = surface.transform(
+        surface.marching_cubes(field, segment.ISO_OCCUPANCY),
+        affine,
+    )
+    physically_smoothed = surface.smooth(physically_smoothed, 20, 0.1)
+
+    relaxed_arrays = surface.to_arrays(relaxed)
+    smoothed_arrays = surface.to_arrays(physically_smoothed)
+    assert mean_adjacency_angle(smoothed_arrays) < 0.6 * mean_adjacency_angle(
+        relaxed_arrays
+    )
+    assert volume(smoothed_arrays) == pytest.approx(volume(relaxed_arrays), rel=0.02)
+
+
+@pytest.mark.parametrize("sigma", [-0.1, float("nan"), float("inf")])
+def test_occupancy_smoothing_rejects_invalid_sigma(sigma):
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        segment.smooth_occupancy(_two_blobs(), sigma)
+
+
+def test_zero_occupancy_smoothing_is_a_noop():
+    image = _two_blobs()
+    assert segment.smooth_occupancy(image, 0) is image
+
+
+def test_occupancy_smoothing_supports_minimum_volume_dimensions():
+    image = sitk.Image((2, 2, 2), sitk.sitkUInt8)
+    assert segment.smooth_occupancy(image, 0.8).GetSize() == (2, 2, 2)
 
 
 @pytest.mark.parametrize("spacing", [0.0, -0.1, float("nan"), float("inf")])

@@ -887,13 +887,10 @@ def convert_labelmap(
         "--resample-mm",
         help="Isotropic surface-grid voxel size in mm (0 = native).",
     ),
-    smooth_iters: int | None = typer.Option(
-        None,
-        "--smooth-iters",
-        help="Total MeshLib relaxation iterations before simplification.",
-    ),
-    smooth_force: float | None = typer.Option(
-        None, "--smooth-force", help="MeshLib relaxation strength per iteration."
+    smooth_mm: float = typer.Option(
+        defaults.DEFAULT_LABELMAP_SMOOTH_MM,
+        "--smooth-mm",
+        help="Gaussian sigma in physical mm applied to the labelmap before meshing (0 = off).",
     ),
     simplify_error_mm: float | None = typer.Option(
         None,
@@ -918,10 +915,9 @@ def convert_labelmap(
     _validate_processing_numbers(
         nonnegative=[
             ("--resample-mm", resample_mm),
-            ("--smooth-iters", smooth_iters),
+            ("--smooth-mm", smooth_mm),
             ("--simplify-error-mm", simplify_error_mm),
         ],
-        unit_interval=(("--smooth-force", smooth_force),),
     )
     emitted_warnings: list[str] = []
 
@@ -946,8 +942,7 @@ def convert_labelmap(
                 candidate=chosen,
                 output_path=str(output),
                 resample_mm=resample_mm,
-                smooth_iters=smooth_iters,
-                smooth_force=smooth_force,
+                smooth_mm=smooth_mm,
                 simplify_error_mm=simplify_error_mm,
                 cap_field_of_view=not no_cap,
                 allow_large_volume=allow_large_volume,
@@ -1020,13 +1015,10 @@ def merge_labelmaps(
         "--grid-mm",
         help="Isotropic fused-grid voxel size in mm.",
     ),
-    smooth_iters: int | None = typer.Option(
-        None,
-        "--smooth-iters",
-        help="Total MeshLib relaxation iterations before simplification.",
-    ),
-    smooth_force: float | None = typer.Option(
-        None, "--smooth-force", help="MeshLib relaxation strength per iteration."
+    smooth_mm: float = typer.Option(
+        defaults.DEFAULT_LABELMAP_SMOOTH_MM,
+        "--smooth-mm",
+        help="Gaussian sigma in physical mm applied after labelmap fusion (0 = off).",
     ),
     simplify_error_mm: float | None = typer.Option(
         None,
@@ -1048,11 +1040,10 @@ def merge_labelmaps(
     _validate_mesh_output(output)
     _validate_processing_numbers(
         nonnegative=[
-            ("--smooth-iters", smooth_iters),
+            ("--smooth-mm", smooth_mm),
             ("--simplify-error-mm", simplify_error_mm),
         ],
         positive=(("--grid-mm", grid_mm),),
-        unit_interval=(("--smooth-force", smooth_force),),
     )
     emitted_warnings: list[str] = []
 
@@ -1084,8 +1075,7 @@ def merge_labelmaps(
                 moving=moving,
                 output_path=str(output),
                 grid_mm=grid_mm,
-                smooth_iters=smooth_iters,
-                smooth_force=smooth_force,
+                smooth_mm=smooth_mm,
                 simplify_error_mm=simplify_error_mm,
                 force=force,
                 allow_large_volume=allow_large_volume,

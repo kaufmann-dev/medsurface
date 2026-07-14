@@ -353,6 +353,7 @@ def test_fused_surface_is_finished_in_fixed_physical_coordinates(monkeypatch):
         "unused.stl",
         settings=pipeline.SurfaceSettings(
             resample_mm=0,
+            field_smooth_mm=0,
             smooth_iters=0,
             smooth_force=0.1,
             simplify_error_mm=0,

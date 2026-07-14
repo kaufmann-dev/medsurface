@@ -49,6 +49,7 @@ class SurfaceSettings:
     """Mask-to-mesh controls shared by conversion and fusion workflows."""
 
     resample_mm: float
+    field_smooth_mm: float
     smooth_iters: int
     smooth_force: float
     simplify_error_mm: float
@@ -71,6 +72,7 @@ def surface_settings(preset: Preset, *, keep_largest_component: bool | None = No
     """Extract only the mask-to-mesh portion of a conversion preset."""
     return SurfaceSettings(
         resample_mm=preset.resample_mm,
+        field_smooth_mm=0.0,
         smooth_iters=preset.smooth_iters,
         smooth_force=preset.smooth_force,
         simplify_error_mm=preset.simplify_error_mm,
@@ -85,6 +87,7 @@ def surface_settings(preset: Preset, *, keep_largest_component: bool | None = No
 def validate_surface_settings(settings: SurfaceSettings) -> None:
     nonnegative = {
         "resample_mm": settings.resample_mm,
+        "field_smooth_mm": settings.field_smooth_mm,
         "smooth_iters": settings.smooth_iters,
         "simplify_error_mm": settings.simplify_error_mm,
     }
@@ -111,12 +114,12 @@ def finish_surface(
     warnings = []
 
     poly, smoothing = step(
-        "smooth",
+        "relax surface",
         lambda: surface.smooth_safely(poly, smooth_iters, smooth_force),
     )
     if smoothing.initial_self_intersecting_faces:
         warnings.append(
-            "smoothing kept %s vertices at their pre-smooth positions "
+            "surface relaxation kept %s vertices at their pre-relaxation positions "
             "to prevent %d self-intersecting face(s); all %d requested iterations "
             "were retained elsewhere"
             % (
@@ -223,9 +226,6 @@ def mesh_binary_mask(
             "capped flat. Missing anatomy cannot be recovered."
         )
 
-    if cap_field_of_view:
-        binary = segment.pad(binary, 1)
-
     if settings.resample_mm > 0:
         native = min(binary.GetSpacing())
         if settings.resample_mm > native:
@@ -241,6 +241,7 @@ def mesh_binary_mask(
                 binary,
                 settings.resample_mm,
                 log,
+                pad_border=settings.field_smooth_mm <= 0 and cap_field_of_view,
                 allow_large_volume=allow_large_volume,
             ),
         )
@@ -248,6 +249,18 @@ def mesh_binary_mask(
     else:
         grid = binary
         isovalue = 0.5
+
+    if settings.field_smooth_mm > 0:
+        grid = step(
+            "smooth labelmap field",
+            lambda: segment.smooth_occupancy(grid, settings.field_smooth_mm),
+        )
+        isovalue = segment.ISO_OCCUPANCY
+
+    if cap_field_of_view and not (
+        settings.resample_mm > 0 and settings.field_smooth_mm <= 0
+    ):
+        grid = segment.pad(grid, 1)
 
     affine = surface.index_to_physical(grid)
     poly = step("marching cubes", lambda: surface.marching_cubes(grid, isovalue))

@@ -249,6 +249,7 @@ def test_mask_surface_is_finished_once_in_physical_coordinates(monkeypatch):
         "unused.stl",
         settings=pipeline_mod.SurfaceSettings(
             resample_mm=0,
+            field_smooth_mm=0,
             smooth_iters=0,
             smooth_force=0.1,
             simplify_error_mm=0,

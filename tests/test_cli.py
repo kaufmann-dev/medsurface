@@ -278,6 +278,35 @@ def test_post_smoothing_option_is_removed(tmp_path, argv):
     assert "No such option" in result.stderr
 
 
+@pytest.mark.parametrize("command", ["convert", "merge"])
+@pytest.mark.parametrize("option", ["--smooth-iters", "--smooth-force"])
+def test_labelmap_exposes_only_physical_smoothing(tmp_path, command, option):
+    mask = tmp_path / "mask.nii.gz"
+    mask.write_bytes(b"mask")
+    argv = ["labelmap", command, str(mask)]
+    if command == "merge":
+        argv.append(str(mask))
+    argv.extend(["-o", "out.stl", option, "1"])
+
+    result = runner.invoke(cli.app, argv, prog_name="medsurface")
+
+    assert result.exit_code == 2
+    assert option in result.stderr
+    assert "No such option" in result.stderr
+
+
+def test_labelmap_help_describes_physical_smoothing_only():
+    for command in ("convert", "merge"):
+        result = _run_cli_in_clean_interpreter(["labelmap", command, "--help"])
+        normalized = " ".join(result.stdout.replace("│", " ").split())
+
+        assert result.returncode == 0
+        assert "--smooth-mm" in normalized
+        assert "Gaussian sigma" in normalized
+        assert "--smooth-iters" not in normalized
+        assert "--smooth-force" not in normalized
+
+
 def test_merge_help_describes_shared_processing_options():
     result = _run_cli_in_clean_interpreter(["merge", "--help"])
 
@@ -1125,10 +1154,8 @@ def test_labelmap_convert_accepts_surface_flags_and_writes_json(tmp_path, monkey
             str(output),
             "--resample-mm",
             "0.8",
-            "--smooth-iters",
-            "11",
-            "--smooth-force",
-            "0.12",
+            "--smooth-mm",
+            "0.9",
             "--simplify-error-mm",
             "0.18",
             "--no-cap",
@@ -1145,8 +1172,7 @@ def test_labelmap_convert_accepts_surface_flags_and_writes_json(tmp_path, monkey
     assert result.stderr == ""
     assert captured["candidate"] is chosen
     assert captured["resample_mm"] == pytest.approx(0.8)
-    assert captured["smooth_iters"] == 11
-    assert captured["smooth_force"] == pytest.approx(0.12)
+    assert captured["smooth_mm"] == pytest.approx(0.9)
     assert captured["simplify_error_mm"] == pytest.approx(0.18)
     assert not captured["cap_field_of_view"]
     assert captured["allow_large_volume"]
@@ -1193,10 +1219,8 @@ def test_labelmap_merge_accepts_fusion_flags_and_writes_json(tmp_path, monkeypat
             str(output),
             "--grid-mm",
             "0.7",
-            "--smooth-iters",
-            "12",
-            "--smooth-force",
-            "0.13",
+            "--smooth-mm",
+            "0.9",
             "--simplify-error-mm",
             "0.19",
             "--force",
@@ -1214,8 +1238,7 @@ def test_labelmap_merge_accepts_fusion_flags_and_writes_json(tmp_path, monkeypat
     assert captured["fixed"] is fixed
     assert captured["moving"] is moving
     assert captured["grid_mm"] == pytest.approx(0.7)
-    assert captured["smooth_iters"] == 12
-    assert captured["smooth_force"] == pytest.approx(0.13)
+    assert captured["smooth_mm"] == pytest.approx(0.9)
     assert captured["force"]
     assert captured["allow_large_volume"]
     payload = json.loads(json_file.read_text())
@@ -1226,8 +1249,8 @@ def test_labelmap_merge_accepts_fusion_flags_and_writes_json(tmp_path, monkeypat
 @pytest.mark.parametrize(
     "argv,option",
     [
-        (["labelmap", "convert", "INPUT", "-o", "out.stl", "--smooth-iters", "-1"], "--smooth-iters"),
-        (["labelmap", "convert", "INPUT", "-o", "out.stl", "--smooth-force", "2"], "--smooth-force"),
+        (["labelmap", "convert", "INPUT", "-o", "out.stl", "--smooth-mm", "-1"], "--smooth-mm"),
+        (["labelmap", "merge", "INPUT", "MOVING", "-o", "out.stl", "--smooth-mm", "nan"], "--smooth-mm"),
         (["labelmap", "merge", "INPUT", "MOVING", "-o", "out.stl", "--grid-mm", "0"], "--grid-mm"),
     ],
 )

@@ -335,6 +335,12 @@ def fuse_masks(
         ),
     )
 
+    if settings.field_smooth_mm > 0:
+        fused = step(
+            "smooth fused labelmap field",
+            lambda: segment.smooth_occupancy(fused, settings.field_smooth_mm),
+        )
+
     voxel_mm3 = grid_mm**3
 
     def measure_volumes() -> tuple[float, float, float]:

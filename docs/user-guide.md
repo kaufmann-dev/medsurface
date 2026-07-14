@@ -160,19 +160,26 @@ This starts after segmentation. It loads the labelmap, treats zero as background
 and every nonzero value as foreground, then extracts, finishes, validates, and
 writes one surface mesh. It does not threshold image intensities, run Otsu,
 apply median/opening/closing filters, remove mask islands, or interpret label
-numbers. Separate nonzero regions are all retained, so one multilabel file can
-produce one STL containing multiple structures.
+numbers. Separate nonzero regions are unioned before physical smoothing, so one
+multilabel file can produce one STL containing multiple surviving structures.
 
 The input must be one direct NIfTI, NRRD, or MetaImage file. Its voxels must be
 finite, non-negative integers; integer-valued floating-point images are
 accepted, but probability maps and fractional labels are not. Directories,
 DICOM, selectors, presets, and structure-name flags are deliberately absent.
-Labelmaps have independent surface defaults: native grid, 60 smoothing
-iterations at force `0.1`, a `0.25 mm` simplification limit, and every surface
-component retained. Surface controls such as `--smooth-iters`, `--smooth-force`,
-and `--simplify-error-mm` remain available. Setting `--simplify-error-mm 0`
-keeps the smoothing pass and only disables triangle reduction; also set
-`--smooth-iters 0` for the most literal full-density mask surface.
+Labelmaps have independent surface defaults: native grid, a `0.8 mm` Gaussian
+sigma applied in physical space before meshing, light internal surface
+relaxation, a `0.25 mm` simplification limit, and every surviving surface
+component retained. `--smooth-mm` is the only labelmap smoothing control;
+`--smooth-mm 0` disables both field smoothing and the internal relaxation.
+Setting `--simplify-error-mm 0` independently disables triangle reduction.
+
+Physical smoothing is intentionally geometry-changing. It reduces voxel-scale
+terracing consistently even when marching cubes creates millions of triangles,
+but it can round boundaries, close narrow gaps, merge nearby regions, or erase
+structures near the configured scale. Every smoothed labelmap command warns
+about this tradeoff. Use both `--smooth-mm 0` and `--simplify-error-mm 0` for the
+most literal full-density surface supported by medsurface.
 
 TotalSegmentator is not installed or run by medsurface. Its default output is a
 directory containing one binary `.nii.gz` file per structure; pass any one of
@@ -197,12 +204,14 @@ medsurface labelmap merge fixed-selected.nii.gz moving-selected.nii.gz \
 ```
 
 It rigidly registers the moving foreground to the fixed foreground, checks the
-registration, unions the masks on the shared fusion grid, and creates one mesh
-in the fixed labelmap's physical coordinate system. Confirm that both inputs
-belong to the same subject and contain the same selected, non-deforming
-structures. `--force` bypasses only failed registration-quality gates. Do not
-use this command merely to combine separate structure files from one scan;
-create one multilabel file upstream instead.
+registration, unions the masks on the shared fusion grid, applies physical
+smoothing to the fused occupancy field, and creates one mesh in the fixed
+labelmap's physical coordinate system. Smoothing after the union attenuates
+both voxel terraces and small boundary disagreements between the masks. Confirm
+that both inputs belong to the same subject and contain the same selected,
+non-deforming structures. `--force` bypasses only failed registration-quality
+gates. Do not use this command merely to combine separate structure files from
+one scan; create one multilabel file upstream instead.
 
 ## Input requirements and limitations
 
@@ -293,11 +302,13 @@ normalize unsupported raw face configurations while loading; the report describe
 the imported mesh rather than exposing separate raw non-manifold or degenerate
 face counters. A failed self-intersection measurement is invalid.
 
-Before writing, conversion and merging guard smoothing and simplification
-against self-intersections. Smoothing still runs every requested iteration;
-only vertices in collision neighborhoods retain their pre-smooth positions.
-These safeguards are reported as warnings and recorded in JSON provenance when
-they are used.
+Before writing, conversion and merging guard surface relaxation and
+simplification against self-intersections. Relaxation still runs every requested
+iteration; only vertices in collision neighborhoods retain their pre-relaxation
+positions. These safeguards are reported as warnings and recorded in JSON
+provenance when they are used. Labelmap field smoothing happens before surface
+extraction and can change anatomy or topology even when the resulting mesh is
+structurally valid.
 
 These checks establish mesh structure, not anatomical correctness,
 manufacturability, dimensional accuracy, or fitness for a clinical purpose.

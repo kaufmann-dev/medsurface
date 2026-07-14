@@ -203,6 +203,28 @@ ISO_OCCUPANCY = 0.5
 _ANTIALIAS_SIGMA_FACTOR = 0.3
 
 
+def smooth_occupancy(image: sitk.Image, sigma_mm: float) -> sitk.Image:
+    """Regularize a binary or fractional occupancy boundary in physical space.
+
+    The 0.5 isosurface of a straight boundary remains centered while voxel-scale
+    terraces are attenuated. Curved boundaries, narrow gaps, and structures near
+    the configured sigma can move, merge, or disappear; callers surface that
+    tradeoff to users instead of treating this as lossless anti-aliasing.
+    """
+    if not math.isfinite(sigma_mm) or sigma_mm < 0:
+        raise ValueError("occupancy smoothing sigma must be finite and non-negative")
+    if sigma_mm == 0:
+        return image
+    real = sitk.Cast(image, sitk.sitkFloat32)
+    if min(image.GetSize()) < 4:
+        return sitk.DiscreteGaussian(
+            real,
+            variance=[float(sigma_mm) ** 2] * image.GetDimension(),
+            useImageSpacing=True,
+        )
+    return sitk.SmoothingRecursiveGaussian(real, float(sigma_mm))
+
+
 def antialias_for_grid(image: sitk.Image, grid_mm: float) -> sitk.Image:
     """Blur only the axes that are about to be downsampled.
 
