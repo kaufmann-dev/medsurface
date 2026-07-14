@@ -215,14 +215,10 @@ def smooth_occupancy(image: sitk.Image, sigma_mm: float) -> sitk.Image:
         raise ValueError("occupancy smoothing sigma must be finite and non-negative")
     if sigma_mm == 0:
         return image
-    real = sitk.Cast(image, sitk.sitkFloat32)
-    if min(image.GetSize()) < 4:
-        return sitk.DiscreteGaussian(
-            real,
-            variance=[float(sigma_mm) ** 2] * image.GetDimension(),
-            useImageSpacing=True,
-        )
-    return sitk.SmoothingRecursiveGaussian(real, float(sigma_mm))
+    return sitk.SmoothingRecursiveGaussian(
+        sitk.Cast(image, sitk.sitkFloat32),
+        float(sigma_mm),
+    )
 
 
 def antialias_for_grid(image: sitk.Image, grid_mm: float) -> sitk.Image:

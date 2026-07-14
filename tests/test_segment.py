@@ -180,11 +180,6 @@ def test_zero_occupancy_smoothing_is_a_noop():
     assert segment.smooth_occupancy(image, 0) is image
 
 
-def test_occupancy_smoothing_supports_minimum_volume_dimensions():
-    image = sitk.Image((2, 2, 2), sitk.sitkUInt8)
-    assert segment.smooth_occupancy(image, 0.8).GetSize() == (2, 2, 2)
-
-
 @pytest.mark.parametrize("spacing", [0.0, -0.1, float("nan"), float("inf")])
 def test_resample_rejects_invalid_target_spacing(spacing):
     with pytest.raises(ValueError, match="finite and greater than zero"):

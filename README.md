@@ -67,6 +67,8 @@ medsurface labelmap convert segmentation.nii.gz -o surface.stl
 Labelmap commands smooth voxel-scale terracing with a `0.8 mm` physical
 Gaussian by default. Use `--smooth-mm 0` to preserve the supplied boundary as
 literally as possible; smoothing can round or erase structures near its scale.
+Every labelmap axis must contain at least four voxels, including when smoothing
+is disabled.
 
 ## Commands
 

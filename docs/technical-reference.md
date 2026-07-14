@@ -137,13 +137,13 @@ remain external dependencies of the user's workflow, not medsurface runtime
 dependencies.
 
 Labelmap occupancy smoothing uses SimpleITK's recursive Gaussian with sigma in
-physical millimetres; volumes smaller than four voxels on an axis use the
-spacing-aware discrete Gaussian fallback. The default sigma is `0.8 mm`, and
-`--smooth-mm 0` bypasses both this field operation and the subsequent internal
-relaxation. The 0.5 isovalue keeps a straight binary boundary centered, but
-curved boundaries and features near the sigma can move, merge, or disappear.
-The command warns whenever smoothing is enabled and records `smooth_mm` in JSON
-provenance.
+physical millimetres. Every labelmap axis must contain at least four voxels,
+including when `--smooth-mm 0` bypasses both this field operation and the
+subsequent internal relaxation. There is no alternate smoothing algorithm for
+smaller labelmaps. The default sigma is `0.8 mm`. The 0.5 isovalue keeps a
+straight binary boundary centered, but curved boundaries and features near the
+sigma can move, merge, or disappear. The command warns whenever smoothing is
+enabled and records `smooth_mm` in JSON provenance.
 
 ## File-volume compatibility
 
@@ -154,11 +154,13 @@ unreadable. File candidates must be scalar, real-valued 3-D images with at least
 two voxels per axis, finite origin/direction values, finite positive spacing,
 and a nonsingular 3×3 direction matrix.
 
-Labelmap commands add value constraints after loading: values must be finite,
-non-negative integers, at least one voxel must be nonzero, and fractional
-probability maps are unsupported. Integer-valued floating-point labelmaps are
-accepted. Label numbers and semantic names are not interpreted; all nonzero
-values are unioned.
+Labelmap commands add their own constraints. Before pixel data are loaded, they
+require at least four voxels per axis, independently of the smoothing setting;
+the general two-voxel minimum for ordinary intensity volumes is unchanged. Once
+loaded, values must be finite, non-negative integers, at least one voxel must be
+nonzero, and fractional probability maps are unsupported. Integer-valued
+floating-point labelmaps are accepted. Label numbers and semantic names are not
+interpreted; all nonzero values are unioned.
 
 The selected candidate's discovered dimensions are multiplied with Python
 integers before SimpleITK reads pixels. Missing dimensions make the candidate
