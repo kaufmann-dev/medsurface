@@ -99,12 +99,12 @@ remain nested under `dicom`.
 A preset supplies the segmentation and mesh-finishing defaults. List the
 installed values at any time with `medsurface presets`.
 
-| preset  | use it for                                              | threshold | median | closing | island floor | smoothing iterations (initial + final) | simplify error |
-| ------- | ------------------------------------------------------- | --------: | -----: | ------: | -----------: | -------------------------------------: | -------------: |
-| `bone`  | General CT bone models                                  |    300 HU | 1.0 mm |  2.4 mm |       50 mm³ |                                20 + 40 |        0.25 mm |
-| `teeth` | Enamel and dense dentin; keeps separate teeth           |  1,200 HU | 0.6 mm |  0.6 mm |        5 mm³ |                                 10 + 0 |        0.12 mm |
-| `skin`  | Outer skin surface from CT                              |   −300 HU | 1.4 mm |  3.2 mm |      500 mm³ |                                25 + 10 |        0.35 mm |
-| `auto`  | MR, CBCT, ultrasound, or other uncalibrated intensities |      Otsu | 1.0 mm |  2.0 mm |       50 mm³ |                                20 + 40 |        0.25 mm |
+| preset  | use it for                                              | threshold | median | closing | island floor | smoothing iterations | simplify error |
+| ------- | ------------------------------------------------------- | --------: | -----: | ------: | -----------: | -------------------: | -------------: |
+| `bone`  | General CT bone models                                  |    300 HU | 1.0 mm |  2.4 mm |       50 mm³ |                   60 |        0.25 mm |
+| `teeth` | Enamel and dense dentin; keeps separate teeth           |  1,200 HU | 0.6 mm |  0.6 mm |        5 mm³ |                   10 |        0.12 mm |
+| `skin`  | Outer skin surface from CT                              |   −300 HU | 1.4 mm |  3.2 mm |      500 mm³ |                   35 |        0.35 mm |
+| `auto`  | MR, CBCT, ultrasound, or other uncalibrated intensities |      Otsu | 1.0 mm |  2.0 mm |       50 mm³ |                   60 |        0.25 mm |
 
 Numeric thresholds are inclusive lower bounds. `auto` calculates a
 format-neutral Otsu threshold from the volume instead of assuming calibrated
@@ -115,10 +115,10 @@ Other inputs, derived CT without explicit units, inconsistent series, and
 ambiguous multienergy CT receive a warning. Use an intentional numeric
 `--threshold` or `--preset auto` when values are not calibrated HU.
 
-MeshLib smoothing uses the preset's iteration count and relaxation force. Use
-`--smooth-iters` and `--smooth-force` to override them; the built-in presets use
-force `0.1`, selected to match the preceding surface finish on the two reference
-CT studies.
+MeshLib smoothing runs once in physical coordinates before simplification. Use
+`--smooth-iters` to set its total iteration count and `--smooth-force` to set the
+relaxation strength; the built-in presets use force `0.1`, selected to match the
+surface finish on the two reference CT studies.
 
 `teeth` keeps every mask island and surface component that survives its size
 floor. The other presets keep only the largest component. `--simplify-error-mm`
@@ -167,9 +167,12 @@ The input must be one direct NIfTI, NRRD, or MetaImage file. Its voxels must be
 finite, non-negative integers; integer-valued floating-point images are
 accepted, but probability maps and fractional labels are not. Directories,
 DICOM, selectors, presets, and structure-name flags are deliberately absent.
-The surface uses the normal `bone` finishing defaults and retains every surface
-component. Surface controls such as `--smooth-iters`, `--smooth-force`, and
-`--simplify-error-mm` remain available.
+Labelmaps have independent surface defaults: native grid, 60 smoothing
+iterations at force `0.1`, a `0.25 mm` simplification limit, and every surface
+component retained. Surface controls such as `--smooth-iters`, `--smooth-force`,
+and `--simplify-error-mm` remain available. Setting `--simplify-error-mm 0`
+keeps the smoothing pass and only disables triangle reduction; also set
+`--smooth-iters 0` for the most literal full-density mask surface.
 
 TotalSegmentator is not installed or run by medsurface. Its default output is a
 directory containing one binary `.nii.gz` file per structure; pass any one of
@@ -290,11 +293,11 @@ normalize unsupported raw face configurations while loading; the report describe
 the imported mesh rather than exposing separate raw non-manifold or degenerate
 face counters. A failed self-intersection measurement is invalid.
 
-Before writing, conversion and merging also guard both smoothing stages and
-simplification against self-intersections. Smoothing still runs every requested
-iteration; only vertices in collision neighborhoods retain their pre-smooth
-positions. These safeguards are reported as warnings and recorded in JSON
-provenance when they are used.
+Before writing, conversion and merging guard smoothing and simplification
+against self-intersections. Smoothing still runs every requested iteration;
+only vertices in collision neighborhoods retain their pre-smooth positions.
+These safeguards are reported as warnings and recorded in JSON provenance when
+they are used.
 
 These checks establish mesh structure, not anatomical correctness,
 manufacturability, dimensional accuracy, or fitness for a clinical purpose.

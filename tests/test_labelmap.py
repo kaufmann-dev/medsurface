@@ -59,15 +59,36 @@ def test_invalid_labelmap_values_are_rejected(values, message):
         labelmap._binary_mask(_image(values))
 
 
-def test_default_finishing_matches_convert_but_keeps_all_shells():
+def test_default_finishing_is_independent_and_keeps_all_shells():
     settings = labelmap.default_surface_settings()
 
     assert settings.resample_mm == 0
-    assert settings.smooth_iters == 20
+    assert settings.smooth_iters == 60
     assert settings.smooth_force == pytest.approx(0.1)
     assert settings.simplify_error_mm == pytest.approx(0.25)
-    assert settings.post_smooth_iters == 40
     assert settings.keep_largest_component is False
+
+
+def test_disabling_simplification_keeps_default_smoothing():
+    settings = labelmap.resolve_surface_settings(simplify_error_mm=0)
+
+    assert settings.smooth_iters == 60
+    assert settings.simplify_error_mm == 0
+
+
+def test_default_labelmap_finishing_is_single_stage_and_error_limited(tmp_path):
+    source = tmp_path / "labels.nii.gz"
+    output = tmp_path / "labels.stl"
+    candidate = _write(source, _two_labels())
+
+    result = labelmap.convert(candidate, str(output))
+    finishing = result.provenance["surface_finishing"]
+
+    assert result.quality["valid"]
+    assert finishing["smoothing"]["requested_iterations"] == 60
+    assert finishing["decimation"]["simplify_error_mm"] == pytest.approx(0.25)
+    assert finishing["decimation"]["error_introduced_mm"] <= 0.25
+    assert set(finishing) == {"smoothing", "decimation"}
 
 
 @pytest.mark.parametrize("extension", [".nii.gz", ".nrrd", ".mha"])
@@ -81,7 +102,6 @@ def test_real_labelmap_formats_convert_all_components(tmp_path, extension):
         str(output),
         smooth_iters=0,
         simplify_error_mm=0,
-        post_smooth_iters=0,
     )
 
     assert output.exists()
@@ -105,7 +125,6 @@ def test_labelmap_conversion_preserves_left_handed_physical_geometry(tmp_path):
         str(output),
         smooth_iters=0,
         simplify_error_mm=0,
-        post_smooth_iters=0,
     )
 
     assert result.quality["valid"]
@@ -125,7 +144,6 @@ def test_labelmap_boundary_is_capped_and_reported(tmp_path):
         str(output),
         smooth_iters=0,
         simplify_error_mm=0,
-        post_smooth_iters=0,
     )
 
     assert result.capped_field_of_view
@@ -155,7 +173,6 @@ def test_labelmap_merge_registers_rigid_masks_and_uses_fixed_frame(tmp_path):
         grid_mm=1.0,
         smooth_iters=0,
         simplify_error_mm=0,
-        post_smooth_iters=0,
     )
 
     assert output.exists()
@@ -201,6 +218,5 @@ def test_labelmap_convert_does_not_call_segmentation(monkeypatch, tmp_path):
         str(tmp_path / "out.stl"),
         smooth_iters=0,
         simplify_error_mm=0,
-        post_smooth_iters=0,
     )
     assert result.quality["valid"]

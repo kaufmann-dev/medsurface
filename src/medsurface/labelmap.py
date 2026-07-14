@@ -10,7 +10,7 @@ import numpy as np
 import SimpleITK as sitk
 
 from . import merge as merge_mod
-from . import pipeline, presets, surface
+from . import pipeline, surface
 from . import volume as volume_mod
 from .catalog import DicomSource, VolumeCandidate, same_source
 from .defaults import DEFAULT_MERGE_GRID_MM
@@ -41,9 +41,12 @@ class Result:
 
 
 def default_surface_settings() -> pipeline.SurfaceSettings:
-    """Use normal convert finishing while retaining every external mask shell."""
-    return pipeline.surface_settings(
-        presets.get("bone"),
+    """Return independent finishing defaults for an external segmentation."""
+    return pipeline.SurfaceSettings(
+        resample_mm=0.0,
+        smooth_iters=60,
+        smooth_force=0.1,
+        simplify_error_mm=0.25,
         keep_largest_component=False,
     )
 
@@ -54,7 +57,6 @@ def resolve_surface_settings(
     smooth_iters: int | None = None,
     smooth_force: float | None = None,
     simplify_error_mm: float | None = None,
-    post_smooth_iters: int | None = None,
 ) -> pipeline.SurfaceSettings:
     base = default_surface_settings()
     settings = replace(
@@ -66,11 +68,6 @@ def resolve_surface_settings(
             base.simplify_error_mm
             if simplify_error_mm is None
             else simplify_error_mm
-        ),
-        post_smooth_iters=(
-            base.post_smooth_iters
-            if post_smooth_iters is None
-            else post_smooth_iters
         ),
     )
     pipeline.validate_surface_settings(settings)
@@ -128,7 +125,6 @@ def convert(
     smooth_iters: int | None = None,
     smooth_force: float | None = None,
     simplify_error_mm: float | None = None,
-    post_smooth_iters: int | None = None,
     cap_field_of_view: bool = True,
     allow_large_volume: bool = False,
     log: Logger | None = None,
@@ -139,7 +135,6 @@ def convert(
         smooth_iters=smooth_iters,
         smooth_force=smooth_force,
         simplify_error_mm=simplify_error_mm,
-        post_smooth_iters=post_smooth_iters,
     )
     surface.validate_output_path(output_path)
     started = time.time()
@@ -218,7 +213,6 @@ def merge(
     smooth_iters: int | None = None,
     smooth_force: float | None = None,
     simplify_error_mm: float | None = None,
-    post_smooth_iters: int | None = None,
     force: bool = False,
     allow_large_volume: bool = False,
     log: Logger | None = None,
@@ -228,7 +222,6 @@ def merge(
         smooth_iters=smooth_iters,
         smooth_force=smooth_force,
         simplify_error_mm=simplify_error_mm,
-        post_smooth_iters=post_smooth_iters,
     )
     surface.validate_output_path(output_path)
     if not np.isfinite(grid_mm) or grid_mm <= 0:

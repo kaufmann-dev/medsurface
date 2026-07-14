@@ -737,7 +737,11 @@ def convert(
         "--resample-mm",
         help="Isotropic surface-grid voxel size in mm (0 = native).",
     ),
-    smooth_iters: int | None = typer.Option(None, "--smooth-iters", help="MeshLib relaxation iterations."),
+    smooth_iters: int | None = typer.Option(
+        None,
+        "--smooth-iters",
+        help="Total MeshLib relaxation iterations before simplification.",
+    ),
     smooth_force: float | None = typer.Option(
         None, "--smooth-force", help="MeshLib relaxation strength per iteration."
     ),
@@ -746,7 +750,6 @@ def convert(
         "--simplify-error-mm",
         help="MeshLib estimated surface-deviation/QEM limit in model mm, not a certified Hausdorff bound (0 = off).",
     ),
-    post_smooth_iters: int | None = typer.Option(None, "--post-smooth-iters", help="Smoothing after simplification."),
     no_cap: bool = typer.Option(False, "--no-cap", help="Do not close anatomy at the field-of-view boundary."),
     allow_large_volume: bool = typer.Option(
         False,
@@ -768,7 +771,6 @@ def convert(
             ("--resample-mm", resample_mm),
             ("--smooth-iters", smooth_iters),
             ("--simplify-error-mm", simplify_error_mm),
-            ("--post-smooth-iters", post_smooth_iters),
         ],
         unit_interval=(("--smooth-force", smooth_force),),
     )
@@ -806,7 +808,6 @@ def convert(
             smooth_iters=smooth_iters,
             smooth_force=smooth_force,
             simplify_error_mm=simplify_error_mm,
-            post_smooth_iters=post_smooth_iters,
             keep_largest_island=False if all_islands else None,
             keep_largest_component=False if all_components else None,
         )
@@ -887,7 +888,9 @@ def convert_labelmap(
         help="Isotropic surface-grid voxel size in mm (0 = native).",
     ),
     smooth_iters: int | None = typer.Option(
-        None, "--smooth-iters", help="MeshLib relaxation iterations."
+        None,
+        "--smooth-iters",
+        help="Total MeshLib relaxation iterations before simplification.",
     ),
     smooth_force: float | None = typer.Option(
         None, "--smooth-force", help="MeshLib relaxation strength per iteration."
@@ -896,9 +899,6 @@ def convert_labelmap(
         None,
         "--simplify-error-mm",
         help="MeshLib estimated surface-deviation/QEM limit in model mm (0 = off).",
-    ),
-    post_smooth_iters: int | None = typer.Option(
-        None, "--post-smooth-iters", help="Smoothing after simplification."
     ),
     no_cap: bool = typer.Option(
         False, "--no-cap", help="Do not close foreground at the labelmap boundary."
@@ -920,7 +920,6 @@ def convert_labelmap(
             ("--resample-mm", resample_mm),
             ("--smooth-iters", smooth_iters),
             ("--simplify-error-mm", simplify_error_mm),
-            ("--post-smooth-iters", post_smooth_iters),
         ],
         unit_interval=(("--smooth-force", smooth_force),),
     )
@@ -950,7 +949,6 @@ def convert_labelmap(
                 smooth_iters=smooth_iters,
                 smooth_force=smooth_force,
                 simplify_error_mm=simplify_error_mm,
-                post_smooth_iters=post_smooth_iters,
                 cap_field_of_view=not no_cap,
                 allow_large_volume=allow_large_volume,
                 log=progress.log,
@@ -1023,7 +1021,9 @@ def merge_labelmaps(
         help="Isotropic fused-grid voxel size in mm.",
     ),
     smooth_iters: int | None = typer.Option(
-        None, "--smooth-iters", help="MeshLib relaxation iterations."
+        None,
+        "--smooth-iters",
+        help="Total MeshLib relaxation iterations before simplification.",
     ),
     smooth_force: float | None = typer.Option(
         None, "--smooth-force", help="MeshLib relaxation strength per iteration."
@@ -1032,9 +1032,6 @@ def merge_labelmaps(
         None,
         "--simplify-error-mm",
         help="MeshLib estimated surface-deviation/QEM limit in model mm (0 = off).",
-    ),
-    post_smooth_iters: int | None = typer.Option(
-        None, "--post-smooth-iters", help="Smoothing after simplification."
     ),
     force: bool = typer.Option(False, "--force", help="Override registration-quality gates."),
     allow_large_volume: bool = typer.Option(
@@ -1053,7 +1050,6 @@ def merge_labelmaps(
         nonnegative=[
             ("--smooth-iters", smooth_iters),
             ("--simplify-error-mm", simplify_error_mm),
-            ("--post-smooth-iters", post_smooth_iters),
         ],
         positive=(("--grid-mm", grid_mm),),
         unit_interval=(("--smooth-force", smooth_force),),
@@ -1091,7 +1087,6 @@ def merge_labelmaps(
                 smooth_iters=smooth_iters,
                 smooth_force=smooth_force,
                 simplify_error_mm=simplify_error_mm,
-                post_smooth_iters=post_smooth_iters,
                 force=force,
                 allow_large_volume=allow_large_volume,
                 log=progress.log,
@@ -1209,7 +1204,9 @@ def merge(
         help="Isotropic fused-grid voxel size in mm.",
     ),
     smooth_iters: int | None = typer.Option(
-        None, "--smooth-iters", help="MeshLib relaxation iterations."
+        None,
+        "--smooth-iters",
+        help="Total MeshLib relaxation iterations before simplification.",
     ),
     smooth_force: float | None = typer.Option(
         None,
@@ -1220,9 +1217,6 @@ def merge(
         None,
         "--simplify-error-mm",
         help="MeshLib estimated surface-deviation/QEM limit in model mm, not a certified Hausdorff bound (0 = off).",
-    ),
-    post_smooth_iters: int | None = typer.Option(
-        None, "--post-smooth-iters", help="Smoothing after simplification."
     ),
     force: bool = typer.Option(
         False,
@@ -1249,7 +1243,6 @@ def merge(
             ("--min-island-mm3", min_island_mm3),
             ("--smooth-iters", smooth_iters),
             ("--simplify-error-mm", simplify_error_mm),
-            ("--post-smooth-iters", post_smooth_iters),
         ],
         positive=(("--grid-mm", grid_mm),),
         unit_interval=(("--smooth-force", smooth_force),),
@@ -1315,7 +1308,6 @@ def merge(
                 smooth_iters=smooth_iters,
                 smooth_force=smooth_force,
                 simplify_error_mm=simplify_error_mm,
-                post_smooth_iters=post_smooth_iters,
                 force=force,
                 allow_large_volume=allow_large_volume,
                 log=progress.log,

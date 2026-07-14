@@ -366,23 +366,23 @@ def fuse_masks(
     if poly.topology.numValidFaces() == 0:
         raise MergeError("the fused volume produced no surface")
     say("  raw triangles %s" % f"{poly.topology.numValidFaces():,}")
+    poly = step(
+        "index -> fixed physical space",
+        lambda: surface.transform(poly, affine),
+    )
 
     finished = pipeline.finish_surface(
         poly,
         smooth_iters=settings.smooth_iters,
         smooth_force=settings.smooth_force,
         simplify_error_mm=settings.simplify_error_mm,
-        post_smooth_iters=settings.post_smooth_iters,
         keep_largest_component=settings.keep_largest_component,
         step=step,
         log=say,
     )
     for message in finished.warnings:
         add_warning(message)
-    poly = step(
-        "index -> fixed physical space",
-        lambda: surface.transform(finished.poly, affine),
-    )
+    poly = finished.poly
 
     boundary, holes = step("check surface defects", lambda: surface.count_defects(poly))
     if boundary or holes:
@@ -420,7 +420,6 @@ def merge(
     smooth_iters: int | None = None,
     smooth_force: float | None = None,
     simplify_error_mm: float | None = None,
-    post_smooth_iters: int | None = None,
     force: bool = False,
     allow_large_volume: bool = False,
     log: Logger | None = None,
@@ -434,7 +433,6 @@ def merge(
         smooth_iters=smooth_iters,
         smooth_force=smooth_force,
         simplify_error_mm=simplify_error_mm,
-        post_smooth_iters=post_smooth_iters,
     )
     validate_preset(preset)
     started = time.time()
