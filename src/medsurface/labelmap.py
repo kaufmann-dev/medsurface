@@ -64,6 +64,7 @@ def resolve_surface_settings(
     surface_smooth_iters: int | None = None,
     simplify_error_mm: float | None = None,
     post_surface_smooth_iters: int | None = None,
+    keep_largest_component: bool | None = None,
 ) -> pipeline.SurfaceSettings:
     base = default_surface_settings()
     settings = replace(
@@ -84,6 +85,11 @@ def resolve_surface_settings(
             base.post_surface_smooth_iters
             if post_surface_smooth_iters is None
             else post_surface_smooth_iters
+        ),
+        keep_largest_component=(
+            base.keep_largest_component
+            if keep_largest_component is None
+            else keep_largest_component
         ),
     )
     pipeline.validate_surface_settings(settings)
@@ -149,6 +155,7 @@ def convert(
     surface_smooth_iters: int | None = None,
     simplify_error_mm: float | None = None,
     post_surface_smooth_iters: int | None = None,
+    keep_largest_component: bool | None = None,
     cap_field_of_view: bool = True,
     allow_large_volume: bool = False,
     log: Logger | None = None,
@@ -160,6 +167,7 @@ def convert(
         surface_smooth_iters=surface_smooth_iters,
         simplify_error_mm=simplify_error_mm,
         post_surface_smooth_iters=post_surface_smooth_iters,
+        keep_largest_component=keep_largest_component,
     )
     surface.validate_output_path(output_path)
     started = time.time()
@@ -243,6 +251,7 @@ def merge(
     surface_smooth_iters: int | None = None,
     simplify_error_mm: float | None = None,
     post_surface_smooth_iters: int | None = None,
+    keep_largest_component: bool | None = None,
     force: bool = False,
     allow_large_volume: bool = False,
     log: Logger | None = None,
@@ -253,6 +262,7 @@ def merge(
         surface_smooth_iters=surface_smooth_iters,
         simplify_error_mm=simplify_error_mm,
         post_surface_smooth_iters=post_surface_smooth_iters,
+        keep_largest_component=keep_largest_component,
     )
     surface.validate_output_path(output_path)
     if not np.isfinite(grid_mm) or grid_mm <= 0:

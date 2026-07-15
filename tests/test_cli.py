@@ -343,6 +343,118 @@ def test_surface_help_describes_both_independent_smoothing_stages():
         assert "--smooth-force" not in normalized
 
 
+def test_component_help_is_available_on_every_surface_command():
+    for command in (
+        ["convert", "--help"],
+        ["merge", "--help"],
+        ["labelmap", "convert", "--help"],
+        ["labelmap", "merge", "--help"],
+    ):
+        result = _run_cli_in_clean_interpreter(command)
+        normalized = " ".join(result.stdout.replace("│", " ").split())
+
+        assert result.returncode == 0
+        assert "--components" in normalized
+        assert "[all|largest]" in normalized
+        assert "--all-components" not in normalized
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["convert", "INPUT", "-o", "out.stl", "--all-components"],
+        ["merge", "INPUT", "MOVING", "-o", "out.stl", "--all-components"],
+        ["labelmap", "convert", "INPUT", "-o", "out.stl", "--all-components"],
+        [
+            "labelmap",
+            "merge",
+            "INPUT",
+            "MOVING",
+            "-o",
+            "out.stl",
+            "--all-components",
+        ],
+    ],
+)
+def test_all_components_option_is_removed(tmp_path, argv):
+    source = tmp_path / "input.nii.gz"
+    moving = tmp_path / "moving.nii.gz"
+    source.write_bytes(b"input")
+    moving.write_bytes(b"moving")
+    resolved = [
+        str(source) if value == "INPUT" else str(moving) if value == "MOVING" else value
+        for value in argv
+    ]
+
+    result = runner.invoke(cli.app, resolved, prog_name="medsurface")
+
+    assert result.exit_code == 2
+    assert "--all-components" in result.stderr
+    assert "No such option" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["convert", "INPUT", "-o", "out.stl", "--components", "first"],
+        [
+            "merge",
+            "INPUT",
+            "MOVING",
+            "-o",
+            "out.stl",
+            "--components",
+            "first",
+        ],
+        [
+            "labelmap",
+            "convert",
+            "INPUT",
+            "-o",
+            "out.stl",
+            "--components",
+            "first",
+        ],
+        [
+            "labelmap",
+            "merge",
+            "INPUT",
+            "MOVING",
+            "-o",
+            "out.stl",
+            "--components",
+            "first",
+        ],
+    ],
+)
+def test_invalid_component_choice_fails_before_discovery(tmp_path, monkeypatch, argv):
+    source = tmp_path / "input.nii.gz"
+    moving = tmp_path / "moving.nii.gz"
+    source.write_bytes(b"input")
+    moving.write_bytes(b"moving")
+    resolved = [
+        str(source) if value == "INPUT" else str(moving) if value == "MOVING" else value
+        for value in argv
+    ]
+    monkeypatch.setattr(
+        cli,
+        "_discover",
+        lambda *_args: pytest.fail("discovery must not start"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_select_labelmap",
+        lambda *_args: pytest.fail("labelmap discovery must not start"),
+    )
+
+    result = runner.invoke(cli.app, resolved, prog_name="medsurface")
+
+    assert result.exit_code == 2
+    assert "--components" in result.stderr
+    assert "all" in result.stderr
+    assert "largest" in result.stderr
+
+
 def test_merge_help_describes_shared_processing_options():
     result = _run_cli_in_clean_interpreter(["merge", "--help"])
 
@@ -839,7 +951,8 @@ def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
             "--min-island-mm3",
             "4.4",
             "--all-islands",
-            "--all-components",
+            "--components",
+            "all",
             "--resample-mm",
             "0.8",
             "--mask-smooth-mm",
@@ -902,6 +1015,7 @@ def test_convert_defaults_quality_output_and_invalid_exit(tmp_path, monkeypatch)
 
     assert result.exit_code == 1
     assert captured["preset"].name == "bone"
+    assert captured["preset"].keep_largest_component
     assert captured["threshold"] is None
     assert captured["cap_field_of_view"]
     assert "Success: wrote" in result.stdout
@@ -909,6 +1023,32 @@ def test_convert_defaults_quality_output_and_invalid_exit(tmp_path, monkeypatch)
     assert "invalid" in result.stdout
     assert "Mesh problems" in result.stdout
     assert "failed validation" in result.stderr
+
+
+def test_convert_omitted_components_preserves_teeth_preset_default(
+    tmp_path, monkeypatch
+):
+    chosen = _candidate()
+    captured = {}
+    monkeypatch.setattr(cli, "_discover", lambda _root: [chosen])
+
+    from medsurface import pipeline
+
+    def fake_convert(**kwargs):
+        captured.update(kwargs)
+        return _convert_result("out.stl")
+
+    monkeypatch.setattr(pipeline, "convert", fake_convert)
+
+    result = runner.invoke(
+        cli.app,
+        ["convert", str(tmp_path), "-o", "out.stl", "--preset", "teeth", "-q"],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["preset"].name == "teeth"
+    assert captured["preset"].keep_largest_component is False
 
 
 def test_valid_quality_output_omits_empty_problems_panel():
@@ -1279,6 +1419,8 @@ def test_labelmap_convert_accepts_surface_flags_and_writes_json(tmp_path, monkey
             "0.18",
             "--post-mesh-smooth-iters",
             "19",
+            "--components",
+            "largest",
             "--no-cap",
             "--allow-large-volume",
             "--json",
@@ -1297,6 +1439,7 @@ def test_labelmap_convert_accepts_surface_flags_and_writes_json(tmp_path, monkey
     assert captured["surface_smooth_iters"] == 17
     assert captured["simplify_error_mm"] == pytest.approx(0.18)
     assert captured["post_surface_smooth_iters"] == 19
+    assert captured["keep_largest_component"] is True
     assert not captured["cap_field_of_view"]
     assert captured["allow_large_volume"]
     payload = json.loads(json_file.read_text())
@@ -1350,6 +1493,8 @@ def test_labelmap_merge_accepts_fusion_flags_and_writes_json(tmp_path, monkeypat
             "0.19",
             "--post-mesh-smooth-iters",
             "19",
+            "--components",
+            "largest",
             "--force",
             "--allow-large-volume",
             "--json",
@@ -1368,6 +1513,7 @@ def test_labelmap_merge_accepts_fusion_flags_and_writes_json(tmp_path, monkeypat
     assert captured["mask_smooth_mm"] == pytest.approx(0.9)
     assert captured["surface_smooth_iters"] == 17
     assert captured["post_surface_smooth_iters"] == 19
+    assert captured["keep_largest_component"] is True
     assert captured["force"]
     assert captured["allow_large_volume"]
     payload = json.loads(json_file.read_text())
@@ -1545,7 +1691,8 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
             "--min-island-mm3",
             "3.3",
             "--all-islands",
-            "--all-components",
+            "--components",
+            "largest",
             "--grid-mm",
             "0.8",
             "--mask-smooth-mm",
@@ -1571,7 +1718,7 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
     assert captured["preset"].name == "teeth"
     assert captured["preset"].opening_mm == pytest.approx(1.7)
     assert not captured["preset"].keep_largest_island
-    assert not captured["preset"].keep_largest_component
+    assert captured["preset"].keep_largest_component
     assert captured["fixed_threshold"] == pytest.approx(250.0)
     assert captured["moving_threshold"] == "auto"
     assert captured["grid_mm"] == pytest.approx(0.8)
@@ -1596,6 +1743,47 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
     )
     assert refused.exit_code == 3
     assert "registration gate refused" in refused.stderr
+
+
+def test_merge_omitted_components_preserves_teeth_preset_default(
+    tmp_path, monkeypatch
+):
+    moving_dir = tmp_path / "moving"
+    moving_dir.mkdir()
+    fixed = _candidate(uid="1.2.3", description="fixed")
+    moving = _candidate(uid="1.2.4", description="moving")
+    captured = {}
+
+    def fake_discover(path: Path):
+        return [moving] if path == moving_dir else [fixed]
+
+    monkeypatch.setattr(cli, "_discover", fake_discover)
+    from medsurface import merge as merge_mod
+
+    def fake_merge(**kwargs):
+        captured.update(kwargs)
+        return _merge_result("out.stl")
+
+    monkeypatch.setattr(merge_mod, "merge", fake_merge)
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "merge",
+            str(tmp_path),
+            str(moving_dir),
+            "-o",
+            "out.stl",
+            "--preset",
+            "teeth",
+            "-q",
+        ],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["preset"].name == "teeth"
+    assert captured["preset"].keep_largest_component is False
 
 
 def test_merge_rejects_json_overwriting_a_dicom_instance(tmp_path, monkeypatch):

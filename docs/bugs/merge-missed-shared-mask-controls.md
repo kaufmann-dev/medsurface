@@ -22,3 +22,11 @@ Merge now exposes the three options and applies them through the same preset
 override used by conversion. CLI coverage passes every shared override and
 asserts that the resolved preset reaches the merge engine unchanged.
 
+## Follow-up: explicit component selection
+
+Revised: 2026-07-15
+
+The one-way `--all-components` switch was removed. Conversion and merge now use
+`--components all|largest` for both intensity volumes and labelmaps. Omitting it
+on normal commands preserves the selected preset's component policy; labelmap
+commands default to `all`.

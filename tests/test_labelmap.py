@@ -151,6 +151,12 @@ def test_disabling_mask_smoothing_keeps_surface_smoothing():
     assert settings.post_surface_smooth_iters == 0
 
 
+def test_component_selection_can_override_the_labelmap_default():
+    settings = labelmap.resolve_surface_settings(keep_largest_component=True)
+
+    assert settings.keep_largest_component is True
+
+
 def test_default_labelmap_finishing_uses_no_post_simplification_relaxation(tmp_path):
     source = tmp_path / "labels.nii.gz"
     output = tmp_path / "labels.stl"
@@ -196,6 +202,26 @@ def test_real_labelmap_formats_convert_all_components(tmp_path, extension):
         result.provenance["surface_finishing"]["pre_smoothing"]["requested_iterations"]
         == 0
     )
+
+
+def test_labelmap_convert_can_keep_only_the_largest_component(tmp_path):
+    source = tmp_path / "labels.nii.gz"
+    output = tmp_path / "largest.stl"
+    candidate = _write(source, _two_labels())
+
+    result = labelmap.convert(
+        candidate,
+        str(output),
+        mask_smooth_mm=0,
+        surface_smooth_iters=0,
+        simplify_error_mm=0,
+        keep_largest_component=True,
+    )
+
+    assert result.quality["valid"]
+    assert result.surface_components == 2
+    assert result.quality["components"] == 1
+    assert result.provenance["surface"]["keep_largest_component"] is True
 
 
 def test_labelmap_conversion_preserves_left_handed_physical_geometry(tmp_path):

@@ -296,6 +296,13 @@ and merging use this same finishing path. Labelmap commands retain independent
 non-smoothing defaults: native grid, a 0.25 mm simplification limit, and every
 surviving surface component retained.
 
+All four surface-producing commands expose `--components all|largest`. Normal
+conversion and merge leave the option unresolved when omitted so the selected
+preset remains authoritative: bone, skin, and auto keep the largest shell,
+while teeth keeps all shells. Labelmap conversion and merge default explicitly
+to all shells. The resolved boolean is recorded as `keep_largest_component` in
+surface settings or preset provenance.
+
 ## Merge registration and gates
 
 Both merge commands share one mask-registration and fusion implementation. The

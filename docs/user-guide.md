@@ -128,15 +128,17 @@ inconsistent winding, and retain their valid input surface if protection cannot
 produce a clean result. Setting any value to `0` disables only that stage.
 
 `teeth` keeps every mask island and surface component that survives its size
-floor. The other presets keep only the largest component. `--simplify-error-mm`
-sets MeshLib's estimated surface-deviation/QEM limit in model millimetres; it is
-not a certified Hausdorff bound. `0` disables simplification. The resulting
-triangle count is an outcome, not a target. Simplification protects small
-source-surface neighborhoods when collapsing them would create
-self-intersections. If no candidate can preserve topology and mesh validity,
-the valid higher-resolution surface is retained with a warning. The reported
-simplification error estimates only the simplification step; a later post-mesh
-pass reports its own RMS and maximum vertex displacement.
+floor. The other presets keep only the largest component. Omitting
+`--components` preserves that preset-specific choice; `--components all` or
+`--components largest` overrides it explicitly. `--simplify-error-mm` sets
+MeshLib's estimated surface-deviation/QEM limit in model millimetres; it is not
+a certified Hausdorff bound. `0` disables simplification. The resulting triangle
+count is an outcome, not a target. Simplification protects small source-surface
+neighborhoods when collapsing them would create self-intersections. If no
+candidate can preserve topology and mesh validity, the valid higher-resolution
+surface is retained with a warning. The reported simplification error estimates
+only the simplification step; a later post-mesh pass reports its own RMS and
+maximum vertex displacement.
 
 ```sh
 medsurface convert scans/ --preset teeth -o teeth.stl
@@ -186,6 +188,8 @@ post-simplification relaxation, and every surviving surface component retained.
 `--mesh-smooth-iters 0` disables pre-simplification relaxation;
 `--simplify-error-mm 0` disables triangle reduction; and
 `--post-mesh-smooth-iters 0` disables final relaxation.
+`--components largest` keeps only the largest extracted shell instead of the
+labelmap default, `all`.
 
 Physical smoothing is intentionally geometry-changing. It reduces voxel-scale
 terracing consistently even when marching cubes creates millions of triangles,
