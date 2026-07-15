@@ -12,7 +12,7 @@ import SimpleITK as sitk
 from . import segment, surface
 from . import volume as volume_mod
 from .catalog import DicomSource, VolumeCandidate
-from .defaults import SURFACE_RELAX_FORCE, SURFACE_RELAX_ITERS
+from .defaults import SURFACE_RELAX_FORCE
 from .presets import Preset
 from .presets import validate as validate_preset
 
@@ -50,7 +50,8 @@ class SurfaceSettings:
     """Mask-to-mesh controls shared by conversion and fusion workflows."""
 
     resample_mm: float
-    smooth_mm: float
+    mask_smooth_mm: float
+    surface_smooth_iters: int
     simplify_error_mm: float
     keep_largest_component: bool
 
@@ -71,7 +72,8 @@ def surface_settings(preset: Preset, *, keep_largest_component: bool | None = No
     """Extract only the mask-to-mesh portion of a conversion preset."""
     return SurfaceSettings(
         resample_mm=preset.resample_mm,
-        smooth_mm=preset.smooth_mm,
+        mask_smooth_mm=preset.mask_smooth_mm,
+        surface_smooth_iters=preset.surface_smooth_iters,
         simplify_error_mm=preset.simplify_error_mm,
         keep_largest_component=(
             preset.keep_largest_component
@@ -84,29 +86,34 @@ def surface_settings(preset: Preset, *, keep_largest_component: bool | None = No
 def validate_surface_settings(settings: SurfaceSettings) -> None:
     nonnegative = {
         "resample_mm": settings.resample_mm,
-        "smooth_mm": settings.smooth_mm,
+        "mask_smooth_mm": settings.mask_smooth_mm,
         "simplify_error_mm": settings.simplify_error_mm,
     }
     for name, value in nonnegative.items():
         if not math.isfinite(value) or value < 0:
             raise ValueError("%s must be finite and non-negative" % name)
+    if (
+        not isinstance(settings.surface_smooth_iters, int)
+        or settings.surface_smooth_iters < 0
+    ):
+        raise ValueError("surface_smooth_iters must be a non-negative integer")
 
 
-def smoothing_warning(smooth_mm: float) -> str | None:
-    """Explain the intentional geometry tradeoff of physical smoothing."""
-    if smooth_mm <= 0:
+def mask_smoothing_warning(mask_smooth_mm: float) -> str | None:
+    """Explain the topology-changing tradeoff of occupancy-mask smoothing."""
+    if mask_smooth_mm <= 0:
         return None
     return (
-        "surface smoothing uses a Gaussian sigma of %.2f mm before meshing; "
+        "mask smoothing uses a Gaussian sigma of %.2f mm before meshing; "
         "it can round boundaries, merge narrow gaps, or erase structures near "
-        "this scale. Use --smooth-mm 0 to disable it" % smooth_mm
+        "this scale. Use --mask-smooth-mm 0 to disable it" % mask_smooth_mm
     )
 
 
 def finish_surface(
     poly,
     *,
-    relax_surface: bool,
+    surface_smooth_iters: int,
     simplify_error_mm: float,
     keep_largest_component: bool,
     step: StepRunner,
@@ -119,7 +126,7 @@ def finish_surface(
         "relax surface",
         lambda: surface.smooth_safely(
             poly,
-            SURFACE_RELAX_ITERS if relax_surface else 0,
+            surface_smooth_iters,
             SURFACE_RELAX_FORCE,
         ),
     )
@@ -258,7 +265,7 @@ def mesh_binary_mask(
                 binary,
                 settings.resample_mm,
                 log,
-                pad_border=settings.smooth_mm <= 0 and cap_field_of_view,
+                pad_border=settings.mask_smooth_mm <= 0 and cap_field_of_view,
                 allow_large_volume=allow_large_volume,
             ),
         )
@@ -267,15 +274,15 @@ def mesh_binary_mask(
         grid = binary
         isovalue = 0.5
 
-    if settings.smooth_mm > 0:
+    if settings.mask_smooth_mm > 0:
         grid = step(
-            "smooth occupancy field",
-            lambda: segment.smooth_occupancy(grid, settings.smooth_mm),
+            "smooth mask occupancy field",
+            lambda: segment.smooth_occupancy(grid, settings.mask_smooth_mm),
         )
         isovalue = segment.ISO_OCCUPANCY
 
     if cap_field_of_view and not (
-        settings.resample_mm > 0 and settings.smooth_mm <= 0
+        settings.resample_mm > 0 and settings.mask_smooth_mm <= 0
     ):
         grid = segment.pad(grid, 1)
 
@@ -289,7 +296,7 @@ def mesh_binary_mask(
 
     finished = finish_surface(
         poly,
-        relax_surface=settings.smooth_mm > 0,
+        surface_smooth_iters=settings.surface_smooth_iters,
         simplify_error_mm=settings.simplify_error_mm,
         keep_largest_component=settings.keep_largest_component,
         step=step,
@@ -462,7 +469,7 @@ def convert(
             add_warning(message)
 
     add_warnings(threshold_warnings(candidate, preset, threshold))
-    smoothing_message = smoothing_warning(preset.smooth_mm)
+    smoothing_message = mask_smoothing_warning(preset.mask_smooth_mm)
     if smoothing_message:
         add_warning(smoothing_message)
     vol = step(

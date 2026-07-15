@@ -90,9 +90,8 @@ def test_conversion_emits_threshold_warning_before_loading(monkeypatch):
         pass
 
     def stop(_candidate, *, allow_large_volume):
-        assert len(emitted_warnings) == 2
+        assert len(emitted_warnings) == 1
         assert "HU calibration cannot be verified" in emitted_warnings[0]
-        assert "Gaussian sigma of 0.80 mm" in emitted_warnings[1]
         assert not allow_large_volume
         raise StopLoading
 
@@ -197,7 +196,8 @@ def test_every_preset_is_self_consistent():
         assert p.name == name
         assert p.description
         assert p.median_mm >= 0 and p.closing_mm >= 0 and p.opening_mm >= 0
-        assert p.smooth_mm >= 0
+        assert p.mask_smooth_mm >= 0
+        assert p.surface_smooth_iters >= 0
         assert p.simplify_error_mm >= 0
         if isinstance(p.threshold, str):
             assert p.threshold == "auto"
@@ -206,12 +206,21 @@ def test_every_preset_is_self_consistent():
             assert p.threshold_unit == "HU"
 
     assert {
-        name: preset.smooth_mm for name, preset in presets.PRESETS.items()
+        name: preset.mask_smooth_mm for name, preset in presets.PRESETS.items()
     } == {
-        "bone": 0.8,
-        "teeth": 0.3,
-        "skin": 1.0,
-        "auto": 0.8,
+        "bone": 0.0,
+        "teeth": 0.0,
+        "skin": 0.0,
+        "auto": 0.0,
+    }
+    assert {
+        name: preset.surface_smooth_iters
+        for name, preset in presets.PRESETS.items()
+    } == {
+        "bone": 60,
+        "teeth": 10,
+        "skin": 35,
+        "auto": 60,
     }
 
 
@@ -250,7 +259,8 @@ def test_mask_surface_is_finished_once_in_physical_coordinates(monkeypatch):
         "unused.stl",
         settings=pipeline_mod.SurfaceSettings(
             resample_mm=0,
-            smooth_mm=0,
+            mask_smooth_mm=0,
+            surface_smooth_iters=0,
             simplify_error_mm=0,
             keep_largest_component=False,
         ),
@@ -277,7 +287,7 @@ def test_mask_surface_smooths_occupancy_before_meshing(monkeypatch):
         return function()
 
     def capture(poly, **kwargs):
-        captured["relax_surface"] = kwargs["relax_surface"]
+        captured["surface_smooth_iters"] = kwargs["surface_smooth_iters"]
         return pipeline_mod.SurfaceFinish(
             poly=poly,
             surface_components=surface.component_count(poly),
@@ -297,7 +307,8 @@ def test_mask_surface_smooths_occupancy_before_meshing(monkeypatch):
         "unused.stl",
         settings=pipeline_mod.SurfaceSettings(
             resample_mm=0,
-            smooth_mm=0.8,
+            mask_smooth_mm=0.8,
+            surface_smooth_iters=7,
             simplify_error_mm=0,
             keep_largest_component=False,
         ),
@@ -308,8 +319,8 @@ def test_mask_surface_smooths_occupancy_before_meshing(monkeypatch):
         warn=lambda _message: None,
     )
 
-    assert stages.index("smooth occupancy field") < stages.index("marching cubes")
-    assert captured["relax_surface"] is True
+    assert stages.index("smooth mask occupancy field") < stages.index("marching cubes")
+    assert captured["surface_smooth_iters"] == 7
 
 
 def test_zero_simplification_does_not_disable_smoothing():
@@ -326,7 +337,7 @@ def test_zero_simplification_does_not_disable_smoothing():
     )
     finished = pipeline_mod.finish_surface(
         surface.from_arrays(vertices, faces),
-        relax_surface=True,
+        surface_smooth_iters=20,
         simplify_error_mm=0,
         keep_largest_component=False,
         step=lambda _name, function: function(),
@@ -337,7 +348,7 @@ def test_zero_simplification_does_not_disable_smoothing():
     assert finished.provenance["decimation"]["attempted"] is False
 
 
-def test_disabling_physical_smoothing_disables_internal_relaxation():
+def test_surface_smoothing_can_be_disabled_independently():
     vertices = np.asarray(
         [
             [0.0, 0.0, 0.0],
@@ -353,7 +364,7 @@ def test_disabling_physical_smoothing_disables_internal_relaxation():
 
     finished = pipeline_mod.finish_surface(
         surface.from_arrays(vertices, faces),
-        relax_surface=False,
+        surface_smooth_iters=0,
         simplify_error_mm=0,
         keep_largest_component=False,
         step=lambda _name, function: function(),
@@ -382,7 +393,8 @@ def test_unknown_preset_lists_alternatives():
     [
         ("median_mm", -1.0),
         ("resample_mm", float("nan")),
-        ("smooth_mm", -1),
+        ("mask_smooth_mm", -1),
+        ("surface_smooth_iters", -1),
         ("simplify_error_mm", float("inf")),
     ],
 )

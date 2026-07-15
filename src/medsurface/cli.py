@@ -687,10 +687,24 @@ def presets() -> None:
         preset = PRESETS[name]
         threshold = preset.threshold if isinstance(preset.threshold, str) else "%g" % preset.threshold
         simplify = "off" if preset.simplify_error_mm == 0 else "%.2f mm" % preset.simplify_error_mm
-        processing = "median %.1f mm; closing %.1f mm; smooth %.1f mm; simplify %s" % (
+        mask_smooth = (
+            "off"
+            if preset.mask_smooth_mm == 0
+            else "%.1f mm" % preset.mask_smooth_mm
+        )
+        surface_smooth = (
+            "off"
+            if preset.surface_smooth_iters == 0
+            else "%d iter" % preset.surface_smooth_iters
+        )
+        processing = (
+            "median %.1f mm; closing %.1f mm; mask smooth %s; "
+            "surface smooth %s; simplify %s"
+        ) % (
             preset.median_mm,
             preset.closing_mm,
-            preset.smooth_mm,
+            mask_smooth,
+            surface_smooth,
             simplify,
         )
         tissue.add_row(
@@ -736,10 +750,15 @@ def convert(
         "--resample-mm",
         help="Isotropic surface-grid voxel size in mm (0 = native).",
     ),
-    smooth_mm: float | None = typer.Option(
+    mask_smooth_mm: float | None = typer.Option(
         None,
-        "--smooth-mm",
-        help="Gaussian sigma in physical mm applied before meshing (0 = off).",
+        "--mask-smooth-mm",
+        help="Gaussian sigma in physical mm applied to the segmented mask before meshing (0 = off).",
+    ),
+    surface_smooth_iters: int | None = typer.Option(
+        None,
+        "--mesh-smooth-iters",
+        help="Topology-preserving surface relaxation iterations after meshing (0 = off).",
     ),
     simplify_error_mm: float | None = typer.Option(
         None,
@@ -765,7 +784,8 @@ def convert(
             ("--opening-mm", opening_mm),
             ("--min-island-mm3", min_island_mm3),
             ("--resample-mm", resample_mm),
-            ("--smooth-mm", smooth_mm),
+            ("--mask-smooth-mm", mask_smooth_mm),
+            ("--mesh-smooth-iters", surface_smooth_iters),
             ("--simplify-error-mm", simplify_error_mm),
         ],
     )
@@ -800,7 +820,8 @@ def convert(
             opening_mm=opening_mm,
             min_island_mm3=min_island_mm3,
             resample_mm=resample_mm,
-            smooth_mm=smooth_mm,
+            mask_smooth_mm=mask_smooth_mm,
+            surface_smooth_iters=surface_smooth_iters,
             simplify_error_mm=simplify_error_mm,
             keep_largest_island=False if all_islands else None,
             keep_largest_component=False if all_components else None,
@@ -881,10 +902,15 @@ def convert_labelmap(
         "--resample-mm",
         help="Isotropic surface-grid voxel size in mm (0 = native).",
     ),
-    smooth_mm: float = typer.Option(
-        defaults.DEFAULT_LABELMAP_SMOOTH_MM,
-        "--smooth-mm",
+    mask_smooth_mm: float = typer.Option(
+        defaults.DEFAULT_LABELMAP_MASK_SMOOTH_MM,
+        "--mask-smooth-mm",
         help="Gaussian sigma in physical mm applied to the labelmap before meshing (0 = off).",
+    ),
+    surface_smooth_iters: int = typer.Option(
+        defaults.DEFAULT_LABELMAP_SURFACE_SMOOTH_ITERS,
+        "--mesh-smooth-iters",
+        help="Topology-preserving surface relaxation iterations after meshing (0 = off).",
     ),
     simplify_error_mm: float | None = typer.Option(
         None,
@@ -909,7 +935,8 @@ def convert_labelmap(
     _validate_processing_numbers(
         nonnegative=[
             ("--resample-mm", resample_mm),
-            ("--smooth-mm", smooth_mm),
+            ("--mask-smooth-mm", mask_smooth_mm),
+            ("--mesh-smooth-iters", surface_smooth_iters),
             ("--simplify-error-mm", simplify_error_mm),
         ],
     )
@@ -936,7 +963,8 @@ def convert_labelmap(
                 candidate=chosen,
                 output_path=str(output),
                 resample_mm=resample_mm,
-                smooth_mm=smooth_mm,
+                mask_smooth_mm=mask_smooth_mm,
+                surface_smooth_iters=surface_smooth_iters,
                 simplify_error_mm=simplify_error_mm,
                 cap_field_of_view=not no_cap,
                 allow_large_volume=allow_large_volume,
@@ -1009,10 +1037,15 @@ def merge_labelmaps(
         "--grid-mm",
         help="Isotropic fused-grid voxel size in mm.",
     ),
-    smooth_mm: float = typer.Option(
-        defaults.DEFAULT_LABELMAP_SMOOTH_MM,
-        "--smooth-mm",
+    mask_smooth_mm: float = typer.Option(
+        defaults.DEFAULT_LABELMAP_MASK_SMOOTH_MM,
+        "--mask-smooth-mm",
         help="Gaussian sigma in physical mm applied after labelmap fusion (0 = off).",
+    ),
+    surface_smooth_iters: int = typer.Option(
+        defaults.DEFAULT_LABELMAP_SURFACE_SMOOTH_ITERS,
+        "--mesh-smooth-iters",
+        help="Topology-preserving surface relaxation iterations after meshing (0 = off).",
     ),
     simplify_error_mm: float | None = typer.Option(
         None,
@@ -1034,7 +1067,8 @@ def merge_labelmaps(
     _validate_mesh_output(output)
     _validate_processing_numbers(
         nonnegative=[
-            ("--smooth-mm", smooth_mm),
+            ("--mask-smooth-mm", mask_smooth_mm),
+            ("--mesh-smooth-iters", surface_smooth_iters),
             ("--simplify-error-mm", simplify_error_mm),
         ],
         positive=(("--grid-mm", grid_mm),),
@@ -1069,7 +1103,8 @@ def merge_labelmaps(
                 moving=moving,
                 output_path=str(output),
                 grid_mm=grid_mm,
-                smooth_mm=smooth_mm,
+                mask_smooth_mm=mask_smooth_mm,
+                surface_smooth_iters=surface_smooth_iters,
                 simplify_error_mm=simplify_error_mm,
                 force=force,
                 allow_large_volume=allow_large_volume,
@@ -1187,10 +1222,15 @@ def merge(
         "--grid-mm",
         help="Isotropic fused-grid voxel size in mm.",
     ),
-    smooth_mm: float | None = typer.Option(
+    mask_smooth_mm: float | None = typer.Option(
         None,
-        "--smooth-mm",
-        help="Gaussian sigma in physical mm applied after fusion (0 = off).",
+        "--mask-smooth-mm",
+        help="Gaussian sigma in physical mm applied to the fused mask before meshing (0 = off).",
+    ),
+    surface_smooth_iters: int | None = typer.Option(
+        None,
+        "--mesh-smooth-iters",
+        help="Topology-preserving surface relaxation iterations after meshing (0 = off).",
     ),
     simplify_error_mm: float | None = typer.Option(
         None,
@@ -1220,7 +1260,8 @@ def merge(
             ("--closing-mm", closing_mm),
             ("--opening-mm", opening_mm),
             ("--min-island-mm3", min_island_mm3),
-            ("--smooth-mm", smooth_mm),
+            ("--mask-smooth-mm", mask_smooth_mm),
+            ("--mesh-smooth-iters", surface_smooth_iters),
             ("--simplify-error-mm", simplify_error_mm),
         ],
         positive=(("--grid-mm", grid_mm),),
@@ -1283,7 +1324,8 @@ def merge(
                 fixed_threshold=fixed_threshold_value,
                 moving_threshold=moving_threshold_value,
                 grid_mm=grid_mm,
-                smooth_mm=smooth_mm,
+                mask_smooth_mm=mask_smooth_mm,
+                surface_smooth_iters=surface_smooth_iters,
                 simplify_error_mm=simplify_error_mm,
                 force=force,
                 allow_large_volume=allow_large_volume,
