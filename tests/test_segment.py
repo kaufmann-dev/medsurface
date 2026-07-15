@@ -180,6 +180,16 @@ def test_zero_occupancy_smoothing_is_a_noop():
     assert segment.smooth_occupancy(image, 0) is image
 
 
+def test_occupancy_smoothing_rejects_a_short_processing_grid():
+    image = sitk.Image((4, 3, 4), sitk.sitkUInt8)
+
+    with pytest.raises(
+        ValueError,
+        match=r"physical smoothing requires at least 4 voxels per axis; got 4x3x4$",
+    ):
+        segment.smooth_occupancy(image, 0.8)
+
+
 @pytest.mark.parametrize("spacing", [0.0, -0.1, float("nan"), float("inf")])
 def test_resample_rejects_invalid_target_spacing(spacing):
     with pytest.raises(ValueError, match="finite and greater than zero"):

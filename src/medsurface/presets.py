@@ -30,10 +30,8 @@ class Preset:
     #: on a head CT, 0.6 mm reopened 257 pores that the closing had sealed.
     #: Prefer simplify_error_mm to control triangle count without coarsening the grid.
     resample_mm: float = 0.0
-    #: Surface stage.
-    smooth_iters: int = 20
-    #: MeshLib relaxation strength per iteration.
-    smooth_force: float = 0.1
+    #: Gaussian sigma applied to the binary occupancy field in physical mm.
+    smooth_mm: float = 0.0
     #: MeshLib estimated surface-deviation/QEM limit in model millimetres.
     #: This is not a certified Hausdorff bound. 0 disables simplification.
     simplify_error_mm: float = 0.0
@@ -49,9 +47,7 @@ PRESETS: dict[str, Preset] = {
         median_mm=1.0,
         closing_mm=2.4,
         min_island_mm3=50.0,
-        # One physical-space pass leaves error-limited decimation as the final
-        # geometry-changing stage.
-        smooth_iters=60,
+        smooth_mm=0.8,
         simplify_error_mm=0.25,
     ),
     "teeth": Preset(
@@ -64,7 +60,7 @@ PRESETS: dict[str, Preset] = {
         min_island_mm3=5.0,
         keep_largest_island=False,
         keep_largest_component=False,
-        smooth_iters=10,
+        smooth_mm=0.3,
         simplify_error_mm=0.12,
     ),
     "skin": Preset(
@@ -75,7 +71,7 @@ PRESETS: dict[str, Preset] = {
         median_mm=1.4,
         closing_mm=3.2,
         min_island_mm3=500.0,
-        smooth_iters=35,
+        smooth_mm=1.0,
         simplify_error_mm=0.35,
     ),
     "auto": Preset(
@@ -86,7 +82,7 @@ PRESETS: dict[str, Preset] = {
         median_mm=1.0,
         closing_mm=2.0,
         min_island_mm3=50.0,
-        smooth_iters=60,
+        smooth_mm=0.8,
         simplify_error_mm=0.25,
     ),
 }
@@ -109,14 +105,12 @@ def validate(preset: Preset) -> None:
         "opening_mm": preset.opening_mm,
         "min_island_mm3": preset.min_island_mm3,
         "resample_mm": preset.resample_mm,
-        "smooth_iters": preset.smooth_iters,
+        "smooth_mm": preset.smooth_mm,
         "simplify_error_mm": preset.simplify_error_mm,
     }
     for name, value in nonnegative.items():
         if not math.isfinite(value) or value < 0:
             raise ValueError("%s must be finite and non-negative" % name)
-    if not math.isfinite(preset.smooth_force) or not 0 < preset.smooth_force <= 1:
-        raise ValueError("smooth_force must be finite, greater than zero, and at most one")
     for name, threshold_value in (
         ("threshold", preset.threshold),
         ("threshold_max", preset.threshold_max),

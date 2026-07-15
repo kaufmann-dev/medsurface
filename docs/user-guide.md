@@ -99,12 +99,12 @@ remain nested under `dicom`.
 A preset supplies the segmentation and mesh-finishing defaults. List the
 installed values at any time with `medsurface presets`.
 
-| preset  | use it for                                              | threshold | median | closing | island floor | smoothing iterations | simplify error |
-| ------- | ------------------------------------------------------- | --------: | -----: | ------: | -----------: | -------------------: | -------------: |
-| `bone`  | General CT bone models                                  |    300 HU | 1.0 mm |  2.4 mm |       50 mm³ |                   60 |        0.25 mm |
-| `teeth` | Enamel and dense dentin; keeps separate teeth           |  1,200 HU | 0.6 mm |  0.6 mm |        5 mm³ |                   10 |        0.12 mm |
-| `skin`  | Outer skin surface from CT                              |   −300 HU | 1.4 mm |  3.2 mm |      500 mm³ |                   35 |        0.35 mm |
-| `auto`  | MR, CBCT, ultrasound, or other uncalibrated intensities |      Otsu | 1.0 mm |  2.0 mm |       50 mm³ |                   60 |        0.25 mm |
+| preset  | use it for                                              | threshold | median | closing | island floor | smoothing sigma | simplify error |
+| ------- | ------------------------------------------------------- | --------: | -----: | ------: | -----------: | --------------: | -------------: |
+| `bone`  | General CT bone models                                  |    300 HU | 1.0 mm |  2.4 mm |       50 mm³ |          0.8 mm |        0.25 mm |
+| `teeth` | Enamel and dense dentin; keeps separate teeth           |  1,200 HU | 0.6 mm |  0.6 mm |        5 mm³ |          0.3 mm |        0.12 mm |
+| `skin`  | Outer skin surface from CT                              |   −300 HU | 1.4 mm |  3.2 mm |      500 mm³ |          1.0 mm |        0.35 mm |
+| `auto`  | MR, CBCT, ultrasound, or other uncalibrated intensities |      Otsu | 1.0 mm |  2.0 mm |       50 mm³ |          0.8 mm |        0.25 mm |
 
 Numeric thresholds are inclusive lower bounds. `auto` calculates a
 format-neutral Otsu threshold from the volume instead of assuming calibrated
@@ -115,10 +115,12 @@ Other inputs, derived CT without explicit units, inconsistent series, and
 ambiguous multienergy CT receive a warning. Use an intentional numeric
 `--threshold` or `--preset auto` when values are not calibrated HU.
 
-MeshLib smoothing runs once in physical coordinates before simplification. Use
-`--smooth-iters` to set its total iteration count and `--smooth-force` to set the
-relaxation strength; the built-in presets use force `0.1`, selected to match the
-surface finish on the two reference CT studies.
+`--smooth-mm` controls a Gaussian applied to the binary occupancy field before
+meshing. It has the same physical meaning for normal and labelmap commands and
+does not depend on triangle density. A fixed light mesh relaxation removes
+residual tessellation noise afterward. `--smooth-mm 0` disables both stages.
+Every command warns when smoothing is enabled because features near the chosen
+sigma can move, merge, or disappear.
 
 `teeth` keeps every mask island and surface component that survives its size
 floor. The other presets keep only the largest component. `--simplify-error-mm`
@@ -224,7 +226,7 @@ headerless raw data, and `.bin` are not accepted because their geometry and
 voxel interpretation are not self-describing.
 
 File inputs must be real-valued, scalar, three-dimensional images with at least
-two voxels on each axis, finite origin/direction values, positive finite spacing,
+four voxels on each axis, finite origin/direction values, positive finite spacing,
 and a nonsingular direction matrix. Supported-format files that violate these
 constraints can still appear in `list` with a reason when their header is
 readable. A detached `.mhd` or `.nhdr` whose referenced payload is absent or
@@ -304,12 +306,12 @@ the imported mesh rather than exposing separate raw non-manifold or degenerate
 face counters. A failed self-intersection measurement is invalid.
 
 Before writing, conversion and merging guard surface relaxation and
-simplification against self-intersections. Relaxation still runs every requested
-iteration; only vertices in collision neighborhoods retain their pre-relaxation
-positions. These safeguards are reported as warnings and recorded in JSON
-provenance when they are used. Labelmap field smoothing happens before surface
-extraction and can change anatomy or topology even when the resulting mesh is
-structurally valid.
+simplification against self-intersections. The fixed relaxation runs every
+requested internal iteration; only vertices in collision neighborhoods retain
+their pre-relaxation positions. These safeguards are reported as warnings and
+recorded in JSON provenance when they are used. Occupancy-field smoothing
+happens before surface extraction and can change anatomy or topology even when
+the resulting mesh is structurally valid.
 
 These checks establish mesh structure, not anatomical correctness,
 manufacturability, dimensional accuracy, or fitness for a clinical purpose.

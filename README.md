@@ -64,11 +64,12 @@ thresholding and cleanup stages:
 medsurface labelmap convert segmentation.nii.gz -o surface.stl
 ```
 
-Labelmap commands smooth voxel-scale terracing with a `0.8 mm` physical
-Gaussian by default. Use `--smooth-mm 0` to preserve the supplied boundary as
-literally as possible; smoothing can round or erase structures near its scale.
-Every labelmap axis must contain at least four voxels, including when smoothing
-is disabled.
+Every conversion and merge command smooths voxel-scale terracing with a
+physical Gaussian before meshing. Normal tissue presets choose an anatomical
+default; external labelmaps use `0.8 mm`. Use `--smooth-mm 0` to preserve the
+binary boundary as literally as possible. Smoothing can round or erase
+structures near its scale. Every input axis must contain at least four voxels,
+including when smoothing is disabled.
 
 ## Commands
 
@@ -133,8 +134,9 @@ medsurface labelmap merge fixed-selected.nii.gz moving-selected.nii.gz \
 Both labelmaps must contain the same selected structures. This command performs
 rigid registration, so it is not a shortcut for combining separate structure
 files from one acquisition; create one multilabel input upstream for that case.
-Physical smoothing is applied after fusion, so it also attenuates voxel terraces
-and small boundary disagreements introduced by the union.
+Both merge commands apply physical smoothing after fusion, so it also
+attenuates voxel terraces and small boundary disagreements introduced by the
+union.
 
 ## Validate and repair
 

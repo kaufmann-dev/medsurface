@@ -260,13 +260,13 @@ def test_surface_stage_comes_from_the_preset():
     from medsurface import presets
 
     signature = inspect.signature(merge_mod.merge)
-    for name in ("smooth_iters", "smooth_force", "simplify_error_mm"):
+    for name in ("smooth_mm", "simplify_error_mm"):
         assert signature.parameters[name].default is None, (
             "%s must default to the preset, not to a merge-specific constant" % name
         )
 
     bone = presets.get("bone")
-    assert (bone.smooth_iters, bone.smooth_force) == (60, 0.1)
+    assert bone.smooth_mm == pytest.approx(0.8)
 
 
 @pytest.mark.parametrize("grid_mm", [0.0, -0.4, float("nan"), float("inf")])
@@ -329,11 +329,13 @@ def test_fused_surface_is_finished_in_fixed_physical_coordinates(monkeypatch):
     values[3:9, 3:9, 3:9] = 1
     mask = _image(values, origin=(100.0, 200.0, 300.0))
     captured = {}
+    messages = []
 
     monkeypatch.setattr(merge_mod.registration, "rigid_register", lambda *_a, **_k: _result())
 
     def capture(poly, **_kwargs):
         captured["bounds"] = surface.bounds_mm(poly)
+        captured["relax_surface"] = _kwargs["relax_surface"]
         return pipeline.SurfaceFinish(
             poly=poly,
             surface_components=surface.component_count(poly),
@@ -353,15 +355,25 @@ def test_fused_surface_is_finished_in_fixed_physical_coordinates(monkeypatch):
         "unused.stl",
         settings=pipeline.SurfaceSettings(
             resample_mm=0,
-            field_smooth_mm=0,
-            smooth_iters=0,
-            smooth_force=0.1,
+            smooth_mm=0.2,
             simplify_error_mm=0,
             keep_largest_component=False,
         ),
         grid_mm=1.0,
+        log=messages.append,
     )
 
+    fused_index = next(
+        index for index, message in enumerate(messages) if message.startswith("fuse occupancy")
+    )
+    smooth_index = next(
+        index for index, message in enumerate(messages) if message.startswith("smooth fused")
+    )
+    mesh_index = next(
+        index for index, message in enumerate(messages) if message.startswith("marching cubes")
+    )
+    assert fused_index < smooth_index < mesh_index
+    assert captured["relax_surface"] is True
     assert captured["bounds"][0] > 100
     assert captured["bounds"][2] > 200
     assert captured["bounds"][4] > 300
@@ -428,6 +440,7 @@ def test_merge_announces_volume_loading_before_it_starts(monkeypatch):
         )
         assert any("--fixed-threshold" in message for message in emitted_warnings)
         assert any("--moving-threshold" in message for message in emitted_warnings)
+        assert any("Gaussian sigma of 0.80 mm" in message for message in emitted_warnings)
         raise StopLoading
 
     monkeypatch.setattr(merge_mod.volume_mod, "load", stop)

@@ -17,11 +17,6 @@ from .defaults import DEFAULT_LABELMAP_SMOOTH_MM, DEFAULT_MERGE_GRID_MM
 
 Logger = Callable[[str], None]
 
-_LABELMAP_RELAX_ITERS = 20
-_LABELMAP_RELAX_FORCE = 0.1
-_MIN_AXIS_VOXELS = 4
-
-
 @dataclass
 class LoadedLabelmap:
     volume: volume_mod.Volume
@@ -48,9 +43,7 @@ def default_surface_settings() -> pipeline.SurfaceSettings:
     """Return independent finishing defaults for an external segmentation."""
     return pipeline.SurfaceSettings(
         resample_mm=0.0,
-        field_smooth_mm=DEFAULT_LABELMAP_SMOOTH_MM,
-        smooth_iters=_LABELMAP_RELAX_ITERS,
-        smooth_force=_LABELMAP_RELAX_FORCE,
+        smooth_mm=DEFAULT_LABELMAP_SMOOTH_MM,
         simplify_error_mm=0.25,
         keep_largest_component=False,
     )
@@ -63,14 +56,11 @@ def resolve_surface_settings(
     simplify_error_mm: float | None = None,
 ) -> pipeline.SurfaceSettings:
     base = default_surface_settings()
-    resolved_smooth_mm = (
-        base.field_smooth_mm if smooth_mm is None else float(smooth_mm)
-    )
+    resolved_smooth_mm = base.smooth_mm if smooth_mm is None else float(smooth_mm)
     settings = replace(
         base,
         resample_mm=base.resample_mm if resample_mm is None else resample_mm,
-        field_smooth_mm=resolved_smooth_mm,
-        smooth_iters=_LABELMAP_RELAX_ITERS if resolved_smooth_mm > 0 else 0,
+        smooth_mm=resolved_smooth_mm,
         simplify_error_mm=(
             base.simplify_error_mm
             if simplify_error_mm is None
@@ -81,22 +71,9 @@ def resolve_surface_settings(
     return settings
 
 
-def smoothing_warning(smooth_mm: float) -> str | None:
-    """Explain the intentional geometry tradeoff of field smoothing."""
-    if smooth_mm <= 0:
-        return None
-    return (
-        "labelmap smoothing uses a Gaussian sigma of %.2f mm before meshing; "
-        "it can round boundaries, merge narrow gaps, or erase structures near "
-        "this scale. Use --smooth-mm 0 to disable it" % smooth_mm
-    )
-
-
 def surface_provenance(settings: pipeline.SurfaceSettings) -> dict[str, Any]:
-    """Expose the physical user control while retaining internal finishing data."""
-    record = asdict(settings)
-    record["smooth_mm"] = record.pop("field_smooth_mm")
-    return record
+    """Record the external labelmap surface controls."""
+    return asdict(settings)
 
 
 def _binary_mask(image: sitk.Image) -> sitk.Image:
@@ -123,18 +100,6 @@ def _binary_mask(image: sitk.Image) -> sitk.Image:
     return sitk.Cast(sitk.NotEqual(image, 0), sitk.sitkUInt8)
 
 
-def _validate_dimensions(size: tuple[int, ...] | None) -> None:
-    """Enforce the recursive Gaussian's labelmap input contract."""
-    if size is None or len(size) != 3:
-        return
-    dimensions = tuple(int(value) for value in size)
-    if any(value < _MIN_AXIS_VOXELS for value in dimensions):
-        raise ValueError(
-            "labelmap dimensions must each contain at least 4 voxels; got %s"
-            % "x".join(str(value) for value in dimensions)
-        )
-
-
 def load(
     candidate: VolumeCandidate,
     *,
@@ -142,7 +107,6 @@ def load(
 ) -> LoadedLabelmap:
     if isinstance(candidate.source, DicomSource):
         raise ValueError("labelmap input must be a NIfTI, NRRD, or MetaImage file, not DICOM")
-    _validate_dimensions(candidate.size)
     volume = volume_mod.load(candidate, allow_large_volume=allow_large_volume)
     mask = _binary_mask(volume.image)
     provenance = pipeline.volume_provenance(volume)
@@ -193,7 +157,7 @@ def convert(
         if warn:
             warn(message)
 
-    smoothing_message = smoothing_warning(settings.field_smooth_mm)
+    smoothing_message = pipeline.smoothing_warning(settings.smooth_mm)
     if smoothing_message:
         add_warning(smoothing_message)
 
@@ -292,7 +256,7 @@ def merge(
         "labelmap contents are not verified; confirm that fixed and moving masks "
         "represent the same rigid structures before using the fused surface"
     )
-    smoothing_message = smoothing_warning(settings.field_smooth_mm)
+    smoothing_message = pipeline.smoothing_warning(settings.smooth_mm)
     if smoothing_message:
         add_warning(smoothing_message)
 

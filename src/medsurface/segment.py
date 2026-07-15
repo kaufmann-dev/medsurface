@@ -7,7 +7,7 @@ import math
 import numpy as np
 import SimpleITK as sitk
 
-from .defaults import MAX_VOXELS
+from .defaults import MAX_VOXELS, MIN_VOLUME_AXIS_VOXELS
 from .geometry import (
     kernel_extent_mm,
     kernel_radius_voxels,
@@ -215,6 +215,15 @@ def smooth_occupancy(image: sitk.Image, sigma_mm: float) -> sitk.Image:
         raise ValueError("occupancy smoothing sigma must be finite and non-negative")
     if sigma_mm == 0:
         return image
+    size = tuple(int(value) for value in image.GetSize())
+    if any(value < MIN_VOLUME_AXIS_VOXELS for value in size):
+        raise ValueError(
+            "physical smoothing requires at least %d voxels per axis; got %s"
+            % (
+                MIN_VOLUME_AXIS_VOXELS,
+                "x".join(str(value) for value in size),
+            )
+        )
     return sitk.SmoothingRecursiveGaussian(
         sitk.Cast(image, sitk.sitkFloat32),
         float(sigma_mm),

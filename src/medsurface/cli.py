@@ -687,11 +687,10 @@ def presets() -> None:
         preset = PRESETS[name]
         threshold = preset.threshold if isinstance(preset.threshold, str) else "%g" % preset.threshold
         simplify = "off" if preset.simplify_error_mm == 0 else "%.2f mm" % preset.simplify_error_mm
-        processing = "median %.1f mm; closing %.1f mm; smooth %d @ %.2f; simplify %s" % (
+        processing = "median %.1f mm; closing %.1f mm; smooth %.1f mm; simplify %s" % (
             preset.median_mm,
             preset.closing_mm,
-            preset.smooth_iters,
-            preset.smooth_force,
+            preset.smooth_mm,
             simplify,
         )
         tissue.add_row(
@@ -737,13 +736,10 @@ def convert(
         "--resample-mm",
         help="Isotropic surface-grid voxel size in mm (0 = native).",
     ),
-    smooth_iters: int | None = typer.Option(
+    smooth_mm: float | None = typer.Option(
         None,
-        "--smooth-iters",
-        help="Total MeshLib relaxation iterations before simplification.",
-    ),
-    smooth_force: float | None = typer.Option(
-        None, "--smooth-force", help="MeshLib relaxation strength per iteration."
+        "--smooth-mm",
+        help="Gaussian sigma in physical mm applied before meshing (0 = off).",
     ),
     simplify_error_mm: float | None = typer.Option(
         None,
@@ -769,10 +765,9 @@ def convert(
             ("--opening-mm", opening_mm),
             ("--min-island-mm3", min_island_mm3),
             ("--resample-mm", resample_mm),
-            ("--smooth-iters", smooth_iters),
+            ("--smooth-mm", smooth_mm),
             ("--simplify-error-mm", simplify_error_mm),
         ],
-        unit_interval=(("--smooth-force", smooth_force),),
     )
     emitted_warnings: list[str] = []
 
@@ -805,8 +800,7 @@ def convert(
             opening_mm=opening_mm,
             min_island_mm3=min_island_mm3,
             resample_mm=resample_mm,
-            smooth_iters=smooth_iters,
-            smooth_force=smooth_force,
+            smooth_mm=smooth_mm,
             simplify_error_mm=simplify_error_mm,
             keep_largest_island=False if all_islands else None,
             keep_largest_component=False if all_components else None,
@@ -1193,15 +1187,10 @@ def merge(
         "--grid-mm",
         help="Isotropic fused-grid voxel size in mm.",
     ),
-    smooth_iters: int | None = typer.Option(
+    smooth_mm: float | None = typer.Option(
         None,
-        "--smooth-iters",
-        help="Total MeshLib relaxation iterations before simplification.",
-    ),
-    smooth_force: float | None = typer.Option(
-        None,
-        "--smooth-force",
-        help="MeshLib relaxation strength per iteration.",
+        "--smooth-mm",
+        help="Gaussian sigma in physical mm applied after fusion (0 = off).",
     ),
     simplify_error_mm: float | None = typer.Option(
         None,
@@ -1231,11 +1220,10 @@ def merge(
             ("--closing-mm", closing_mm),
             ("--opening-mm", opening_mm),
             ("--min-island-mm3", min_island_mm3),
-            ("--smooth-iters", smooth_iters),
+            ("--smooth-mm", smooth_mm),
             ("--simplify-error-mm", simplify_error_mm),
         ],
         positive=(("--grid-mm", grid_mm),),
-        unit_interval=(("--smooth-force", smooth_force),),
     )
     emitted_warnings: list[str] = []
 
@@ -1295,8 +1283,7 @@ def merge(
                 fixed_threshold=fixed_threshold_value,
                 moving_threshold=moving_threshold_value,
                 grid_mm=grid_mm,
-                smooth_iters=smooth_iters,
-                smooth_force=smooth_force,
+                smooth_mm=smooth_mm,
                 simplify_error_mm=simplify_error_mm,
                 force=force,
                 allow_large_volume=allow_large_volume,

@@ -262,6 +262,48 @@ def test_non_scalar_or_non_3d_files_are_listed_as_unusable(tmp_path, image, reas
         catalog.select([candidate], None)
 
 
+@pytest.mark.parametrize(
+    "size",
+    [
+        (2, 2, 2),
+        (3, 4, 4),
+        (4, 3, 4),
+        (4, 4, 3),
+    ],
+)
+def test_every_volume_axis_requires_four_voxels(tmp_path, size):
+    path = tmp_path / "short.mha"
+    sitk.WriteImage(sitk.Image(size, sitk.sitkInt16), str(path))
+
+    candidate = catalog.discover(path)[0]
+
+    dimensions = "x".join(str(value) for value in size)
+    assert not candidate.usable
+    assert candidate.unusable_reason == (
+        "each volume axis must contain at least 4 voxels; got %s" % dimensions
+    )
+
+
+def test_four_voxels_per_axis_remains_usable(tmp_path):
+    path = tmp_path / "minimum.mha"
+    sitk.WriteImage(sitk.Image((4, 4, 4), sitk.sitkInt16), str(path))
+
+    candidate = catalog.discover(path)[0]
+
+    assert candidate.usable
+
+
+def test_short_dicom_stack_reports_the_global_dimension_requirement(tmp_path):
+    _write_dicom_series(tmp_path, slices=3)
+
+    candidate = catalog.discover(tmp_path)[0]
+
+    assert candidate.size == (5, 4, 3)
+    assert candidate.unusable_reason == (
+        "each volume axis must contain at least 4 voxels; got 5x4x3"
+    )
+
+
 def test_file_source_identity_detects_the_same_file(tmp_path):
     path = tmp_path / "scan.mha"
     sitk.WriteImage(_image(), str(path))

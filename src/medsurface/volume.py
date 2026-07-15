@@ -9,7 +9,7 @@ import numpy as np
 import SimpleITK as sitk
 
 from .catalog import DicomSource, FileSource, VolumeCandidate, validate_image
-from .defaults import MAX_VOXELS
+from .defaults import MAX_VOXELS, MIN_VOLUME_AXIS_VOXELS
 
 
 @dataclass
@@ -37,10 +37,18 @@ class Volume:
 
 def _voxel_count(candidate: VolumeCandidate) -> int:
     size = candidate.size
-    if size is None or len(size) != 3 or any(value < 2 for value in size):
+    if size is None or len(size) != 3:
         raise ValueError(
             "volume ID %d has no complete positive 3D dimensions; "
             "pixel data will not be loaded without a usable header" % candidate.id
+        )
+    if any(value < MIN_VOLUME_AXIS_VOXELS for value in size):
+        raise ValueError(
+            "each volume axis must contain at least %d voxels; got %s"
+            % (
+                MIN_VOLUME_AXIS_VOXELS,
+                "x".join(str(value) for value in size),
+            )
         )
     return math.prod(int(value) for value in size)
 

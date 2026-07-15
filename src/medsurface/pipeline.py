@@ -12,6 +12,7 @@ import SimpleITK as sitk
 from . import segment, surface
 from . import volume as volume_mod
 from .catalog import DicomSource, VolumeCandidate
+from .defaults import SURFACE_RELAX_FORCE, SURFACE_RELAX_ITERS
 from .presets import Preset
 from .presets import validate as validate_preset
 
@@ -49,9 +50,7 @@ class SurfaceSettings:
     """Mask-to-mesh controls shared by conversion and fusion workflows."""
 
     resample_mm: float
-    field_smooth_mm: float
-    smooth_iters: int
-    smooth_force: float
+    smooth_mm: float
     simplify_error_mm: float
     keep_largest_component: bool
 
@@ -72,9 +71,7 @@ def surface_settings(preset: Preset, *, keep_largest_component: bool | None = No
     """Extract only the mask-to-mesh portion of a conversion preset."""
     return SurfaceSettings(
         resample_mm=preset.resample_mm,
-        field_smooth_mm=0.0,
-        smooth_iters=preset.smooth_iters,
-        smooth_force=preset.smooth_force,
+        smooth_mm=preset.smooth_mm,
         simplify_error_mm=preset.simplify_error_mm,
         keep_largest_component=(
             preset.keep_largest_component
@@ -87,24 +84,29 @@ def surface_settings(preset: Preset, *, keep_largest_component: bool | None = No
 def validate_surface_settings(settings: SurfaceSettings) -> None:
     nonnegative = {
         "resample_mm": settings.resample_mm,
-        "field_smooth_mm": settings.field_smooth_mm,
-        "smooth_iters": settings.smooth_iters,
+        "smooth_mm": settings.smooth_mm,
         "simplify_error_mm": settings.simplify_error_mm,
     }
     for name, value in nonnegative.items():
         if not math.isfinite(value) or value < 0:
             raise ValueError("%s must be finite and non-negative" % name)
-    if not math.isfinite(settings.smooth_force) or not 0 < settings.smooth_force <= 1:
-        raise ValueError(
-            "smooth_force must be finite, greater than zero, and at most one"
-        )
+
+
+def smoothing_warning(smooth_mm: float) -> str | None:
+    """Explain the intentional geometry tradeoff of physical smoothing."""
+    if smooth_mm <= 0:
+        return None
+    return (
+        "surface smoothing uses a Gaussian sigma of %.2f mm before meshing; "
+        "it can round boundaries, merge narrow gaps, or erase structures near "
+        "this scale. Use --smooth-mm 0 to disable it" % smooth_mm
+    )
 
 
 def finish_surface(
     poly,
     *,
-    smooth_iters: int,
-    smooth_force: float,
+    relax_surface: bool,
     simplify_error_mm: float,
     keep_largest_component: bool,
     step: StepRunner,
@@ -115,7 +117,11 @@ def finish_surface(
 
     poly, smoothing = step(
         "relax surface",
-        lambda: surface.smooth_safely(poly, smooth_iters, smooth_force),
+        lambda: surface.smooth_safely(
+            poly,
+            SURFACE_RELAX_ITERS if relax_surface else 0,
+            SURFACE_RELAX_FORCE,
+        ),
     )
     if smoothing.initial_self_intersecting_faces:
         warnings.append(
@@ -241,7 +247,7 @@ def mesh_binary_mask(
                 binary,
                 settings.resample_mm,
                 log,
-                pad_border=settings.field_smooth_mm <= 0 and cap_field_of_view,
+                pad_border=settings.smooth_mm <= 0 and cap_field_of_view,
                 allow_large_volume=allow_large_volume,
             ),
         )
@@ -250,15 +256,15 @@ def mesh_binary_mask(
         grid = binary
         isovalue = 0.5
 
-    if settings.field_smooth_mm > 0:
+    if settings.smooth_mm > 0:
         grid = step(
-            "smooth labelmap field",
-            lambda: segment.smooth_occupancy(grid, settings.field_smooth_mm),
+            "smooth occupancy field",
+            lambda: segment.smooth_occupancy(grid, settings.smooth_mm),
         )
         isovalue = segment.ISO_OCCUPANCY
 
     if cap_field_of_view and not (
-        settings.resample_mm > 0 and settings.field_smooth_mm <= 0
+        settings.resample_mm > 0 and settings.smooth_mm <= 0
     ):
         grid = segment.pad(grid, 1)
 
@@ -272,8 +278,7 @@ def mesh_binary_mask(
 
     finished = finish_surface(
         poly,
-        smooth_iters=settings.smooth_iters,
-        smooth_force=settings.smooth_force,
+        relax_surface=settings.smooth_mm > 0,
         simplify_error_mm=settings.simplify_error_mm,
         keep_largest_component=settings.keep_largest_component,
         step=step,
@@ -446,6 +451,9 @@ def convert(
             add_warning(message)
 
     add_warnings(threshold_warnings(candidate, preset, threshold))
+    smoothing_message = smoothing_warning(preset.smooth_mm)
+    if smoothing_message:
+        add_warning(smoothing_message)
     vol = step(
         "load volume",
         lambda: volume_mod.load(candidate, allow_large_volume=allow_large_volume),
