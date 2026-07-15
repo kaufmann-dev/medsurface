@@ -38,6 +38,21 @@ class PresetChoice(str, Enum):
     TEETH = "teeth"
 
 
+class ComponentChoice(str, Enum):
+    """Surface-component retention accepted by ``--components``."""
+
+    ALL = "all"
+    LARGEST = "largest"
+
+
+def _keep_largest_component(
+    components: ComponentChoice | None,
+) -> bool | None:
+    if components is None:
+        return None
+    return components is ComponentChoice.LARGEST
+
+
 stdout_console = Console(highlight=False, markup=False)
 stderr_console = Console(stderr=True, highlight=False, markup=False)
 
@@ -788,8 +803,10 @@ def convert(
     all_islands: bool = typer.Option(
         False, "--all-islands", help="Keep every labelmap island."
     ),
-    all_components: bool = typer.Option(
-        False, "--all-components", help="Keep every surface shell."
+    components: ComponentChoice | None = typer.Option(
+        None,
+        "--components",
+        help="Surface components to keep (default: preset).",
     ),
     resample_mm: float | None = typer.Option(
         None,
@@ -885,7 +902,7 @@ def convert(
             simplify_error_mm=simplify_error_mm,
             post_surface_smooth_iters=post_surface_smooth_iters,
             keep_largest_island=False if all_islands else None,
-            keep_largest_component=False if all_components else None,
+            keep_largest_component=_keep_largest_component(components),
         )
         progress.update("Loading conversion engine ...")
         from . import pipeline
@@ -985,6 +1002,11 @@ def convert_labelmap(
         "--post-mesh-smooth-iters",
         help="Final topology-preserving surface relaxation iterations after simplification (0 = off).",
     ),
+    components: ComponentChoice = typer.Option(
+        ComponentChoice.ALL,
+        "--components",
+        help="Surface components to keep.",
+    ),
     no_cap: bool = typer.Option(
         False, "--no-cap", help="Do not close foreground at the labelmap boundary."
     ),
@@ -1038,6 +1060,7 @@ def convert_labelmap(
                 surface_smooth_iters=surface_smooth_iters,
                 simplify_error_mm=simplify_error_mm,
                 post_surface_smooth_iters=post_surface_smooth_iters,
+                keep_largest_component=_keep_largest_component(components),
                 cap_field_of_view=not no_cap,
                 allow_large_volume=allow_large_volume,
                 log=progress.log,
@@ -1131,6 +1154,11 @@ def merge_labelmaps(
         "--post-mesh-smooth-iters",
         help="Final topology-preserving surface relaxation iterations after simplification (0 = off).",
     ),
+    components: ComponentChoice = typer.Option(
+        ComponentChoice.ALL,
+        "--components",
+        help="Surface components to keep.",
+    ),
     force: bool = typer.Option(
         False, "--force", help="Override registration-quality gates."
     ),
@@ -1191,6 +1219,7 @@ def merge_labelmaps(
                 surface_smooth_iters=surface_smooth_iters,
                 simplify_error_mm=simplify_error_mm,
                 post_surface_smooth_iters=post_surface_smooth_iters,
+                keep_largest_component=_keep_largest_component(components),
                 force=force,
                 allow_large_volume=allow_large_volume,
                 log=progress.log,
@@ -1303,8 +1332,10 @@ def merge(
     all_islands: bool = typer.Option(
         False, "--all-islands", help="Keep every labelmap island."
     ),
-    all_components: bool = typer.Option(
-        False, "--all-components", help="Keep every fused surface shell."
+    components: ComponentChoice | None = typer.Option(
+        None,
+        "--components",
+        help="Surface components to keep (default: preset).",
     ),
     grid_mm: float = typer.Option(
         defaults.DEFAULT_MERGE_GRID_MM,
@@ -1409,7 +1440,7 @@ def merge(
             opening_mm=opening_mm,
             min_island_mm3=min_island_mm3,
             keep_largest_island=False if all_islands else None,
-            keep_largest_component=False if all_components else None,
+            keep_largest_component=_keep_largest_component(components),
         )
         progress.update("Loading merge engine ...")
         from . import merge as merge_mod
