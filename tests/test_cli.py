@@ -6,8 +6,10 @@ import io
 import json
 import os
 import pty
+import re
 import select
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -640,6 +642,162 @@ def test_interactive_diagnostic_clears_live_progress_line():
     active_line = text[text.rfind("\r", 0, warning_at) + 1 : warning_at]
     assert "0:00:" not in active_line
     assert "voxels are strongly anisotropic" in text
+
+
+def _interruptible_convert_script(input_path: Path, output_path: Path) -> str:
+    return f"""
+import time
+from types import SimpleNamespace
+
+from medsurface import catalog, cli, pipeline
+
+chosen = SimpleNamespace(id=1, format="NIfTI", source_name="fixture.nii.gz")
+cli._discover = lambda _path: [chosen]
+catalog.select = lambda _found, _volume_id: chosen
+cli._protect_output_paths = lambda *_paths: None
+
+def fake_convert(**_kwargs):
+    progress = cli._active_progress.get()
+    renderer_pid = progress.renderer.pid if progress.renderer is not None else "none"
+    print(f"READY renderer={{renderer_pid}}", flush=True)
+    time.sleep(30)
+
+pipeline.convert = fake_convert
+cli.app(
+    prog_name="medsurface",
+    args=["convert", {str(input_path)!r}, "-o", {str(output_path)!r}],
+)
+"""
+
+
+def _read_pty_until(master: int, needle: bytes, timeout: float) -> bytearray:
+    rendered = bytearray()
+    deadline = time.monotonic() + timeout
+    while needle not in rendered and time.monotonic() < deadline:
+        if not select.select([master], [], [], 0.1)[0]:
+            continue
+        try:
+            rendered.extend(os.read(master, 65536))
+        except OSError:
+            break
+    return rendered
+
+
+def test_ctrl_c_is_owned_by_parent_without_renderer_traceback(tmp_path):
+    output_path = tmp_path / "cancelled.stl"
+    master, slave = pty.openpty()
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            _interruptible_convert_script(tmp_path, output_path),
+        ],
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        close_fds=True,
+        start_new_session=True,
+        env=_plain_subprocess_env(),
+    )
+    os.close(slave)
+    rendered = bytearray()
+    try:
+        rendered.extend(_read_pty_until(master, b"READY renderer=", 5))
+        assert b"READY renderer=" in rendered
+        time.sleep(0.3)
+        os.killpg(process.pid, signal.SIGINT)
+        assert process.wait(timeout=5) == 130
+        rendered.extend(_read_pty_until(master, b"Cancelled.", 2))
+        rendered.extend(_read_pty_until(master, b"unused sentinel", 0.2))
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        os.close(master)
+
+    text = rendered.decode(errors="replace")
+    renderer_match = re.search(r"READY renderer=(\d+)", text)
+    assert renderer_match is not None
+    assert text.count("Cancelled.") == 1
+    assert "Traceback" not in text
+    assert "KeyboardInterrupt" not in text
+    assert not output_path.exists()
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(renderer_match.group(1)), 0)
+
+
+def test_quiet_ctrl_c_exits_cleanly_without_renderer(tmp_path):
+    output_path = tmp_path / "cancelled-quiet.stl"
+    script = _interruptible_convert_script(tmp_path, output_path).replace(
+        '"-o",', '"--quiet", "-o",'
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+        env=_plain_subprocess_env(),
+    )
+    try:
+        assert process.stdout is not None
+        assert select.select([process.stdout], [], [], 5)[0]
+        assert process.stdout.readline().strip() == "READY renderer=none"
+        process.send_signal(signal.SIGINT)
+        stdout, stderr = process.communicate(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+    assert process.returncode == 130
+    assert stdout == ""
+    assert stderr == "Cancelled.\n"
+    assert not output_path.exists()
+
+
+def test_repeated_ctrl_c_does_not_interrupt_cancellation_cleanup():
+    class FakePipe:
+        def write(self, _message):
+            return None
+
+        def flush(self):
+            return None
+
+        def close(self):
+            return None
+
+    class InterruptingRenderer:
+        stdin = FakePipe()
+        waited = False
+
+        def wait(self, *, timeout):
+            os.kill(os.getpid(), signal.SIGINT)
+            self.waited = True
+
+    diagnostic_stream = io.StringIO()
+    diagnostic_console = Console(
+        file=diagnostic_stream,
+        color_system=None,
+        force_terminal=False,
+        highlight=False,
+        markup=False,
+    )
+    display = cli._ProgressDisplay(
+        False,
+        "Starting ...",
+        diagnostic_console=diagnostic_console,
+    )
+    renderer = InterruptingRenderer()
+
+    with pytest.raises(KeyboardInterrupt):
+        with display:
+            display.renderer = renderer  # type: ignore[assignment]
+            raise KeyboardInterrupt
+
+    assert renderer.waited
+    assert diagnostic_stream.getvalue() == "Cancelled.\n"
 
 
 @pytest.mark.parametrize(
