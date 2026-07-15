@@ -29,14 +29,16 @@ def _image(arr, spacing=(1.0, 1.0, 1.0), origin=(0.0, 0.0, 0.0)):
 def _ball(shape, center, radius):
     zz, yy, xx = np.indices(shape)
     d2 = (zz - center[0]) ** 2 + (yy - center[1]) ** 2 + (xx - center[2]) ** 2
-    return (d2 <= radius ** 2).astype(np.uint8)
+    return (d2 <= radius**2).astype(np.uint8)
 
 
 def _ellipsoid(shape, center, radii):
     zz, yy, xx = np.indices(shape)
-    d = (((zz - center[0]) / radii[0]) ** 2
-         + ((yy - center[1]) / radii[1]) ** 2
-         + ((xx - center[2]) / radii[2]) ** 2)
+    d = (
+        ((zz - center[0]) / radii[0]) ** 2
+        + ((yy - center[1]) / radii[1]) ** 2
+        + ((xx - center[2]) / radii[2]) ** 2
+    )
     return (d <= 1.0).astype(np.uint8)
 
 
@@ -51,8 +53,8 @@ def _lumpy_shell(shape=(70, 70, 70)):
     """
     c = (35, 35, 35)
     body = _ellipsoid(shape, c, (26, 20, 16)) & ~_ellipsoid(shape, c, (21, 15, 11))
-    body |= _ball(shape, (20, 24, 46), 8)   # off every axis
-    body |= _ball(shape, (48, 44, 26), 6)   # and a different one, elsewhere
+    body |= _ball(shape, (20, 24, 46), 8)  # off every axis
+    body |= _ball(shape, (48, 44, 26), 6)  # and a different one, elsewhere
     body |= _ellipsoid(shape, (35, 50, 20), (4, 9, 4))  # an elongated wing
     return body.astype(np.uint8)
 
@@ -61,7 +63,9 @@ def _rigid(rotation_deg, axis, translation):
     axis = np.asarray(axis, dtype=float)
     axis /= np.linalg.norm(axis)
     theta = math.radians(rotation_deg)
-    k = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]])
+    k = np.array(
+        [[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]]
+    )
     rot = np.eye(3) + math.sin(theta) * k + (1 - math.cos(theta)) * (k @ k)
     t = np.eye(4)
     t[:3, :3] = rot
@@ -82,7 +86,9 @@ def _apply_to_image(mask, transform):
     r.SetReferenceImage(mask)
     size = np.asarray(mask.GetSize()) + 40
     r.SetSize([int(v) for v in size])
-    r.SetOutputOrigin([o - 20.0 * s for o, s in zip(mask.GetOrigin(), mask.GetSpacing())])
+    r.SetOutputOrigin(
+        [o - 20.0 * s for o, s in zip(mask.GetOrigin(), mask.GetSpacing())]
+    )
     r.SetInterpolator(sitk.sitkLinear)
     r.SetDefaultPixelValue(0.0)
     r.SetTransform(inv)
@@ -101,7 +107,9 @@ def test_recovers_a_known_rigid_transform():
     # rigid_register maps moving -> fixed, i.e. it should invert `truth`
     composed = result.transform @ truth
     assert composed[:3, 3] == pytest.approx([0, 0, 0], abs=1.0)
-    angle = math.degrees(math.acos(max(-1.0, min(1.0, (np.trace(composed[:3, :3]) - 1) / 2))))
+    angle = math.degrees(
+        math.acos(max(-1.0, min(1.0, (np.trace(composed[:3, :3]) - 1) / 2)))
+    )
     assert angle < 2.0, angle
 
     assert result.inlier_rms_mm < 0.6
@@ -129,7 +137,9 @@ def test_recovers_rotations_across_the_capture_range(degrees):
     result = registration.rigid_register(fixed, moving, samples=20000)
 
     composed = result.transform @ truth
-    angle = math.degrees(math.acos(max(-1.0, min(1.0, (np.trace(composed[:3, :3]) - 1) / 2))))
+    angle = math.degrees(
+        math.acos(max(-1.0, min(1.0, (np.trace(composed[:3, :3]) - 1) / 2)))
+    )
     assert angle < 1.0, "rotation error %.2f deg at %.0f deg" % (angle, degrees)
     assert np.linalg.norm(composed[:3, 3]) < 1.0
 
@@ -158,10 +168,14 @@ def test_merge_translates_registration_failure_to_its_public_error(monkeypatch):
         return volume.Volume(image=image, candidate=candidate)
 
     def fail_registration(*_args, **_kwargs):
-        raise registration.RegistrationError("one mask vanished on the registration grid")
+        raise registration.RegistrationError(
+            "one mask vanished on the registration grid"
+        )
 
     monkeypatch.setattr(merge_mod.volume_mod, "load", load)
-    monkeypatch.setattr(merge_mod.pipeline, "build_mask", lambda *_args, **_kwargs: image)
+    monkeypatch.setattr(
+        merge_mod.pipeline, "build_mask", lambda *_args, **_kwargs: image
+    )
     monkeypatch.setattr(merge_mod.registration, "rigid_register", fail_registration)
 
     with pytest.raises(MergeError, match="one mask vanished"):
@@ -178,10 +192,16 @@ def test_merge_translates_registration_failure_to_its_public_error(monkeypatch):
 # --------------------------------------------------------------- the refusals
 def _result(**kw):
     base = dict(
-        transform=np.eye(4), fft_translation_mm=np.zeros(3), rotation_deg=0.0,
-        translation_mm=np.zeros(3), inlier_rms_mm=0.2, inlier_median_mm=0.1,
-        overlap_moving_in_fixed=0.95, overlap_fixed_in_moving=0.92,
-        shared_fov_dice=0.85, shared_fov_mm3=1e6,
+        transform=np.eye(4),
+        fft_translation_mm=np.zeros(3),
+        rotation_deg=0.0,
+        translation_mm=np.zeros(3),
+        inlier_rms_mm=0.2,
+        inlier_median_mm=0.1,
+        overlap_moving_in_fixed=0.95,
+        overlap_fixed_in_moving=0.92,
+        shared_fov_dice=0.85,
+        shared_fov_mm3=1e6,
     )
     base.update(kw)
     return registration.RegistrationResult(**base)
@@ -227,8 +247,11 @@ def test_geometry_alone_cannot_reject_a_similar_body():
     """Measured on a real skull scaled by 3%, within person-to-person variation:
     overlap 0.989, dice 0.675 -- both gates pass. Subject identity therefore
     remains an explicit user responsibility."""
-    similar_body = _result(overlap_moving_in_fixed=0.989, overlap_fixed_in_moving=0.989,
-                           shared_fov_dice=0.675)
+    similar_body = _result(
+        overlap_moving_in_fixed=0.989,
+        overlap_fixed_in_moving=0.989,
+        shared_fov_dice=0.675,
+    )
     merge_mod.check_registration(similar_body)  # geometry waves it through
 
 
@@ -264,6 +287,7 @@ def test_surface_stage_comes_from_the_preset():
         "mask_smooth_mm",
         "surface_smooth_iters",
         "simplify_error_mm",
+        "post_surface_smooth_iters",
     ):
         assert signature.parameters[name].default is None, (
             "%s must default to the preset, not to a merge-specific constant" % name
@@ -271,7 +295,8 @@ def test_surface_stage_comes_from_the_preset():
 
     bone = presets.get("bone")
     assert bone.mask_smooth_mm == 0
-    assert bone.surface_smooth_iters == 60
+    assert bone.surface_smooth_iters == 20
+    assert bone.post_surface_smooth_iters == 40
 
 
 @pytest.mark.parametrize("grid_mm", [0.0, -0.4, float("nan"), float("inf")])
@@ -279,10 +304,14 @@ def test_merge_rejects_invalid_grid_before_loading(grid_mm, monkeypatch):
     monkeypatch.setattr(
         merge_mod.volume_mod,
         "load",
-        lambda _candidate: pytest.fail("volume loading must not start for an invalid grid"),
+        lambda _candidate: pytest.fail(
+            "volume loading must not start for an invalid grid"
+        ),
     )
 
-    with pytest.raises(ValueError, match="grid_mm must be finite and greater than zero"):
+    with pytest.raises(
+        ValueError, match="grid_mm must be finite and greater than zero"
+    ):
         merge_mod.merge(
             _candidate(uid="a"),
             _candidate(uid="b"),
@@ -325,8 +354,13 @@ def test_common_grid_override_allows_a_grid_above_the_default_limit():
 
 def test_force_overrides_the_gates():
     merge_mod.check_registration(
-        _result(overlap_moving_in_fixed=0.0, overlap_fixed_in_moving=0.0,
-                shared_fov_dice=0.0), force=True)
+        _result(
+            overlap_moving_in_fixed=0.0,
+            overlap_fixed_in_moving=0.0,
+            shared_fov_dice=0.0,
+        ),
+        force=True,
+    )
 
 
 def test_fused_surface_is_finished_in_fixed_physical_coordinates(monkeypatch):
@@ -336,11 +370,14 @@ def test_fused_surface_is_finished_in_fixed_physical_coordinates(monkeypatch):
     captured = {}
     messages = []
 
-    monkeypatch.setattr(merge_mod.registration, "rigid_register", lambda *_a, **_k: _result())
+    monkeypatch.setattr(
+        merge_mod.registration, "rigid_register", lambda *_a, **_k: _result()
+    )
 
     def capture(poly, **_kwargs):
         captured["bounds"] = surface.bounds_mm(poly)
         captured["surface_smooth_iters"] = _kwargs["surface_smooth_iters"]
+        captured["post_surface_smooth_iters"] = _kwargs["post_surface_smooth_iters"]
         return pipeline.SurfaceFinish(
             poly=poly,
             surface_components=surface.component_count(poly),
@@ -363,6 +400,7 @@ def test_fused_surface_is_finished_in_fixed_physical_coordinates(monkeypatch):
             mask_smooth_mm=0.2,
             surface_smooth_iters=7,
             simplify_error_mm=0,
+            post_surface_smooth_iters=9,
             keep_largest_component=False,
         ),
         grid_mm=1.0,
@@ -370,16 +408,23 @@ def test_fused_surface_is_finished_in_fixed_physical_coordinates(monkeypatch):
     )
 
     fused_index = next(
-        index for index, message in enumerate(messages) if message.startswith("fuse occupancy")
+        index
+        for index, message in enumerate(messages)
+        if message.startswith("fuse occupancy")
     )
     smooth_index = next(
-        index for index, message in enumerate(messages) if message.startswith("smooth fused")
+        index
+        for index, message in enumerate(messages)
+        if message.startswith("smooth fused")
     )
     mesh_index = next(
-        index for index, message in enumerate(messages) if message.startswith("marching cubes")
+        index
+        for index, message in enumerate(messages)
+        if message.startswith("marching cubes")
     )
     assert fused_index < smooth_index < mesh_index
     assert captured["surface_smooth_iters"] == 7
+    assert captured["post_surface_smooth_iters"] == 9
     assert captured["bounds"][0] > 100
     assert captured["bounds"][2] > 200
     assert captured["bounds"][4] > 300
@@ -405,7 +450,9 @@ def _candidate(uid="1.2.3", modality="CT", part=1, *, path=None):
     series = Series(uid=uid, modality=modality, description="d", series_number=1)
     series.files = ["slice"]
     series.part = part
-    source = FileSource(Path(path), "NIfTI") if path else DicomSource(Path("scans"), series)
+    source = (
+        FileSource(Path(path), "NIfTI") if path else DicomSource(Path("scans"), series)
+    )
     return VolumeCandidate(
         id=1,
         source=source,

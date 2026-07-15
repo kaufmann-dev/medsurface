@@ -80,8 +80,7 @@ def test_labelmap_convert_rejects_short_dimensions_before_meshing(
 
     with pytest.raises(
         ValueError,
-        match=r"each volume axis must contain at least 4 voxels; got %s$"
-        % dimensions,
+        match=r"each volume axis must contain at least 4 voxels; got %s$" % dimensions,
     ):
         labelmap.convert(
             candidate,
@@ -105,9 +104,7 @@ def test_labelmap_merge_rejects_short_dimensions_before_registration(
 
     with pytest.raises(
         ValueError,
-        match=(
-            r"each volume axis must contain at least 4 voxels; got 2x4x4$"
-        ),
+        match=(r"each volume axis must contain at least 4 voxels; got 2x4x4$"),
     ):
         labelmap.merge(
             fixed,
@@ -141,6 +138,7 @@ def test_default_finishing_is_independent_and_keeps_all_shells():
     assert settings.mask_smooth_mm == pytest.approx(0.8)
     assert settings.surface_smooth_iters == 20
     assert settings.simplify_error_mm == pytest.approx(0.25)
+    assert settings.post_surface_smooth_iters == 0
     assert settings.keep_largest_component is False
 
 
@@ -150,9 +148,10 @@ def test_disabling_mask_smoothing_keeps_surface_smoothing():
     assert settings.mask_smooth_mm == 0
     assert settings.surface_smooth_iters == 20
     assert settings.simplify_error_mm == pytest.approx(0.25)
+    assert settings.post_surface_smooth_iters == 0
 
 
-def test_default_labelmap_finishing_is_single_stage_and_error_limited(tmp_path):
+def test_default_labelmap_finishing_uses_no_post_simplification_relaxation(tmp_path):
     source = tmp_path / "labels.nii.gz"
     output = tmp_path / "labels.stl"
     candidate = _write(source, _two_labels())
@@ -163,10 +162,12 @@ def test_default_labelmap_finishing_is_single_stage_and_error_limited(tmp_path):
     assert result.quality["valid"]
     assert result.provenance["surface"]["mask_smooth_mm"] == pytest.approx(0.8)
     assert result.provenance["surface"]["surface_smooth_iters"] == 20
-    assert finishing["smoothing"]["requested_iterations"] == 20
+    assert result.provenance["surface"]["post_surface_smooth_iters"] == 0
+    assert finishing["pre_smoothing"]["requested_iterations"] == 20
     assert finishing["decimation"]["simplify_error_mm"] == pytest.approx(0.25)
     assert finishing["decimation"]["error_introduced_mm"] <= 0.25
-    assert set(finishing) == {"smoothing", "decimation"}
+    assert finishing["post_smoothing"]["requested_iterations"] == 0
+    assert set(finishing) == {"pre_smoothing", "decimation", "post_smoothing"}
     assert any("Gaussian sigma of 0.80 mm" in warning for warning in result.warnings)
 
 
@@ -192,7 +193,7 @@ def test_real_labelmap_formats_convert_all_components(tmp_path, extension):
     assert result.provenance["input"]["foreground"] == "all nonzero voxels"
     assert result.provenance["surface"]["keep_largest_component"] is False
     assert (
-        result.provenance["surface_finishing"]["smoothing"]["requested_iterations"]
+        result.provenance["surface_finishing"]["pre_smoothing"]["requested_iterations"]
         == 0
     )
 
@@ -240,10 +241,7 @@ def test_labelmap_boundary_is_capped_and_reported(tmp_path):
 def test_labelmap_merge_registers_rigid_masks_and_uses_fixed_frame(tmp_path):
     zz, yy, xx = np.indices((64, 64, 64))
     values = (
-        ((xx - 32) / 18) ** 2
-        + ((yy - 31) / 15) ** 2
-        + ((zz - 30) / 12) ** 2
-        <= 1
+        ((xx - 32) / 18) ** 2 + ((yy - 31) / 15) ** 2 + ((zz - 30) / 12) ** 2 <= 1
     ).astype(np.uint8)
     values[25:37, 28:35, 45:50] = 1
     fixed_path = tmp_path / "fixed.nii.gz"
@@ -278,7 +276,9 @@ def test_labelmap_merge_rejects_the_same_input_before_loading(tmp_path, monkeypa
     monkeypatch.setattr(
         labelmap,
         "load",
-        lambda *_args, **_kwargs: pytest.fail("duplicate inputs must fail before loading"),
+        lambda *_args, **_kwargs: pytest.fail(
+            "duplicate inputs must fail before loading"
+        ),
     )
 
     with pytest.raises(merge_mod.MergeError, match="same labelmap"):

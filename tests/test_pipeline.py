@@ -32,7 +32,11 @@ def _series(modality="CT", **kwargs):
 
 def _candidate(*, modality="CT", file=False, **series_kwargs):
     series = _series(modality, **series_kwargs)
-    source = FileSource(Path("scan.nii"), "NIfTI") if file else DicomSource(Path("scans"), series)
+    source = (
+        FileSource(Path("scan.nii"), "NIfTI")
+        if file
+        else DicomSource(Path("scans"), series)
+    )
     return VolumeCandidate(
         id=1,
         source=source,
@@ -53,7 +57,11 @@ def _candidate(*, modality="CT", file=False, **series_kwargs):
 def _ct_image():
     rng = np.random.default_rng(3)
     arr = np.concatenate(
-        [np.full(20_000, -1000.0), rng.normal(40, 20, 8_000), rng.normal(900, 80, 3_000)]
+        [
+            np.full(20_000, -1000.0),
+            rng.normal(40, 20, 8_000),
+            rng.normal(900, 80, 3_000),
+        ]
     ).astype(np.float32)
     side = 32
     vol = np.full(side**3, -1000.0, dtype=np.float32)
@@ -175,9 +183,10 @@ def test_ct_without_sufficient_hu_evidence_is_unverified(series_kwargs):
     candidate = _candidate(**series_kwargs)
 
     assert not pipeline_mod.volume_mod.has_calibrated_hu(candidate)
-    assert "cannot be verified" in pipeline_mod.threshold_warnings(
-        candidate, presets.get("bone"), None
-    )[0]
+    assert (
+        "cannot be verified"
+        in pipeline_mod.threshold_warnings(candidate, presets.get("bone"), None)[0]
+    )
 
 
 def test_explicit_hu_rescale_type_verifies_derived_ct():
@@ -199,6 +208,7 @@ def test_every_preset_is_self_consistent():
         assert p.mask_smooth_mm >= 0
         assert p.surface_smooth_iters >= 0
         assert p.simplify_error_mm >= 0
+        assert p.post_surface_smooth_iters >= 0
         if isinstance(p.threshold, str):
             assert p.threshold == "auto"
             assert p.threshold_unit == "auto"
@@ -214,13 +224,21 @@ def test_every_preset_is_self_consistent():
         "auto": 0.0,
     }
     assert {
-        name: preset.surface_smooth_iters
+        name: preset.surface_smooth_iters for name, preset in presets.PRESETS.items()
+    } == {
+        "bone": 20,
+        "teeth": 10,
+        "skin": 25,
+        "auto": 20,
+    }
+    assert {
+        name: preset.post_surface_smooth_iters
         for name, preset in presets.PRESETS.items()
     } == {
-        "bone": 60,
-        "teeth": 10,
-        "skin": 35,
-        "auto": 60,
+        "bone": 40,
+        "teeth": 0,
+        "skin": 10,
+        "auto": 40,
     }
 
 
@@ -262,6 +280,7 @@ def test_mask_surface_is_finished_once_in_physical_coordinates(monkeypatch):
             mask_smooth_mm=0,
             surface_smooth_iters=0,
             simplify_error_mm=0,
+            post_surface_smooth_iters=0,
             keep_largest_component=False,
         ),
         cap_field_of_view=True,
@@ -288,6 +307,7 @@ def test_mask_surface_smooths_occupancy_before_meshing(monkeypatch):
 
     def capture(poly, **kwargs):
         captured["surface_smooth_iters"] = kwargs["surface_smooth_iters"]
+        captured["post_surface_smooth_iters"] = kwargs["post_surface_smooth_iters"]
         return pipeline_mod.SurfaceFinish(
             poly=poly,
             surface_components=surface.component_count(poly),
@@ -310,6 +330,7 @@ def test_mask_surface_smooths_occupancy_before_meshing(monkeypatch):
             mask_smooth_mm=0.8,
             surface_smooth_iters=7,
             simplify_error_mm=0,
+            post_surface_smooth_iters=9,
             keep_largest_component=False,
         ),
         cap_field_of_view=True,
@@ -321,6 +342,7 @@ def test_mask_surface_smooths_occupancy_before_meshing(monkeypatch):
 
     assert stages.index("smooth mask occupancy field") < stages.index("marching cubes")
     assert captured["surface_smooth_iters"] == 7
+    assert captured["post_surface_smooth_iters"] == 9
 
 
 def test_zero_simplification_does_not_disable_smoothing():
@@ -339,13 +361,16 @@ def test_zero_simplification_does_not_disable_smoothing():
         surface.from_arrays(vertices, faces),
         surface_smooth_iters=20,
         simplify_error_mm=0,
+        post_surface_smooth_iters=40,
         keep_largest_component=False,
         step=lambda _name, function: function(),
         log=lambda _message: None,
     )
 
-    assert finished.provenance["smoothing"]["requested_iterations"] == 20
+    assert finished.provenance["pre_smoothing"]["requested_iterations"] == 20
     assert finished.provenance["decimation"]["attempted"] is False
+    assert finished.provenance["post_smoothing"]["requested_iterations"] == 40
+    assert finished.provenance["post_smoothing"]["rms_displacement_mm"] > 0
 
 
 def test_surface_smoothing_can_be_disabled_independently():
@@ -366,12 +391,42 @@ def test_surface_smoothing_can_be_disabled_independently():
         surface.from_arrays(vertices, faces),
         surface_smooth_iters=0,
         simplify_error_mm=0,
+        post_surface_smooth_iters=0,
         keep_largest_component=False,
         step=lambda _name, function: function(),
         log=lambda _message: None,
     )
 
-    assert finished.provenance["smoothing"]["requested_iterations"] == 0
+    assert finished.provenance["pre_smoothing"]["requested_iterations"] == 0
+    assert finished.provenance["post_smoothing"]["requested_iterations"] == 0
+
+
+def test_surface_finishing_runs_smoothing_on_both_sides_of_simplification():
+    vertices = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    faces = np.asarray(
+        [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+        dtype=np.int32,
+    )
+    stages = []
+
+    pipeline_mod.finish_surface(
+        surface.from_arrays(vertices, faces),
+        surface_smooth_iters=2,
+        simplify_error_mm=0.01,
+        post_surface_smooth_iters=3,
+        keep_largest_component=False,
+        step=lambda name, function: (stages.append(name), function())[1],
+        log=lambda _message: None,
+    )
+
+    assert stages == ["relax surface", "simplify", "finish surface"]
 
 
 def test_override_ignores_none_and_applies_values():
@@ -395,6 +450,7 @@ def test_unknown_preset_lists_alternatives():
         ("resample_mm", float("nan")),
         ("mask_smooth_mm", -1),
         ("surface_smooth_iters", -1),
+        ("post_surface_smooth_iters", -1),
         ("simplify_error_mm", float("inf")),
     ],
 )
@@ -403,7 +459,9 @@ def test_invalid_presets_are_rejected_before_volume_loading(field, value, monkey
     monkeypatch.setattr(
         pipeline_mod.volume_mod,
         "load",
-        lambda _candidate: pytest.fail("volume loading must not start for an invalid preset"),
+        lambda _candidate: pytest.fail(
+            "volume loading must not start for an invalid preset"
+        ),
     )
 
     with pytest.raises(ValueError):
@@ -414,13 +472,28 @@ def test_validate_does_not_repair_the_mesh_it_measures(tmp_path):
     """A validator must not silently fill an open input mesh."""
 
     # An open box: five faces of a cube, one side missing.
-    v = [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
-         [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]]
-    f = [[0, 2, 1], [0, 3, 2],  # bottom
-         [4, 5, 6], [4, 6, 7],  # top
-         [0, 1, 5], [0, 5, 4],  # front
-         [1, 2, 6], [1, 6, 5],  # right
-         [2, 3, 7], [2, 7, 6]]  # back  (left face omitted)
+    v = [
+        [0, 0, 0],
+        [1, 0, 0],
+        [1, 1, 0],
+        [0, 1, 0],
+        [0, 0, 1],
+        [1, 0, 1],
+        [1, 1, 1],
+        [0, 1, 1],
+    ]
+    f = [
+        [0, 2, 1],
+        [0, 3, 2],  # bottom
+        [4, 5, 6],
+        [4, 6, 7],  # top
+        [0, 1, 5],
+        [0, 5, 4],  # front
+        [1, 2, 6],
+        [1, 6, 5],  # right
+        [2, 3, 7],
+        [2, 7, 6],
+    ]  # back  (left face omitted)
     p = str(tmp_path / "openbox.stl")
     write(p, (np.asarray(v, dtype=float), np.asarray(f, dtype=np.int32)))
 

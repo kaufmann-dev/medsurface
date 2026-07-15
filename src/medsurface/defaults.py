@@ -12,6 +12,11 @@ DEFAULT_LABELMAP_MASK_SMOOTH_MM = 0.8
 #: Fixed-force topology-preserving cleanup for external labelmap surfaces.
 DEFAULT_LABELMAP_SURFACE_SMOOTH_ITERS = 20
 
+#: External labelmaps are already regularized in physical space before meshing,
+#: so their default finishing pass does not need additional post-simplification
+#: relaxation. Users can enable it explicitly for unusually faceted outputs.
+DEFAULT_LABELMAP_POST_SURFACE_SMOOTH_ITERS = 0
+
 #: Recursive Gaussian smoothing requires at least four samples per processed
 #: dimension. The shared input contract enforces this from image headers before
 #: pixel data are loaded.

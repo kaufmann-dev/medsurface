@@ -129,7 +129,9 @@ def _quality(*, valid: bool = True) -> dict:
     }
 
 
-def _convert_result(output: str, *, warnings_: list[str] | None = None, quality: dict | None = None):
+def _convert_result(
+    output: str, *, warnings_: list[str] | None = None, quality: dict | None = None
+):
     return SimpleNamespace(
         output_path=output,
         triangles=1200,
@@ -145,7 +147,9 @@ def _convert_result(output: str, *, warnings_: list[str] | None = None, quality:
     )
 
 
-def _merge_result(output: str, *, warnings_: list[str] | None = None, quality: dict | None = None):
+def _merge_result(
+    output: str, *, warnings_: list[str] | None = None, quality: dict | None = None
+):
     return SimpleNamespace(
         output_path=output,
         triangles=1400,
@@ -208,7 +212,15 @@ def test_root_command_without_arguments_is_lightweight_help():
     assert result.stderr == ""
     assert "\x1b" not in result.stdout
     assert "Usage: medsurface [OPTIONS] [COMMAND]" in result.stdout
-    for command in ("list", "presets", "convert", "merge", "validate", "repair", "labelmap"):
+    for command in (
+        "list",
+        "presets",
+        "convert",
+        "merge",
+        "validate",
+        "repair",
+        "labelmap",
+    ):
         assert command in result.stdout
 
 
@@ -324,6 +336,8 @@ def test_surface_help_describes_both_independent_smoothing_stages():
         assert "Gaussian sigma" in normalized
         assert "--mesh-smooth-iters" in normalized
         assert "surface relaxation iterations" in normalized
+        assert "--post-mesh-smooth-" in normalized
+        assert "after simplification" in normalized
         assert "--smooth-mm" not in normalized
         assert "--smooth-iters" not in normalized
         assert "--smooth-force" not in normalized
@@ -341,6 +355,7 @@ def test_merge_help_describes_shared_processing_options():
         ("--min-island-mm3", "Drop blobs smaller"),
         ("--mask-smooth-mm", "Gaussian sigma"),
         ("--mesh-smooth-iters", "surface relaxation iterations"),
+        ("--post-mesh-smooth-", "after simplification"),
     ):
         assert option in normalized
         assert description_start in normalized
@@ -417,7 +432,9 @@ def test_progress_display_has_plain_redirected_fallback_and_live_elapsed_time():
         highlight=False,
         markup=False,
     )
-    with cli._ProgressDisplay(True, "Starting [literal] ...", plain_console) as progress:
+    with cli._ProgressDisplay(
+        True, "Starting [literal] ...", plain_console
+    ) as progress:
         progress.log("segment [literal] ...")
         progress.log("  segment  1.2s")
 
@@ -441,7 +458,10 @@ def test_progress_display_has_plain_redirected_fallback_and_live_elapsed_time():
         progress.update("marching cubes ...")
         assert progress.interactive
         assert progress.progress is not None
-        assert any(isinstance(column, cli.TimeElapsedColumn) for column in progress.progress.columns)
+        assert any(
+            isinstance(column, cli.TimeElapsedColumn)
+            for column in progress.progress.columns
+        )
         assert progress.progress.tasks[0].description == "marching cubes ..."
 
 
@@ -563,7 +583,9 @@ def test_list_json_uses_unique_id_and_plain_stdout(tmp_path, monkeypatch):
     ]
     monkeypatch.setattr(cli, "_discover", lambda _root: found)
 
-    result = runner.invoke(cli.app, ["list", str(tmp_path), "--json"], prog_name="medsurface")
+    result = runner.invoke(
+        cli.app, ["list", str(tmp_path), "--json"], prog_name="medsurface"
+    )
 
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
@@ -656,14 +678,17 @@ def test_list_file_volume_omits_unavailable_optional_details():
 
 
 def test_detail_block_omits_empty_values():
-    assert cli._detail_block(
-        [
-            ("None", None),
-            ("Empty", ""),
-            ("Whitespace", "  "),
-            ("Value", "CT"),
-        ]
-    ) == "Value: CT"
+    assert (
+        cli._detail_block(
+            [
+                ("None", None),
+                ("Empty", ""),
+                ("Whitespace", "  "),
+                ("Value", "CT"),
+            ]
+        )
+        == "Value: CT"
+    )
 
 
 def test_list_explains_why_mixed_dicom_modalities_have_no_default(
@@ -684,7 +709,9 @@ def test_list_explains_why_mixed_dicom_modalities_have_no_default(
     assert "Choose a volume with:  " + expected in result.stdout
 
 
-def test_discovery_warnings_are_deduplicated_and_do_not_corrupt_json(tmp_path, monkeypatch):
+def test_discovery_warnings_are_deduplicated_and_do_not_corrupt_json(
+    tmp_path, monkeypatch
+):
     from medsurface import catalog
 
     def fake_discover(_root):
@@ -694,7 +721,9 @@ def test_discovery_warnings_are_deduplicated_and_do_not_corrupt_json(tmp_path, m
         return [_candidate()]
 
     monkeypatch.setattr(catalog, "discover", fake_discover)
-    result = runner.invoke(cli.app, ["list", str(tmp_path), "--json"], prog_name="medsurface")
+    result = runner.invoke(
+        cli.app, ["list", str(tmp_path), "--json"], prog_name="medsurface"
+    )
 
     assert result.exit_code == 0
     assert json.loads(result.stdout)[0]["id"] == 1
@@ -765,9 +794,11 @@ def test_presets_renders_tissue_table_without_ansi():
     assert "bone" in result.stdout
     assert "mask" in result.stdout
     assert "smooth off" in result.stdout
-    assert "surface" in result.stdout
-    assert "smooth 60 iter" in result.stdout
-    assert "smooth 35 iter" in result.stdout
+    assert "pre-mesh" in result.stdout
+    assert "post-mesh" in result.stdout
+    assert "smooth 20 iter" in result.stdout
+    assert "smooth 40" in result.stdout
+    assert "smooth 25 iter" in result.stdout
     assert "smooth 10 iter" in result.stdout
     assert "\x1b" not in result.stdout
 
@@ -817,6 +848,8 @@ def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
             "17",
             "--simplify-error-mm",
             "0.18",
+            "--post-mesh-smooth-iters",
+            "19",
             "--no-cap",
             "--allow-large-volume",
             "--json",
@@ -837,6 +870,7 @@ def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
     assert captured["preset"].mask_smooth_mm == pytest.approx(0.9)
     assert captured["preset"].surface_smooth_iters == 17
     assert captured["preset"].simplify_error_mm == pytest.approx(0.18)
+    assert captured["preset"].post_surface_smooth_iters == 19
     assert not captured["preset"].keep_largest_island
     assert not captured["preset"].keep_largest_component
     assert captured["threshold"] == "auto"
@@ -895,7 +929,9 @@ def test_valid_quality_output_omits_empty_problems_panel():
     assert "problems" not in rendered.casefold()
 
 
-def test_convert_without_selector_keeps_dicom_best_stack_selection(tmp_path, monkeypatch):
+def test_convert_without_selector_keeps_dicom_best_stack_selection(
+    tmp_path, monkeypatch
+):
     coarse = _candidate(row_id=1, uid="1.2.3", description="coarse")
     fine = _candidate(row_id=2, uid="1.2.4", description="fine")
     assert coarse.dicom is not None and fine.dicom is not None
@@ -944,7 +980,10 @@ def test_invalid_threshold_is_exit_two_before_discovery(tmp_path, monkeypatch):
     "argv,option",
     [
         (["convert", "INPUT", "-o", "out.stl", "--median-mm", "-1"], "--median-mm"),
-        (["convert", "INPUT", "-o", "out.stl", "--resample-mm", "nan"], "--resample-mm"),
+        (
+            ["convert", "INPUT", "-o", "out.stl", "--resample-mm", "nan"],
+            "--resample-mm",
+        ),
         (
             ["convert", "INPUT", "-o", "out.stl", "--mask-smooth-mm", "-1"],
             "--mask-smooth-mm",
@@ -953,9 +992,26 @@ def test_invalid_threshold_is_exit_two_before_discovery(tmp_path, monkeypatch):
             ["convert", "INPUT", "-o", "out.stl", "--mesh-smooth-iters", "-1"],
             "--mesh-smooth-iters",
         ),
+        (
+            [
+                "convert",
+                "INPUT",
+                "-o",
+                "out.stl",
+                "--post-mesh-smooth-iters",
+                "-1",
+            ],
+            "--post-mesh-smooth-iters",
+        ),
         (["merge", "INPUT", "MOVING", "-o", "out.stl", "--grid-mm", "0"], "--grid-mm"),
-        (["merge", "INPUT", "MOVING", "-o", "out.stl", "--grid-mm", "inf"], "--grid-mm"),
-        (["merge", "INPUT", "MOVING", "-o", "out.stl", "--opening-mm", "-0.1"], "--opening-mm"),
+        (
+            ["merge", "INPUT", "MOVING", "-o", "out.stl", "--grid-mm", "inf"],
+            "--grid-mm",
+        ),
+        (
+            ["merge", "INPUT", "MOVING", "-o", "out.stl", "--opening-mm", "-0.1"],
+            "--opening-mm",
+        ),
     ],
 )
 def test_invalid_processing_numbers_are_usage_errors_before_discovery(
@@ -964,13 +1020,19 @@ def test_invalid_processing_numbers_are_usage_errors_before_discovery(
     moving = tmp_path / "moving"
     moving.mkdir()
     resolved = [
-        str(tmp_path) if value == "INPUT" else str(moving) if value == "MOVING" else value
+        str(tmp_path)
+        if value == "INPUT"
+        else str(moving)
+        if value == "MOVING"
+        else value
         for value in argv
     ]
     monkeypatch.setattr(
         cli,
         "_discover",
-        lambda _root: pytest.fail("discovery should not run for invalid processing options"),
+        lambda _root: pytest.fail(
+            "discovery should not run for invalid processing options"
+        ),
     )
 
     result = runner.invoke(cli.app, resolved, prog_name="medsurface")
@@ -1051,7 +1113,9 @@ def test_convert_rejects_report_aliases_before_processing(tmp_path, monkeypatch)
     monkeypatch.setattr(
         pipeline,
         "convert",
-        lambda **_kwargs: pytest.fail("conversion must not start for a colliding report path"),
+        lambda **_kwargs: pytest.fail(
+            "conversion must not start for a colliding report path"
+        ),
     )
 
     result = runner.invoke(
@@ -1070,7 +1134,9 @@ def test_convert_rejects_report_overwriting_a_detached_payload(tmp_path, monkeyp
     import SimpleITK as sitk
 
     source = tmp_path / "scan.mhd"
-    sitk.WriteImage(sitk.GetImageFromArray(np.ones((8, 8, 8), dtype=np.int16)), str(source))
+    sitk.WriteImage(
+        sitk.GetImageFromArray(np.ones((8, 8, 8), dtype=np.int16)), str(source)
+    )
     candidate = cli._discover(source)[0]
     assert isinstance(candidate.source, FileSource)
     payload = candidate.source.payload_paths[0]
@@ -1081,12 +1147,21 @@ def test_convert_rejects_report_overwriting_a_detached_payload(tmp_path, monkeyp
     monkeypatch.setattr(
         pipeline,
         "convert",
-        lambda **_kwargs: pytest.fail("conversion must not start for a colliding payload"),
+        lambda **_kwargs: pytest.fail(
+            "conversion must not start for a colliding payload"
+        ),
     )
 
     result = runner.invoke(
         cli.app,
-        ["convert", str(source), "-o", str(tmp_path / "out.stl"), "--json", str(payload)],
+        [
+            "convert",
+            str(source),
+            "-o",
+            str(tmp_path / "out.stl"),
+            "--json",
+            str(payload),
+        ],
         prog_name="medsurface",
     )
 
@@ -1095,7 +1170,9 @@ def test_convert_rejects_report_overwriting_a_detached_payload(tmp_path, monkeyp
     assert payload.read_bytes() == original
 
 
-def test_convert_rejects_one_path_for_mesh_and_json_before_processing(tmp_path, monkeypatch):
+def test_convert_rejects_one_path_for_mesh_and_json_before_processing(
+    tmp_path, monkeypatch
+):
     chosen = _candidate()
     destination = tmp_path / "out.stl"
     monkeypatch.setattr(cli, "_discover", lambda _root: [chosen])
@@ -1104,7 +1181,9 @@ def test_convert_rejects_one_path_for_mesh_and_json_before_processing(tmp_path, 
     monkeypatch.setattr(
         pipeline,
         "convert",
-        lambda **_kwargs: pytest.fail("conversion must not start for colliding outputs"),
+        lambda **_kwargs: pytest.fail(
+            "conversion must not start for colliding outputs"
+        ),
     )
 
     result = runner.invoke(
@@ -1167,7 +1246,9 @@ def test_labelmap_convert_accepts_surface_flags_and_writes_json(tmp_path, monkey
     output = tmp_path / "surface.stl"
     json_file = tmp_path / "result.json"
     captured = {}
-    monkeypatch.setattr(cli, "_select_labelmap", lambda _path, _role=None: (chosen, [chosen]))
+    monkeypatch.setattr(
+        cli, "_select_labelmap", lambda _path, _role=None: (chosen, [chosen])
+    )
 
     from medsurface import labelmap as labelmap_mod
 
@@ -1196,6 +1277,8 @@ def test_labelmap_convert_accepts_surface_flags_and_writes_json(tmp_path, monkey
             "17",
             "--simplify-error-mm",
             "0.18",
+            "--post-mesh-smooth-iters",
+            "19",
             "--no-cap",
             "--allow-large-volume",
             "--json",
@@ -1213,6 +1296,7 @@ def test_labelmap_convert_accepts_surface_flags_and_writes_json(tmp_path, monkey
     assert captured["mask_smooth_mm"] == pytest.approx(0.9)
     assert captured["surface_smooth_iters"] == 17
     assert captured["simplify_error_mm"] == pytest.approx(0.18)
+    assert captured["post_surface_smooth_iters"] == 19
     assert not captured["cap_field_of_view"]
     assert captured["allow_large_volume"]
     payload = json.loads(json_file.read_text())
@@ -1264,6 +1348,8 @@ def test_labelmap_merge_accepts_fusion_flags_and_writes_json(tmp_path, monkeypat
             "17",
             "--simplify-error-mm",
             "0.19",
+            "--post-mesh-smooth-iters",
+            "19",
             "--force",
             "--allow-large-volume",
             "--json",
@@ -1281,6 +1367,7 @@ def test_labelmap_merge_accepts_fusion_flags_and_writes_json(tmp_path, monkeypat
     assert captured["grid_mm"] == pytest.approx(0.7)
     assert captured["mask_smooth_mm"] == pytest.approx(0.9)
     assert captured["surface_smooth_iters"] == 17
+    assert captured["post_surface_smooth_iters"] == 19
     assert captured["force"]
     assert captured["allow_large_volume"]
     payload = json.loads(json_file.read_text())
@@ -1293,26 +1380,58 @@ def test_labelmap_merge_accepts_fusion_flags_and_writes_json(tmp_path, monkeypat
     [
         (
             [
-                "labelmap", "convert", "INPUT", "-o", "out.stl",
-                "--mask-smooth-mm", "-1",
+                "labelmap",
+                "convert",
+                "INPUT",
+                "-o",
+                "out.stl",
+                "--mask-smooth-mm",
+                "-1",
             ],
             "--mask-smooth-mm",
         ),
         (
             [
-                "labelmap", "merge", "INPUT", "MOVING", "-o", "out.stl",
-                "--mask-smooth-mm", "nan",
+                "labelmap",
+                "merge",
+                "INPUT",
+                "MOVING",
+                "-o",
+                "out.stl",
+                "--mask-smooth-mm",
+                "nan",
             ],
             "--mask-smooth-mm",
         ),
         (
             [
-                "labelmap", "merge", "INPUT", "MOVING", "-o", "out.stl",
-                "--mesh-smooth-iters", "-1",
+                "labelmap",
+                "merge",
+                "INPUT",
+                "MOVING",
+                "-o",
+                "out.stl",
+                "--mesh-smooth-iters",
+                "-1",
             ],
             "--mesh-smooth-iters",
         ),
-        (["labelmap", "merge", "INPUT", "MOVING", "-o", "out.stl", "--grid-mm", "0"], "--grid-mm"),
+        (
+            [
+                "labelmap",
+                "convert",
+                "INPUT",
+                "-o",
+                "out.stl",
+                "--post-mesh-smooth-iters",
+                "-1",
+            ],
+            "--post-mesh-smooth-iters",
+        ),
+        (
+            ["labelmap", "merge", "INPUT", "MOVING", "-o", "out.stl", "--grid-mm", "0"],
+            "--grid-mm",
+        ),
     ],
 )
 def test_invalid_labelmap_processing_options_fail_before_discovery(
@@ -1435,6 +1554,8 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
             "17",
             "--simplify-error-mm",
             "0.2",
+            "--post-mesh-smooth-iters",
+            "19",
             "--force",
             "--allow-large-volume",
             "--json",
@@ -1457,6 +1578,7 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
     assert captured["mask_smooth_mm"] == pytest.approx(0.4)
     assert captured["surface_smooth_iters"] == 17
     assert captured["simplify_error_mm"] == pytest.approx(0.2)
+    assert captured["post_surface_smooth_iters"] == 19
     assert captured["force"]
     assert captured["allow_large_volume"]
     payload = json.loads(json_file.read_text())
@@ -1496,7 +1618,9 @@ def test_merge_rejects_json_overwriting_a_dicom_instance(tmp_path, monkeypatch):
     monkeypatch.setattr(
         merge_mod,
         "merge",
-        lambda **_kwargs: pytest.fail("merge must not start for a colliding report path"),
+        lambda **_kwargs: pytest.fail(
+            "merge must not start for a colliding report path"
+        ),
     )
 
     result = runner.invoke(

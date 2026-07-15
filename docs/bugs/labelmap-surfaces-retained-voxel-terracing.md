@@ -75,3 +75,15 @@ commands now expose the same independent `--mask-smooth-mm` and
 `--mesh-smooth-iters` controls. Labelmaps retain the 0.8 mm plus 20-iteration
 defaults that fixed the reported terracing. Normal presets keep mask smoothing
 off and restore their topology-preserving 60/10/35/60 mesh-relaxation defaults.
+
+## Follow-up: explicit post-simplification relaxation
+
+Revised: 2026-07-15
+
+Baseline commit: `954db0af47a6029a4ce9506e4ead03f0bb3cd970`
+
+All four workflows now expose `--post-mesh-smooth-iters` independently of mask
+smoothing and pre-simplification `--mesh-smooth-iters`. Labelmaps keep the
+empirically verified 0.8 mm mask, 20 pre, and 0 post defaults. Normal presets
+split their historical totals around simplification so the final pass can
+remove facets introduced by triangle reduction.

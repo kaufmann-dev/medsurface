@@ -113,8 +113,8 @@ program that produced the segmentation.
    cubes, and transform it into the input's SimpleITK physical coordinates,
    reversing face order when that affine contains a reflection.
 6. Apply fixed light surface relaxation, select surface components, optionally
-   simplify, validate the mesh in memory, write and validate a temporary file,
-   then atomically publish it.
+   simplify, apply optional final surface relaxation, validate the mesh in
+   memory, write and validate a temporary file, then atomically publish it.
 
 The output is normally a closed surface because the mask is padded with
 background before extraction. When anatomy touches the scan boundary, the cap is
@@ -129,8 +129,8 @@ flat and a warning explains that missing anatomy was not recovered.
    Gaussian, pad field-of-view boundaries, extract the 0.5 isosurface, and
    transform it into the labelmap's physical coordinates.
 4. Optionally apply intersection-safe surface relaxation, retain every
-   surviving surface component, optionally simplify, validate, and atomically
-   publish.
+   surviving surface component, optionally simplify and apply final relaxation,
+   validate, and atomically publish.
 
 It therefore skips threshold selection, intensity segmentation, morphology,
 mask-island removal, and label interpretation. A binary per-structure mask and
@@ -141,11 +141,11 @@ dependencies.
 Mask smoothing uses SimpleITK's recursive Gaussian with sigma in physical
 millimetres for every conversion and merge path. Every input axis must contain
 at least four voxels regardless of `--mask-smooth-mm` and
-`--mesh-smooth-iters`; there is no alternate smoothing algorithm for smaller
-inputs. The 0.5 isovalue keeps a straight binary boundary centered, but curved
-boundaries and features near the sigma can move, merge, or disappear. Commands
-warn whenever mask smoothing is enabled and record `mask_smooth_mm` and
-`surface_smooth_iters` separately in JSON provenance.
+the mesh-relaxation settings; there is no alternate smoothing algorithm for
+smaller inputs. The 0.5 isovalue keeps a straight binary boundary centered, but
+curved boundaries and features near the sigma can move, merge, or disappear.
+Commands warn whenever mask smoothing is enabled and record all three smoothing
+settings separately in JSON provenance.
 
 ## File-volume compatibility
 
@@ -261,12 +261,16 @@ to reduce voxel terracing. Both merge paths apply the same control only after
 occupancy fusion.
 
 `--mesh-smooth-iters` independently controls one MeshLib `relaxKeepVolume` pass
-at fixed force 0.1 before simplification. Normal preset defaults are 60 for bone
-and auto, 10 for teeth, and 35 for skin; external labelmaps use 20. Every
-requested iteration runs before self-intersection detection. If relaxation
-makes non-adjacent faces collide, vertices in those collision patches return to
-their pre-relaxation positions. The protected set grows by topological rings
-until the mesh is collision-free. `0` disables only surface relaxation.
+at fixed force 0.1 before simplification. Normal preset defaults are 20 for bone
+and auto, 10 for teeth, and 25 for skin; external labelmaps use 20.
+`--post-mesh-smooth-iters` controls the same relaxation after simplification;
+normal defaults are 40 for bone and auto, 0 for teeth, and 10 for skin, while
+external labelmaps default to 0. Every requested iteration runs before safety
+detection. If relaxation creates collisions or inconsistent winding, vertices
+in those patches return to their input positions. The protected set grows by
+topological rings until the mesh is clean. If that cannot succeed, the entire
+pass is discarded and its valid input mesh is retained. `0` disables only the
+corresponding relaxation pass.
 
 Simplification runs after smoothing and uses MeshLib's quadric edge-collapse
 implementation with `DecimateStrategy.MinimizeError`. `--simplify-error-mm`
@@ -285,9 +289,10 @@ This keeps simplification active outside small unsafe patches. If topology or
 manifold checks fail, an unsafe patch cannot be mapped, or all protection
 passes are exhausted, the valid pre-decimation mesh is retained and the command
 reports a warning. The resulting face count and MeshLib's introduced-error
-estimate are reported. Because simplification is the last geometry-changing
-stage, its estimate is not invalidated by later smoothing. Conversion and
-merging use this same finishing path. Labelmap commands retain independent
+estimate are reported. The estimate covers simplification only; it does not
+bound a later post-simplification relaxation pass. That pass reports its own RMS
+and maximum vertex displacement from the accepted simplified mesh. Conversion
+and merging use this same finishing path. Labelmap commands retain independent
 non-smoothing defaults: native grid, a 0.25 mm simplification limit, and every
 surviving surface component retained.
 

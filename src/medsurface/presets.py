@@ -32,11 +32,13 @@ class Preset:
     resample_mm: float = 0.0
     #: Gaussian sigma applied to the segmented occupancy mask in physical mm.
     mask_smooth_mm: float = 0.0
-    #: Topology-preserving MeshLib relaxation iterations after meshing.
+    #: Topology-preserving MeshLib relaxation iterations before simplification.
     surface_smooth_iters: int = 20
     #: MeshLib estimated surface-deviation/QEM limit in model millimetres.
     #: This is not a certified Hausdorff bound. 0 disables simplification.
     simplify_error_mm: float = 0.0
+    #: Final topology-preserving relaxation iterations after simplification.
+    post_surface_smooth_iters: int = 0
     keep_largest_component: bool = True
 
 
@@ -50,8 +52,9 @@ PRESETS: dict[str, Preset] = {
         closing_mm=2.4,
         min_island_mm3=50.0,
         mask_smooth_mm=0.0,
-        surface_smooth_iters=60,
+        surface_smooth_iters=20,
         simplify_error_mm=0.25,
+        post_surface_smooth_iters=40,
     ),
     "teeth": Preset(
         name="teeth",
@@ -66,6 +69,7 @@ PRESETS: dict[str, Preset] = {
         mask_smooth_mm=0.0,
         surface_smooth_iters=10,
         simplify_error_mm=0.12,
+        post_surface_smooth_iters=0,
     ),
     "skin": Preset(
         name="skin",
@@ -76,8 +80,9 @@ PRESETS: dict[str, Preset] = {
         closing_mm=3.2,
         min_island_mm3=500.0,
         mask_smooth_mm=0.0,
-        surface_smooth_iters=35,
+        surface_smooth_iters=25,
         simplify_error_mm=0.35,
+        post_surface_smooth_iters=10,
     ),
     "auto": Preset(
         name="auto",
@@ -88,8 +93,9 @@ PRESETS: dict[str, Preset] = {
         closing_mm=2.0,
         min_island_mm3=50.0,
         mask_smooth_mm=0.0,
-        surface_smooth_iters=60,
+        surface_smooth_iters=20,
         simplify_error_mm=0.25,
+        post_surface_smooth_iters=40,
     ),
 }
 
@@ -122,6 +128,11 @@ def validate(preset: Preset) -> None:
         or preset.surface_smooth_iters < 0
     ):
         raise ValueError("surface_smooth_iters must be a non-negative integer")
+    if (
+        not isinstance(preset.post_surface_smooth_iters, int)
+        or preset.post_surface_smooth_iters < 0
+    ):
+        raise ValueError("post_surface_smooth_iters must be a non-negative integer")
     for name, threshold_value in (
         ("threshold", preset.threshold),
         ("threshold_max", preset.threshold_max),

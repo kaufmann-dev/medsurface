@@ -17,10 +17,17 @@ from .defaults import SUPPORTED_MESH_EXTENSIONS
 @dataclass(frozen=True)
 class SmoothingSafeguard:
     requested_iterations: int
+    accepted: bool
     initial_self_intersecting_faces: int
+    remaining_self_intersecting_faces: int
+    initial_disoriented_faces: int
+    remaining_disoriented_faces: int
     protected_vertices: int
     protected_vertex_fraction: float
     expanded_rings: int
+    rms_displacement_mm: float
+    max_displacement_mm: float
+    rejection_reason: str | None
 
 
 @dataclass(frozen=True)
@@ -109,50 +116,139 @@ def selected_self_intersecting_faces(mesh: mrmeshpy.Mesh) -> np.ndarray:
     return selected
 
 
+def selected_disoriented_faces(mesh: mrmeshpy.Mesh) -> np.ndarray:
+    """Mark faces whose local orientation is inconsistent."""
+    selected = mrmeshpy.findDisorientedFaces(mesh)
+    return np.asarray(mrmeshnumpy.getNumpyBitSet(selected), dtype=bool)
+
+
+def _smoothing_displacement(
+    original_vertices: np.ndarray,
+    result_vertices: np.ndarray,
+) -> tuple[float, float]:
+    distances = np.linalg.norm(result_vertices - original_vertices, axis=1)
+    if not len(distances):
+        return 0.0, 0.0
+    return float(np.sqrt(np.mean(distances**2))), float(np.max(distances))
+
+
+def _smoothing_stats(
+    *,
+    requested_iterations: int,
+    accepted: bool,
+    initial_self_intersections: int,
+    remaining_self_intersections: int,
+    initial_disoriented: int,
+    remaining_disoriented: int,
+    protected: np.ndarray,
+    expanded_rings: int,
+    original_vertices: np.ndarray,
+    result_vertices: np.ndarray,
+    rejection_reason: str | None = None,
+) -> SmoothingSafeguard:
+    protected_count = int(np.count_nonzero(protected))
+    rms, maximum = _smoothing_displacement(original_vertices, result_vertices)
+    return SmoothingSafeguard(
+        requested_iterations=int(requested_iterations),
+        accepted=accepted,
+        initial_self_intersecting_faces=initial_self_intersections,
+        remaining_self_intersecting_faces=remaining_self_intersections,
+        initial_disoriented_faces=initial_disoriented,
+        remaining_disoriented_faces=remaining_disoriented,
+        protected_vertices=protected_count,
+        protected_vertex_fraction=(
+            float(protected_count / len(original_vertices))
+            if len(original_vertices)
+            else 0.0
+        ),
+        expanded_rings=expanded_rings,
+        rms_displacement_mm=rms,
+        max_displacement_mm=maximum,
+        rejection_reason=rejection_reason,
+    )
+
+
 def protect_smoothed_surface(
     original: mrmeshpy.Mesh,
     smoothed: mrmeshpy.Mesh,
     requested_iterations: int,
 ) -> tuple[mrmeshpy.Mesh, SmoothingSafeguard]:
-    """Keep full smoothing except where it makes non-adjacent faces collide."""
+    """Keep smoothing where it preserves intersections and face orientation."""
     original_verts, original_faces = to_arrays(original)
     smoothed_verts, smoothed_faces = to_arrays(smoothed)
     if not np.array_equal(original_faces, smoothed_faces):
         raise ValueError("smoothing changed mesh connectivity")
 
-    selected = selected_self_intersecting_faces(smoothed)
-    initial = int(np.count_nonzero(selected))
-    if initial == 0:
-        return smoothed, SmoothingSafeguard(
-            requested_iterations=int(requested_iterations),
-            initial_self_intersecting_faces=0,
-            protected_vertices=0,
-            protected_vertex_fraction=0.0,
+    colliding = selected_self_intersecting_faces(smoothed)
+    disoriented = selected_disoriented_faces(smoothed)
+    initial_intersections = int(np.count_nonzero(colliding))
+    initial_disoriented = int(np.count_nonzero(disoriented))
+    protected = np.zeros(len(original_verts), dtype=bool)
+    if not initial_intersections and not initial_disoriented:
+        return smoothed, _smoothing_stats(
+            requested_iterations=requested_iterations,
+            accepted=True,
+            initial_self_intersections=0,
+            remaining_self_intersections=0,
+            initial_disoriented=0,
+            remaining_disoriented=0,
+            protected=protected,
             expanded_rings=0,
+            original_vertices=original_verts,
+            result_vertices=smoothed_verts,
         )
 
-    protected = np.zeros(len(original_verts), dtype=bool)
-    protected[np.unique(original_faces[selected])] = True
+    unsafe = np.logical_or(colliding, disoriented)
+    protected[np.unique(original_faces[unsafe])] = True
     rings = 0
     while True:
         candidate_verts = smoothed_verts.copy()
         candidate_verts[protected] = original_verts[protected]
         candidate = from_arrays(candidate_verts, original_faces)
-        if not selected_self_intersecting_faces(candidate).any():
-            count = int(np.count_nonzero(protected))
-            return candidate, SmoothingSafeguard(
-                requested_iterations=int(requested_iterations),
-                initial_self_intersecting_faces=initial,
-                protected_vertices=count,
-                protected_vertex_fraction=float(count / len(original_verts)),
+        remaining_colliding = selected_self_intersecting_faces(candidate)
+        remaining_disoriented_faces = selected_disoriented_faces(candidate)
+        remaining_intersections = int(np.count_nonzero(remaining_colliding))
+        remaining_disoriented = int(np.count_nonzero(remaining_disoriented_faces))
+        if not remaining_intersections and not remaining_disoriented:
+            return candidate, _smoothing_stats(
+                requested_iterations=requested_iterations,
+                accepted=True,
+                initial_self_intersections=initial_intersections,
+                remaining_self_intersections=0,
+                initial_disoriented=initial_disoriented,
+                remaining_disoriented=0,
+                protected=protected,
                 expanded_rings=rings,
+                original_vertices=original_verts,
+                result_vertices=candidate_verts,
             )
 
         incident_faces = protected[original_faces].any(axis=1)
         expanded = protected.copy()
         expanded[np.unique(original_faces[incident_faces])] = True
         if np.array_equal(expanded, protected):
-            raise ValueError("could not produce an intersection-free smoothed surface")
+            reasons = []
+            if remaining_intersections:
+                reasons.append(
+                    "%d self-intersecting face(s) remained" % remaining_intersections
+                )
+            if remaining_disoriented:
+                reasons.append(
+                    "%d disoriented face(s) remained" % remaining_disoriented
+                )
+            return original, _smoothing_stats(
+                requested_iterations=requested_iterations,
+                accepted=False,
+                initial_self_intersections=initial_intersections,
+                remaining_self_intersections=remaining_intersections,
+                initial_disoriented=initial_disoriented,
+                remaining_disoriented=remaining_disoriented,
+                protected=protected,
+                expanded_rings=rings,
+                original_vertices=original_verts,
+                result_vertices=original_verts,
+                rejection_reason=" and ".join(reasons),
+            )
         protected = expanded
         rings += 1
 
@@ -163,12 +259,18 @@ def smooth_safely(
     force: float,
 ) -> tuple[mrmeshpy.Mesh, SmoothingSafeguard]:
     if iterations <= 0:
-        return mesh, SmoothingSafeguard(
-            requested_iterations=int(iterations),
-            initial_self_intersecting_faces=0,
-            protected_vertices=0,
-            protected_vertex_fraction=0.0,
+        vertices = to_arrays(mesh)[0]
+        return mesh, _smoothing_stats(
+            requested_iterations=iterations,
+            accepted=True,
+            initial_self_intersections=0,
+            remaining_self_intersections=0,
+            initial_disoriented=0,
+            remaining_disoriented=0,
+            protected=np.zeros(len(vertices), dtype=bool),
             expanded_rings=0,
+            original_vertices=vertices,
+            result_vertices=vertices,
         )
     return protect_smoothed_surface(mesh, smooth(mesh, iterations, force), iterations)
 
@@ -246,8 +348,7 @@ def _meshlib_self_intersecting_face_ids(mesh: mrmeshpy.Mesh) -> np.ndarray:
 
 
 def _meshlib_disoriented_face_ids(mesh: mrmeshpy.Mesh) -> np.ndarray:
-    selected = mrmeshpy.findDisorientedFaces(mesh)
-    return np.flatnonzero(mrmeshnumpy.getNumpyBitSet(selected))
+    return np.flatnonzero(selected_disoriented_faces(mesh))
 
 
 def _protect_decimation_face_neighborhood(
@@ -267,7 +368,9 @@ def _protect_decimation_face_neighborhood(
             )
             if projection.valid():
                 protected_faces.set(projection.proj.face)
-    mrmeshpy.expand(reference_mesh.topology, protected_faces, _DECIMATION_PROTECTION_RINGS)
+    mrmeshpy.expand(
+        reference_mesh.topology, protected_faces, _DECIMATION_PROTECTION_RINGS
+    )
 
 
 def decimate_safely(
@@ -306,8 +409,8 @@ def decimate_safely(
     candidate = mesh
 
     for attempt in range(_MAX_DECIMATION_REPAIR_ATTEMPTS + 1):
-        candidate, topology_before, topology_after, error_introduced_mm = _decimate_candidate(
-            mesh, simplify_error_mm, protected_faces
+        candidate, topology_before, topology_after, error_introduced_mm = (
+            _decimate_candidate(mesh, simplify_error_mm, protected_faces)
         )
         after_defects = count_defects(candidate)
         reasons = []
@@ -366,9 +469,7 @@ def decimate_safely(
         repair_attempts += 1
 
     accepted = (
-        not reasons
-        and remaining_intersections == 0
-        and remaining_disoriented == 0
+        not reasons and remaining_intersections == 0 and remaining_disoriented == 0
     )
     result = candidate if accepted else mesh
     protected_count = int(protected_faces.count())
@@ -434,7 +535,9 @@ def write_validated(mesh: mrmeshpy.Mesh, path: str) -> dict:
     vertices, faces = to_arrays(mesh)
     in_memory = validate.validate_arrays(vertices, faces)
     if not in_memory["valid"]:
-        raise ValueError("in-memory output mesh is invalid: %s" % "; ".join(in_memory["problems"]))
+        raise ValueError(
+            "in-memory output mesh is invalid: %s" % "; ".join(in_memory["problems"])
+        )
 
     destination = os.path.abspath(path)
     parent = os.path.dirname(destination)
@@ -462,7 +565,10 @@ def write_validated(mesh: mrmeshpy.Mesh, path: str) -> dict:
 def bounds_mm(mesh: mrmeshpy.Mesh) -> tuple[float, ...]:
     bounds = mesh.computeBoundingBox()
     return (
-        float(bounds.min.x), float(bounds.max.x),
-        float(bounds.min.y), float(bounds.max.y),
-        float(bounds.min.z), float(bounds.max.z),
+        float(bounds.min.x),
+        float(bounds.max.x),
+        float(bounds.min.y),
+        float(bounds.max.y),
+        float(bounds.min.z),
+        float(bounds.max.z),
     )
