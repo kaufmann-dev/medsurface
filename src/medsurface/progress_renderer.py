@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import signal
 import sys
 import threading
 import time
@@ -15,6 +16,7 @@ from rich.text import Text
 
 
 def main() -> None:
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     initial = sys.argv[1] if len(sys.argv) > 1 else "Working ..."
     if sys.stdout.isatty() and os.environ.get("TERM", "").casefold() in {"dumb", "unknown"}:
         os.environ["TERM"] = "xterm-256color"

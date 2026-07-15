@@ -294,6 +294,12 @@ unverified-HU warnings appear before loading and processing rather than after an
 output has been written. Machine-readable `list --json`, `validate --json`, and
 `repair --json` suppress progress so stdout contains only JSON.
 
+Press `Ctrl+C` once to cancel a running command. `medsurface` clears the live
+progress display, cleans up its helper process, prints `Cancelled.`, and exits
+with status 130 without publishing an output. A native image or mesh operation
+may delay cancellation until it returns control to Python; repeated interrupts
+do not bypass cleanup.
+
 Numeric processing options reject non-finite and out-of-range values as usage
 errors. Unsupported mesh output extensions are rejected before discovery or
 image processing. Grid and resampling allocations are also bounded before the

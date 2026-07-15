@@ -6,6 +6,7 @@ import json
 import math
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -192,6 +193,10 @@ class _ProgressDisplay:
         return self
 
     def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        cancelled = _exc_type is KeyboardInterrupt
+        previous_sigint_handler = None
+        if cancelled:
+            previous_sigint_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
             if self.renderer is not None:
                 self._send("stop")
@@ -205,9 +210,15 @@ class _ProgressDisplay:
             if self.progress is not None:
                 self.progress.stop()
         finally:
-            if self._context_token is not None:
-                _active_progress.reset(self._context_token)
-                self._context_token = None
+            try:
+                if self._context_token is not None:
+                    _active_progress.reset(self._context_token)
+                    self._context_token = None
+                if cancelled:
+                    self.diagnostic_console.print(Text("Cancelled.", style="yellow"))
+            finally:
+                if previous_sigint_handler is not None:
+                    signal.signal(signal.SIGINT, previous_sigint_handler)
 
     def _print(self, message: str) -> None:
         self.console.print(Text(message, style="cyan"))
