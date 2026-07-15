@@ -47,3 +47,16 @@ topology-changing mask stage is enabled.
 Regression coverage verifies both options on all four command surfaces,
 independent enable/disable behavior, normal and labelmap defaults, stage order,
 validation, warnings, and provenance.
+
+## Follow-up: restore final mesh relaxation
+
+Revised: 2026-07-15
+
+Baseline commit: `954db0af47a6029a4ce9506e4ead03f0bb3cd970`
+
+The restored normal mesh-relaxation totals are again split around
+simplification: bone and auto use 20 iterations before and 40 after, skin uses
+25 before and 10 after, and teeth remains 10 before and 0 after. Keeping all
+iterations before simplification allowed quadric reduction to reintroduce
+visible facets. External labelmaps remain at 20 before and 0 after because their
+default physical mask smoothing already addresses voxel terracing.

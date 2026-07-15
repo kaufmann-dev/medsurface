@@ -147,26 +147,33 @@ def check_registration(result: RegistrationResult, force: bool = False) -> None:
     if result.shared_fov_mm3 < MIN_SHARED_FOV_MM3:
         problems.append(
             "the scans share only %.0f cm3 of imaged space (need %.0f)"
-            % (result.shared_fov_mm3 / 1000.0, MIN_SHARED_FOV_MM3 / 1000.0))
+            % (result.shared_fov_mm3 / 1000.0, MIN_SHARED_FOV_MM3 / 1000.0)
+        )
     if result.surface_overlap < MIN_SURFACE_OVERLAP:
         problems.append(
             "surfaces agree over only %.1f%% of the shared field of view "
             "(%.1f%% moving->fixed, %.1f%% fixed->moving; need %.0f%% both ways)"
-            % (100 * result.surface_overlap,
-               100 * result.overlap_moving_in_fixed,
-               100 * result.overlap_fixed_in_moving,
-               100 * MIN_SURFACE_OVERLAP))
+            % (
+                100 * result.surface_overlap,
+                100 * result.overlap_moving_in_fixed,
+                100 * result.overlap_fixed_in_moving,
+                100 * MIN_SURFACE_OVERLAP,
+            )
+        )
     if result.shared_fov_dice < MIN_SHARED_FOV_DICE:
         problems.append(
             "foreground agreement in the shared field of view is %.3f (need %.2f)"
-            % (result.shared_fov_dice, MIN_SHARED_FOV_DICE))
+            % (result.shared_fov_dice, MIN_SHARED_FOV_DICE)
+        )
 
     if not problems:
         return
     message = (
         "registration failed its quality gates, so the two scans probably do not "
-        "show the same anatomy:\n  - " + "\n  - ".join(problems)
-        + "\n" + result.summary()
+        "show the same anatomy:\n  - "
+        + "\n  - ".join(problems)
+        + "\n"
+        + result.summary()
     )
     if force:
         return
@@ -179,7 +186,9 @@ def _corners(image: sitk.Image) -> np.ndarray:
     for i in (0, size[0]):
         for j in (0, size[1]):
             for k in (0, size[2]):
-                pts.append(image.TransformIndexToPhysicalPoint((int(i), int(j), int(k))))
+                pts.append(
+                    image.TransformIndexToPhysicalPoint((int(i), int(j), int(k)))
+                )
     return np.asarray(pts, dtype=float)
 
 
@@ -195,12 +204,16 @@ def _common_grid(
     pts = np.vstack([_corners(fixed_mask), (rot @ _corners(moving_mask).T).T + trans])
     scaled = pts / grid_mm
     if not np.all(np.isfinite(scaled)):
-        raise MergeError("the fused grid coordinates overflow at %.4g mm; raise --grid-mm" % grid_mm)
+        raise MergeError(
+            "the fused grid coordinates overflow at %.4g mm; raise --grid-mm" % grid_mm
+        )
     lo_index = np.floor(scaled.min(0)) - 2
     hi_index = np.ceil(scaled.max(0)) + 2
     planned = hi_index - lo_index + 1
     if not np.all(np.isfinite(planned)):
-        raise MergeError("the fused grid is too large at %.4g mm; raise --grid-mm" % grid_mm)
+        raise MergeError(
+            "the fused grid is too large at %.4g mm; raise --grid-mm" % grid_mm
+        )
     if not allow_large_volume and np.any(planned > MAX_VOXELS):
         raise MergeError(
             "the fused grid is too large at %.4g mm; raise --grid-mm or pass "
@@ -212,8 +225,7 @@ def _common_grid(
         raise MergeError(
             "the fused grid would hold %s voxels at %.4g mm, above the default "
             "limit of %s; raise --grid-mm or pass --allow-large-volume to attempt "
-            "it (this may exhaust memory)"
-            % (f"{voxels:,}", grid_mm, f"{MAX_VOXELS:,}")
+            "it (this may exhaust memory)" % (f"{voxels:,}", grid_mm, f"{MAX_VOXELS:,}")
         )
     return size, lo_index * grid_mm
 
@@ -381,6 +393,7 @@ def fuse_masks(
         poly,
         surface_smooth_iters=settings.surface_smooth_iters,
         simplify_error_mm=settings.simplify_error_mm,
+        post_surface_smooth_iters=settings.post_surface_smooth_iters,
         keep_largest_component=settings.keep_largest_component,
         step=step,
         log=say,
@@ -425,6 +438,7 @@ def merge(
     mask_smooth_mm: float | None = None,
     surface_smooth_iters: int | None = None,
     simplify_error_mm: float | None = None,
+    post_surface_smooth_iters: int | None = None,
     force: bool = False,
     allow_large_volume: bool = False,
     log: Logger | None = None,
@@ -438,6 +452,7 @@ def merge(
         mask_smooth_mm=mask_smooth_mm,
         surface_smooth_iters=surface_smooth_iters,
         simplify_error_mm=simplify_error_mm,
+        post_surface_smooth_iters=post_surface_smooth_iters,
     )
     validate_preset(preset)
     started = time.time()
@@ -505,12 +520,23 @@ def merge(
     )
     moving_value, moving_source = step(
         "resolve moving threshold",
-        lambda: pipeline.resolve_threshold(moving_volume.image, preset, moving_threshold),
+        lambda: pipeline.resolve_threshold(
+            moving_volume.image, preset, moving_threshold
+        ),
     )
-    say("threshold: fixed %.1f (%s), moving %.1f (%s)" % (fixed_value, fixed_source, moving_value, moving_source))
+    say(
+        "threshold: fixed %.1f (%s), moving %.1f (%s)"
+        % (fixed_value, fixed_source, moving_value, moving_source)
+    )
 
-    fixed_mask = step("segment fixed", lambda: pipeline.build_mask(fixed_volume.image, preset, fixed_value))
-    moving_mask = step("segment moving", lambda: pipeline.build_mask(moving_volume.image, preset, moving_value))
+    fixed_mask = step(
+        "segment fixed",
+        lambda: pipeline.build_mask(fixed_volume.image, preset, fixed_value),
+    )
+    moving_mask = step(
+        "segment moving",
+        lambda: pipeline.build_mask(moving_volume.image, preset, moving_value),
+    )
     fused = fuse_masks(
         fixed_mask,
         moving_mask,
@@ -526,7 +552,9 @@ def merge(
 
     provenance = {
         "fixed": pipeline.source_provenance(fixed_volume, fixed_value, fixed_source),
-        "moving": pipeline.source_provenance(moving_volume, moving_value, moving_source),
+        "moving": pipeline.source_provenance(
+            moving_volume, moving_value, moving_source
+        ),
         "preset": asdict(preset),
         "grid_mm": grid_mm,
         "surface_finishing": fused.surface_finishing,

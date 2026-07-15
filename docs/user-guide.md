@@ -99,12 +99,12 @@ remain nested under `dicom`.
 A preset supplies the segmentation and mesh-finishing defaults. List the
 installed values at any time with `medsurface presets`.
 
-| preset  | use it for                                              | threshold | median | closing | island floor | mask smoothing | mesh smoothing | simplify error |
-| ------- | ------------------------------------------------------- | --------: | -----: | ------: | -----------: | -------------: | -------------: | -------------: |
-| `bone`  | General CT bone models                                  |    300 HU | 1.0 mm |  2.4 mm |       50 mm³ |            off |  60 iterations |        0.25 mm |
-| `teeth` | Enamel and dense dentin; keeps separate teeth           |  1,200 HU | 0.6 mm |  0.6 mm |        5 mm³ |            off |  10 iterations |        0.12 mm |
-| `skin`  | Outer skin surface from CT                              |   −300 HU | 1.4 mm |  3.2 mm |      500 mm³ |            off |  35 iterations |        0.35 mm |
-| `auto`  | MR, CBCT, ultrasound, or other uncalibrated intensities |      Otsu | 1.0 mm |  2.0 mm |       50 mm³ |            off |  60 iterations |        0.25 mm |
+| preset  | use it for                                              | threshold | median | closing | island floor | mask smoothing | pre-mesh smoothing | simplify error | post-mesh smoothing |
+| ------- | ------------------------------------------------------- | --------: | -----: | ------: | -----------: | -------------: | -----------------: | -------------: | ------------------: |
+| `bone`  | General CT bone models                                  |    300 HU | 1.0 mm |  2.4 mm |       50 mm³ |            off |      20 iterations |        0.25 mm |       40 iterations |
+| `teeth` | Enamel and dense dentin; keeps separate teeth           |  1,200 HU | 0.6 mm |  0.6 mm |        5 mm³ |            off |      10 iterations |        0.12 mm |                 off |
+| `skin`  | Outer skin surface from CT                              |   −300 HU | 1.4 mm |  3.2 mm |      500 mm³ |            off |      25 iterations |        0.35 mm |       10 iterations |
+| `auto`  | MR, CBCT, ultrasound, or other uncalibrated intensities |      Otsu | 1.0 mm |  2.0 mm |       50 mm³ |            off |      20 iterations |        0.25 mm |       40 iterations |
 
 Numeric thresholds are inclusive lower bounds. `auto` calculates a
 format-neutral Otsu threshold from the volume instead of assuming calibrated
@@ -115,14 +115,17 @@ Other inputs, derived CT without explicit units, inconsistent series, and
 ambiguous multienergy CT receive a warning. Use an intentional numeric
 `--threshold` or `--preset auto` when values are not calibrated HU.
 
-Every normal and labelmap conversion or merge exposes the same two independent
+Every normal and labelmap conversion or merge exposes the same three independent
 smoothing controls. `--mask-smooth-mm` applies a Gaussian to the segmented
 occupancy mask before meshing. It uses physical millimetres and does not depend
 on triangle density, but it can change topology: boundaries can move, gaps can
 close, and thin structures can disappear. `--mesh-smooth-iters` applies
-fixed-force, volume-preserving MeshLib relaxation after meshing. It preserves
-mesh connectivity and protects local vertices if relaxation would create
-self-intersections. Setting either value to `0` disables only that stage.
+fixed-force, volume-preserving MeshLib relaxation after meshing and before
+simplification. `--post-mesh-smooth-iters` applies the same guarded relaxation
+after simplification to soften facets created by triangle reduction. Both mesh
+passes preserve connectivity, protect local vertices against intersections and
+inconsistent winding, and retain their valid input surface if protection cannot
+produce a clean result. Setting any value to `0` disables only that stage.
 
 `teeth` keeps every mask island and surface component that survives its size
 floor. The other presets keep only the largest component. `--simplify-error-mm`
@@ -131,7 +134,9 @@ not a certified Hausdorff bound. `0` disables simplification. The resulting
 triangle count is an outcome, not a target. Simplification protects small
 source-surface neighborhoods when collapsing them would create
 self-intersections. If no candidate can preserve topology and mesh validity,
-the valid higher-resolution surface is retained with a warning.
+the valid higher-resolution surface is retained with a warning. The reported
+simplification error estimates only the simplification step; a later post-mesh
+pass reports its own RMS and maximum vertex displacement.
 
 ```sh
 medsurface convert scans/ --preset teeth -o teeth.stl
@@ -174,19 +179,21 @@ must contain at least four voxels regardless of the smoothing values.
 Directories, DICOM, selectors, presets, and structure-name flags are
 deliberately absent.
 Labelmaps have independent surface defaults: native grid, a `0.8 mm` Gaussian
-sigma applied in physical space before meshing, 20 surface-relaxation
-iterations, a `0.25 mm` simplification limit, and every surviving surface
-component retained. `--mask-smooth-mm 0` preserves the discrete mask topology;
-`--mesh-smooth-iters 0` independently disables surface relaxation. Setting
-`--simplify-error-mm 0` independently disables triangle reduction.
+sigma applied in physical space before meshing, 20 pre-simplification
+surface-relaxation iterations, a `0.25 mm` simplification limit, no
+post-simplification relaxation, and every surviving surface component retained.
+`--mask-smooth-mm 0` preserves the discrete mask topology;
+`--mesh-smooth-iters 0` disables pre-simplification relaxation;
+`--simplify-error-mm 0` disables triangle reduction; and
+`--post-mesh-smooth-iters 0` disables final relaxation.
 
 Physical smoothing is intentionally geometry-changing. It reduces voxel-scale
 terracing consistently even when marching cubes creates millions of triangles,
 but it can round boundaries, close narrow gaps, merge nearby regions, or erase
 structures near the configured scale. Every smoothed labelmap command warns
 about this tradeoff. Use `--mask-smooth-mm 0 --mesh-smooth-iters 0
---simplify-error-mm 0` for the most literal full-density surface supported by
-medsurface.
+--simplify-error-mm 0 --post-mesh-smooth-iters 0` for the most literal
+full-density surface supported by medsurface.
 
 TotalSegmentator is not installed or run by medsurface. Its default output is a
 directory containing one binary `.nii.gz` file per structure; pass any one of
@@ -309,16 +316,16 @@ normalize unsupported raw face configurations while loading; the report describe
 the imported mesh rather than exposing separate raw non-manifold or degenerate
 face counters. A failed self-intersection measurement is invalid.
 
-Before writing, conversion and merging guard surface relaxation against
-self-intersections and simplification against both self-intersections and
-inconsistent winding. The fixed relaxation runs every requested internal
-iteration; only vertices in collision neighborhoods retain their pre-relaxation
-positions. Simplification retries with unsafe source neighborhoods protected
-from collapse and retains the valid pre-simplification mesh if no safe compact
-result is possible. These safeguards are reported as warnings and recorded in
-JSON provenance when they are used. Occupancy-field smoothing happens before
-surface extraction and can change anatomy or topology even when the resulting
-mesh is structurally valid.
+Before writing, conversion and merging guard both mesh-relaxation passes and
+simplification against self-intersections and inconsistent winding. Relaxation
+runs every requested internal iteration; only vertices in unsafe neighborhoods
+retain their input positions, and the whole pass is discarded if local
+protection cannot make it clean. Simplification retries with unsafe source
+neighborhoods protected from collapse and retains the valid pre-simplification
+mesh if no safe compact result is possible. These safeguards are reported as
+warnings and recorded in JSON provenance when they are used. Occupancy-field
+smoothing happens before surface extraction and can change anatomy or topology
+even when the resulting mesh is structurally valid.
 
 These checks establish mesh structure, not anatomical correctness,
 manufacturability, dimensional accuracy, or fitness for a clinical purpose.

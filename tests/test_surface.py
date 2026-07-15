@@ -116,9 +116,15 @@ def test_index_to_physical_matches_simpleitk():
     img.SetOrigin((-13.0, 22.0, 5.5))
     theta = 0.37
     d = [
-        math.cos(theta), -math.sin(theta), 0.0,
-        math.sin(theta), math.cos(theta), 0.0,
-        0.0, 0.0, 1.0,
+        math.cos(theta),
+        -math.sin(theta),
+        0.0,
+        math.sin(theta),
+        math.cos(theta),
+        0.0,
+        0.0,
+        0.0,
+        1.0,
     ]
     img.SetDirection(d)
 
@@ -212,7 +218,11 @@ def test_safe_smoothing_leaves_a_clean_result_exactly_unchanged(solid_sphere):
     assert np.array_equal(guarded_faces, requested_faces)
     assert np.array_equal(guarded_verts, requested_verts)
     assert stats.initial_self_intersecting_faces == 0
+    assert stats.initial_disoriented_faces == 0
     assert stats.protected_vertices == 0
+    assert stats.accepted
+    assert stats.rms_displacement_mm > 0
+    assert stats.max_displacement_mm >= stats.rms_displacement_mm
 
 
 def test_smoothing_safeguard_changes_only_a_collision_neighborhood():
@@ -221,7 +231,7 @@ def test_smoothing_safeguard_changes_only_a_collision_neighborhood():
     original_verts, original_faces = concatenate(left, right)
 
     moved = original_verts.copy()
-    moved[len(left[0]):, 0] -= 0.4
+    moved[len(left[0]) :, 0] -= 0.4
     original = surface.from_arrays(original_verts, original_faces)
     intersecting = surface.from_arrays(moved, original_faces)
     assert surface.selected_self_intersecting_faces(intersecting).any()
@@ -233,9 +243,58 @@ def test_smoothing_safeguard_changes_only_a_collision_neighborhood():
     assert surface.count_defects(guarded) == surface.count_defects(original)
 
 
+def test_smoothing_safeguard_protects_a_disoriented_neighborhood(monkeypatch):
+    original_verts, faces = box()
+    moved = original_verts.copy()
+    moved[0, 0] += 0.25
+    original = surface.from_arrays(original_verts, faces)
+    requested = surface.from_arrays(moved, faces)
+
+    def selected(poly):
+        vertices, candidate_faces = surface.to_arrays(poly)
+        marked = np.zeros(len(candidate_faces), dtype=bool)
+        if not np.array_equal(vertices[0], original_verts[0]):
+            marked[0] = True
+        return marked
+
+    monkeypatch.setattr(surface, "selected_disoriented_faces", selected)
+
+    guarded, stats = surface.protect_smoothed_surface(original, requested, 10)
+
+    assert stats.accepted
+    assert stats.initial_disoriented_faces == 1
+    assert stats.remaining_disoriented_faces == 0
+    assert stats.protected_vertices > 0
+    assert not selected(guarded).any()
+
+
+def test_smoothing_safeguard_discards_an_unfixable_result(monkeypatch):
+    vertices, faces = box()
+    moved = vertices.copy()
+    moved[0, 0] += 0.25
+    original = surface.from_arrays(vertices, faces)
+    requested = surface.from_arrays(moved, faces)
+
+    def always_disoriented(poly):
+        marked = np.zeros(len(surface.to_arrays(poly)[1]), dtype=bool)
+        marked[0] = True
+        return marked
+
+    monkeypatch.setattr(surface, "selected_disoriented_faces", always_disoriented)
+
+    guarded, stats = surface.protect_smoothed_surface(original, requested, 10)
+
+    assert guarded is original
+    assert not stats.accepted
+    assert stats.remaining_disoriented_faces == 1
+    assert stats.rms_displacement_mm == 0
+    assert "disoriented" in stats.rejection_reason
+
+
 def test_meshlib_marks_both_faces_in_an_intersecting_pair():
     import meshlib.mrmeshnumpy as mrmeshnumpy
     import meshlib.mrmeshpy as mrmeshpy
+
     mesh = concatenate(
         sphere(subdivisions=2, radius=1.0),
         transformed(sphere(subdivisions=2, radius=1.0), translation=(1.6, 0.0, 0.0)),
@@ -299,7 +358,10 @@ def test_resampling_preserves_physical_placement(solid_sphere):
     assert grid.GetSpacing() == pytest.approx((1.0, 1.0, 1.0))
     # the resampled grid must fully contain the original extent
     for axis in range(3):
-        assert grid.GetSize()[axis] * 1.0 >= padded.GetSize()[axis] * padded.GetSpacing()[axis]
+        assert (
+            grid.GetSize()[axis] * 1.0
+            >= padded.GetSize()[axis] * padded.GetSpacing()[axis]
+        )
 
 
 @pytest.mark.parametrize("error_mm", [0.05, 0.1, 0.25])
@@ -324,7 +386,10 @@ def test_simplification_never_opens_a_closed_mesh(solid_sphere, tmp_path, error_
 def test_zero_simplification_error_is_a_noop(solid_sphere):
     image, _ = solid_sphere
     poly = _mesh(image, smooth_iters=5)
-    assert surface.decimate(poly, 0).topology.numValidFaces() == poly.topology.numValidFaces()
+    assert (
+        surface.decimate(poly, 0).topology.numValidFaces()
+        == poly.topology.numValidFaces()
+    )
 
 
 def test_decimation_preserves_genus(tmp_path):
@@ -349,7 +414,7 @@ def test_unsafe_decimation_is_discarded(monkeypatch):
     original = surface.from_arrays(original_verts, original_faces)
 
     moved = original_verts.copy()
-    moved[len(left[0]):, 0] -= 0.4
+    moved[len(left[0]) :, 0] -= 0.4
     intersecting = surface.from_arrays(moved, original_faces)
     signature = (2, 0, 4)
     monkeypatch.setattr(
@@ -380,7 +445,7 @@ def test_decimation_protects_source_patches_until_the_candidate_is_clean(monkeyp
     )
     valid = surface.from_arrays(*valid_mesh)
     moved = valid_mesh[0].copy()
-    moved[len(left[0]):, 0] -= 0.4
+    moved[len(left[0]) :, 0] -= 0.4
     intersecting = surface.from_arrays(moved, valid_mesh[1])
     signature = (2, 0, 4)
 
@@ -469,7 +534,7 @@ def _slab_survives(thickness_voxels, mm, spacing=0.2):
 
     arr = np.zeros((40, 60, 40), dtype=np.uint8)
     y0 = 30
-    arr[5:35, y0:y0 + thickness_voxels, 5:35] = 1
+    arr[5:35, y0 : y0 + thickness_voxels, 5:35] = 1
     img = sitk.GetImageFromArray(arr)
     img.SetSpacing((spacing, spacing, spacing))
 
@@ -508,7 +573,9 @@ def test_unsupported_extension_is_rejected(solid_sphere, tmp_path):
         surface.write(poly, os.path.join(str(tmp_path), "mesh.xyz"))
 
 
-def test_invalid_serialized_output_does_not_replace_destination(solid_sphere, tmp_path, monkeypatch):
+def test_invalid_serialized_output_does_not_replace_destination(
+    solid_sphere, tmp_path, monkeypatch
+):
     image, _ = solid_sphere
     destination = tmp_path / "mesh.stl"
     destination.write_bytes(b"known valid destination")

@@ -148,7 +148,9 @@ class _ProgressDisplay:
         if self.renderer is None or self.renderer.stdin is None:
             return False
         try:
-            self.renderer.stdin.write(json.dumps({"kind": kind, "message": message}) + "\n")
+            self.renderer.stdin.write(
+                json.dumps({"kind": kind, "message": message}) + "\n"
+            )
             self.renderer.stdin.flush()
         except (BrokenPipeError, OSError):
             return False
@@ -302,7 +304,9 @@ def _emit_remaining_warnings(messages: list[str], emitted: list[str]) -> None:
             _warn(message)
 
 
-def _parse_threshold(value: str | None, option: str = "--threshold") -> float | str | None:
+def _parse_threshold(
+    value: str | None, option: str = "--threshold"
+) -> float | str | None:
     """Return a numeric threshold, the ``auto`` sentinel, or ``None``."""
     if value is None:
         return None
@@ -449,7 +453,11 @@ def _volume_table(found: list[Any], recommended: Any | None) -> Table:
             voxel = "%.3g × %.3g × %.3g" % candidate.spacing
         row_style = "bold cyan" if candidate is recommended else None
         series = candidate.dicom
-        kernel = series.kernel_display if series is not None and series.kernel_values else None
+        kernel = (
+            series.kernel_display
+            if series is not None and series.kernel_values
+            else None
+        )
         modality = None if candidate.modality == "?" else candidate.modality
         plane = candidate.plane
         if plane is not None and plane.casefold() == "unknown":
@@ -490,7 +498,10 @@ def _quality_table(report: dict[str, Any]) -> Table:
     table.add_column("Value")
 
     valid = bool(report["valid"])
-    table.add_row(_plain("Status"), _plain("valid" if valid else "invalid", "green" if valid else "red"))
+    table.add_row(
+        _plain("Status"),
+        _plain("valid" if valid else "invalid", "green" if valid else "red"),
+    )
     table.add_row(_plain("Triangles"), _plain(f"{report['triangles']:,}"))
     table.add_row(_plain("Vertices"), _plain(f"{report['vertices']:,}"))
     table.add_row(_plain("Components"), _plain(f"{report['components']:,}"))
@@ -516,7 +527,11 @@ def _quality_table(report: dict[str, Any]) -> Table:
         table.add_row(_plain("Volume"), _plain("%.0f mm³" % report["volume_mm3"]))
     intersections = report.get("self_intersecting_faces")
     if intersections is not None:
-        value = f"{intersections:,}" if isinstance(intersections, int) else str(intersections)
+        value = (
+            f"{intersections:,}"
+            if isinstance(intersections, int)
+            else str(intersections)
+        )
         table.add_row(_plain("Self-intersections"), _plain(value))
     extents = report["bbox_extents_mm"]
     table.add_row(
@@ -563,11 +578,15 @@ def _write_json_file(path: Path, payload: object) -> None:
             os.unlink(temporary)
 
 
-def _protect_output_paths(candidates: list[Any], output: Path, json_file: Path | None) -> None:
+def _protect_output_paths(
+    candidates: list[Any], output: Path, json_file: Path | None
+) -> None:
     from . import catalog
     from .paths import protect_outputs
 
-    inputs = [path for candidate in candidates for path in catalog.source_paths(candidate)]
+    inputs = [
+        path for candidate in candidates for path in catalog.source_paths(candidate)
+    ]
     protect_outputs(inputs, output, json_file)
 
 
@@ -685,27 +704,39 @@ def presets() -> None:
     tissue.add_column("Description", ratio=2, overflow="fold")
     for name in sorted(PRESETS):
         preset = PRESETS[name]
-        threshold = preset.threshold if isinstance(preset.threshold, str) else "%g" % preset.threshold
-        simplify = "off" if preset.simplify_error_mm == 0 else "%.2f mm" % preset.simplify_error_mm
-        mask_smooth = (
-            "off"
-            if preset.mask_smooth_mm == 0
-            else "%.1f mm" % preset.mask_smooth_mm
+        threshold = (
+            preset.threshold
+            if isinstance(preset.threshold, str)
+            else "%g" % preset.threshold
         )
-        surface_smooth = (
+        simplify = (
+            "off"
+            if preset.simplify_error_mm == 0
+            else "%.2f mm" % preset.simplify_error_mm
+        )
+        mask_smooth = (
+            "off" if preset.mask_smooth_mm == 0 else "%.1f mm" % preset.mask_smooth_mm
+        )
+        pre_surface_smooth = (
             "off"
             if preset.surface_smooth_iters == 0
             else "%d iter" % preset.surface_smooth_iters
         )
+        post_surface_smooth = (
+            "off"
+            if preset.post_surface_smooth_iters == 0
+            else "%d iter" % preset.post_surface_smooth_iters
+        )
         processing = (
             "median %.1f mm; closing %.1f mm; mask smooth %s; "
-            "surface smooth %s; simplify %s"
+            "pre-mesh smooth %s; simplify %s; post-mesh smooth %s"
         ) % (
             preset.median_mm,
             preset.closing_mm,
             mask_smooth,
-            surface_smooth,
+            pre_surface_smooth,
             simplify,
+            post_surface_smooth,
         )
         tissue.add_row(
             _plain(name),
@@ -715,6 +746,7 @@ def presets() -> None:
             _plain(preset.description),
         )
     stdout_console.print(tissue)
+
 
 @app.command()
 def convert(
@@ -726,7 +758,9 @@ def convert(
         readable=True,
         help="Volume file or directory tree containing supported volumes.",
     ),
-    output: Path = typer.Option(..., "-o", "--output", help="Output .stl/.ply/.obj file."),
+    output: Path = typer.Option(
+        ..., "-o", "--output", help="Output .stl/.ply/.obj file."
+    ),
     volume_id: int | None = typer.Option(
         None,
         "--volume",
@@ -739,12 +773,24 @@ def convert(
         "--threshold",
         help="Intensity (HU for CT) or 'auto' for Otsu.",
     ),
-    median_mm: float | None = typer.Option(None, "--median-mm", help="Despeckle kernel extent, mm."),
-    closing_mm: float | None = typer.Option(None, "--closing-mm", help="Pore-sealing kernel extent, mm."),
-    opening_mm: float | None = typer.Option(None, "--opening-mm", help="Bridge-breaking kernel extent, mm."),
-    min_island_mm3: float | None = typer.Option(None, "--min-island-mm3", help="Drop blobs smaller than this."),
-    all_islands: bool = typer.Option(False, "--all-islands", help="Keep every labelmap island."),
-    all_components: bool = typer.Option(False, "--all-components", help="Keep every surface shell."),
+    median_mm: float | None = typer.Option(
+        None, "--median-mm", help="Despeckle kernel extent, mm."
+    ),
+    closing_mm: float | None = typer.Option(
+        None, "--closing-mm", help="Pore-sealing kernel extent, mm."
+    ),
+    opening_mm: float | None = typer.Option(
+        None, "--opening-mm", help="Bridge-breaking kernel extent, mm."
+    ),
+    min_island_mm3: float | None = typer.Option(
+        None, "--min-island-mm3", help="Drop blobs smaller than this."
+    ),
+    all_islands: bool = typer.Option(
+        False, "--all-islands", help="Keep every labelmap island."
+    ),
+    all_components: bool = typer.Option(
+        False, "--all-components", help="Keep every surface shell."
+    ),
     resample_mm: float | None = typer.Option(
         None,
         "--resample-mm",
@@ -765,14 +811,25 @@ def convert(
         "--simplify-error-mm",
         help="MeshLib estimated surface-deviation/QEM limit in model mm, not a certified Hausdorff bound (0 = off).",
     ),
-    no_cap: bool = typer.Option(False, "--no-cap", help="Do not close anatomy at the field-of-view boundary."),
+    post_surface_smooth_iters: int | None = typer.Option(
+        None,
+        "--post-mesh-smooth-iters",
+        help="Final topology-preserving surface relaxation iterations after simplification (0 = off).",
+    ),
+    no_cap: bool = typer.Option(
+        False, "--no-cap", help="Do not close anatomy at the field-of-view boundary."
+    ),
     allow_large_volume: bool = typer.Option(
         False,
         "--allow-large-volume",
         help="Bypass the 500-million-voxel source and processing-grid limits; may exhaust memory.",
     ),
-    json_file: Path | None = typer.Option(None, "--json", help="Write results and provenance to this JSON file."),
-    quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
+    json_file: Path | None = typer.Option(
+        None, "--json", help="Write results and provenance to this JSON file."
+    ),
+    quiet: bool = typer.Option(
+        False, "-q", "--quiet", help="Suppress normal progress output."
+    ),
 ) -> None:
     """Extract a surface mesh from a medical image volume."""
     _validate_mesh_output(output)
@@ -787,6 +844,7 @@ def convert(
             ("--mask-smooth-mm", mask_smooth_mm),
             ("--mesh-smooth-iters", surface_smooth_iters),
             ("--simplify-error-mm", simplify_error_mm),
+            ("--post-mesh-smooth-iters", post_surface_smooth_iters),
         ],
     )
     emitted_warnings: list[str] = []
@@ -811,7 +869,9 @@ def convert(
             _error(exc)
             raise typer.Exit(2) from None
 
-        progress.log("volume ID %d  %s  %s" % (chosen.id, chosen.format, chosen.source_name))
+        progress.log(
+            "volume ID %d  %s  %s" % (chosen.id, chosen.format, chosen.source_name)
+        )
         resolved_preset = presets_mod.get(preset.value)
         resolved_preset = presets_mod.override(
             resolved_preset,
@@ -823,6 +883,7 @@ def convert(
             mask_smooth_mm=mask_smooth_mm,
             surface_smooth_iters=surface_smooth_iters,
             simplify_error_mm=simplify_error_mm,
+            post_surface_smooth_iters=post_surface_smooth_iters,
             keep_largest_island=False if all_islands else None,
             keep_largest_component=False if all_components else None,
         )
@@ -896,7 +957,9 @@ def convert_labelmap(
         readable=True,
         help="Direct NIfTI, NRRD, or MetaImage labelmap file.",
     ),
-    output: Path = typer.Option(..., "-o", "--output", help="Output .stl/.ply/.obj file."),
+    output: Path = typer.Option(
+        ..., "-o", "--output", help="Output .stl/.ply/.obj file."
+    ),
     resample_mm: float | None = typer.Option(
         None,
         "--resample-mm",
@@ -917,6 +980,11 @@ def convert_labelmap(
         "--simplify-error-mm",
         help="MeshLib estimated surface-deviation/QEM limit in model mm (0 = off).",
     ),
+    post_surface_smooth_iters: int = typer.Option(
+        defaults.DEFAULT_LABELMAP_POST_SURFACE_SMOOTH_ITERS,
+        "--post-mesh-smooth-iters",
+        help="Final topology-preserving surface relaxation iterations after simplification (0 = off).",
+    ),
     no_cap: bool = typer.Option(
         False, "--no-cap", help="Do not close foreground at the labelmap boundary."
     ),
@@ -928,7 +996,9 @@ def convert_labelmap(
     json_file: Path | None = typer.Option(
         None, "--json", help="Write results and provenance to this JSON file."
     ),
-    quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
+    quiet: bool = typer.Option(
+        False, "-q", "--quiet", help="Suppress normal progress output."
+    ),
 ) -> None:
     """Create one mesh from every nonzero voxel in a labelmap."""
     _validate_mesh_output(output)
@@ -938,6 +1008,7 @@ def convert_labelmap(
             ("--mask-smooth-mm", mask_smooth_mm),
             ("--mesh-smooth-iters", surface_smooth_iters),
             ("--simplify-error-mm", simplify_error_mm),
+            ("--post-mesh-smooth-iters", post_surface_smooth_iters),
         ],
     )
     emitted_warnings: list[str] = []
@@ -966,6 +1037,7 @@ def convert_labelmap(
                 mask_smooth_mm=mask_smooth_mm,
                 surface_smooth_iters=surface_smooth_iters,
                 simplify_error_mm=simplify_error_mm,
+                post_surface_smooth_iters=post_surface_smooth_iters,
                 cap_field_of_view=not no_cap,
                 allow_large_volume=allow_large_volume,
                 log=progress.log,
@@ -1031,7 +1103,9 @@ def merge_labelmaps(
         readable=True,
         help="Moving labelmap to register to the fixed labelmap.",
     ),
-    output: Path = typer.Option(..., "-o", "--output", help="Output .stl/.ply/.obj file."),
+    output: Path = typer.Option(
+        ..., "-o", "--output", help="Output .stl/.ply/.obj file."
+    ),
     grid_mm: float = typer.Option(
         defaults.DEFAULT_MERGE_GRID_MM,
         "--grid-mm",
@@ -1052,7 +1126,14 @@ def merge_labelmaps(
         "--simplify-error-mm",
         help="MeshLib estimated surface-deviation/QEM limit in model mm (0 = off).",
     ),
-    force: bool = typer.Option(False, "--force", help="Override registration-quality gates."),
+    post_surface_smooth_iters: int = typer.Option(
+        defaults.DEFAULT_LABELMAP_POST_SURFACE_SMOOTH_ITERS,
+        "--post-mesh-smooth-iters",
+        help="Final topology-preserving surface relaxation iterations after simplification (0 = off).",
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Override registration-quality gates."
+    ),
     allow_large_volume: bool = typer.Option(
         False,
         "--allow-large-volume",
@@ -1061,7 +1142,9 @@ def merge_labelmaps(
     json_file: Path | None = typer.Option(
         None, "--json", help="Write results and provenance to this JSON file."
     ),
-    quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
+    quiet: bool = typer.Option(
+        False, "-q", "--quiet", help="Suppress normal progress output."
+    ),
 ) -> None:
     """Rigidly register two labelmaps and fuse their nonzero foreground."""
     _validate_mesh_output(output)
@@ -1070,6 +1153,7 @@ def merge_labelmaps(
             ("--mask-smooth-mm", mask_smooth_mm),
             ("--mesh-smooth-iters", surface_smooth_iters),
             ("--simplify-error-mm", simplify_error_mm),
+            ("--post-mesh-smooth-iters", post_surface_smooth_iters),
         ],
         positive=(("--grid-mm", grid_mm),),
     )
@@ -1106,6 +1190,7 @@ def merge_labelmaps(
                 mask_smooth_mm=mask_smooth_mm,
                 surface_smooth_iters=surface_smooth_iters,
                 simplify_error_mm=simplify_error_mm,
+                post_surface_smooth_iters=post_surface_smooth_iters,
                 force=force,
                 allow_large_volume=allow_large_volume,
                 log=progress.log,
@@ -1169,7 +1254,9 @@ def merge(
         readable=True,
         help="Fixed volume file or directory; defines the output coordinate frame.",
     ),
-    output: Path = typer.Option(..., "-o", "--output", help="Output .stl/.ply/.obj file."),
+    output: Path = typer.Option(
+        ..., "-o", "--output", help="Output .stl/.ply/.obj file."
+    ),
     moving_input: Path = typer.Argument(
         ...,
         exists=True,
@@ -1213,7 +1300,9 @@ def merge(
     min_island_mm3: float | None = typer.Option(
         None, "--min-island-mm3", help="Drop blobs smaller than this."
     ),
-    all_islands: bool = typer.Option(False, "--all-islands", help="Keep every labelmap island."),
+    all_islands: bool = typer.Option(
+        False, "--all-islands", help="Keep every labelmap island."
+    ),
     all_components: bool = typer.Option(
         False, "--all-components", help="Keep every fused surface shell."
     ),
@@ -1237,6 +1326,11 @@ def merge(
         "--simplify-error-mm",
         help="MeshLib estimated surface-deviation/QEM limit in model mm, not a certified Hausdorff bound (0 = off).",
     ),
+    post_surface_smooth_iters: int | None = typer.Option(
+        None,
+        "--post-mesh-smooth-iters",
+        help="Final topology-preserving surface relaxation iterations after simplification (0 = off).",
+    ),
     force: bool = typer.Option(
         False,
         "--force",
@@ -1247,8 +1341,12 @@ def merge(
         "--allow-large-volume",
         help="Bypass the 500-million-voxel source and processing-grid limits; may exhaust memory.",
     ),
-    json_file: Path | None = typer.Option(None, "--json", help="Write results and provenance to this JSON file."),
-    quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
+    json_file: Path | None = typer.Option(
+        None, "--json", help="Write results and provenance to this JSON file."
+    ),
+    quiet: bool = typer.Option(
+        False, "-q", "--quiet", help="Suppress normal progress output."
+    ),
 ) -> None:
     """Register two scans of the same anatomy and fuse their surfaces."""
     _validate_mesh_output(output)
@@ -1263,6 +1361,7 @@ def merge(
             ("--mask-smooth-mm", mask_smooth_mm),
             ("--mesh-smooth-iters", surface_smooth_iters),
             ("--simplify-error-mm", simplify_error_mm),
+            ("--post-mesh-smooth-iters", post_surface_smooth_iters),
         ],
         positive=(("--grid-mm", grid_mm),),
     )
@@ -1327,6 +1426,7 @@ def merge(
                 mask_smooth_mm=mask_smooth_mm,
                 surface_smooth_iters=surface_smooth_iters,
                 simplify_error_mm=simplify_error_mm,
+                post_surface_smooth_iters=post_surface_smooth_iters,
                 force=force,
                 allow_large_volume=allow_large_volume,
                 log=progress.log,
@@ -1394,7 +1494,9 @@ def validate(
         readable=True,
         help="Mesh file to inspect.",
     ),
-    json_output: bool = typer.Option(False, "--json", help="Write one plain JSON object to stdout."),
+    json_output: bool = typer.Option(
+        False, "--json", help="Write one plain JSON object to stdout."
+    ),
 ) -> None:
     """Report mesh quality without changing the file."""
     progress = _ProgressDisplay(not json_output, "Loading validation engine ...")
@@ -1426,8 +1528,12 @@ def repair(
         help="Mesh file to repair.",
     ),
     output: Path = typer.Option(..., "-o", "--output", help="New repaired mesh file."),
-    json_output: bool = typer.Option(False, "--json", help="Write one plain JSON object to stdout."),
-    quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress normal progress output."),
+    json_output: bool = typer.Option(
+        False, "--json", help="Write one plain JSON object to stdout."
+    ),
+    quiet: bool = typer.Option(
+        False, "-q", "--quiet", help="Suppress normal progress output."
+    ),
 ) -> None:
     """Make a non-watertight mesh watertight."""
     _validate_mesh_output(output)
@@ -1449,7 +1555,11 @@ def repair(
         report = result.quality
 
     if json_output:
-        print(json.dumps({"output": str(output), "repair": stats, "quality": report}, indent=2))
+        print(
+            json.dumps(
+                {"output": str(output), "repair": stats, "quality": report}, indent=2
+            )
+        )
     elif not quiet:
         _success("wrote %s" % output)
         _print_quality(report)

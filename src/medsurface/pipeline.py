@@ -53,6 +53,7 @@ class SurfaceSettings:
     mask_smooth_mm: float
     surface_smooth_iters: int
     simplify_error_mm: float
+    post_surface_smooth_iters: int
     keep_largest_component: bool
 
 
@@ -68,13 +69,16 @@ class MaskSurfaceResult:
     quality: dict[str, Any]
 
 
-def surface_settings(preset: Preset, *, keep_largest_component: bool | None = None) -> SurfaceSettings:
+def surface_settings(
+    preset: Preset, *, keep_largest_component: bool | None = None
+) -> SurfaceSettings:
     """Extract only the mask-to-mesh portion of a conversion preset."""
     return SurfaceSettings(
         resample_mm=preset.resample_mm,
         mask_smooth_mm=preset.mask_smooth_mm,
         surface_smooth_iters=preset.surface_smooth_iters,
         simplify_error_mm=preset.simplify_error_mm,
+        post_surface_smooth_iters=preset.post_surface_smooth_iters,
         keep_largest_component=(
             preset.keep_largest_component
             if keep_largest_component is None
@@ -97,6 +101,11 @@ def validate_surface_settings(settings: SurfaceSettings) -> None:
         or settings.surface_smooth_iters < 0
     ):
         raise ValueError("surface_smooth_iters must be a non-negative integer")
+    if (
+        not isinstance(settings.post_surface_smooth_iters, int)
+        or settings.post_surface_smooth_iters < 0
+    ):
+        raise ValueError("post_surface_smooth_iters must be a non-negative integer")
 
 
 def mask_smoothing_warning(mask_smooth_mm: float) -> str | None:
@@ -110,11 +119,48 @@ def mask_smoothing_warning(mask_smooth_mm: float) -> str | None:
     )
 
 
+def _smoothing_warnings(
+    stage: str,
+    smoothing: surface.SmoothingSafeguard,
+) -> list[str]:
+    if not smoothing.accepted:
+        return [
+            "%s was discarded because %s; kept the valid input surface"
+            % (stage, smoothing.rejection_reason)
+        ]
+    if not (
+        smoothing.initial_self_intersecting_faces or smoothing.initial_disoriented_faces
+    ):
+        return []
+
+    avoided = []
+    if smoothing.initial_self_intersecting_faces:
+        avoided.append(
+            "%s self-intersecting face(s)"
+            % f"{smoothing.initial_self_intersecting_faces:,}"
+        )
+    if smoothing.initial_disoriented_faces:
+        avoided.append(
+            "%s disoriented face(s)" % f"{smoothing.initial_disoriented_faces:,}"
+        )
+    return [
+        "%s kept %s vertices at their input positions to prevent %s; all %d "
+        "requested iterations were retained elsewhere"
+        % (
+            stage,
+            f"{smoothing.protected_vertices:,}",
+            " and ".join(avoided),
+            smoothing.requested_iterations,
+        )
+    ]
+
+
 def finish_surface(
     poly,
     *,
     surface_smooth_iters: int,
     simplify_error_mm: float,
+    post_surface_smooth_iters: int,
     keep_largest_component: bool,
     step: StepRunner,
     log: Logger,
@@ -122,7 +168,7 @@ def finish_surface(
     """Shared, intersection-safe finishing for conversion and fusion."""
     warnings = []
 
-    poly, smoothing = step(
+    poly, pre_smoothing = step(
         "relax surface",
         lambda: surface.smooth_safely(
             poly,
@@ -130,17 +176,7 @@ def finish_surface(
             SURFACE_RELAX_FORCE,
         ),
     )
-    if smoothing.initial_self_intersecting_faces:
-        warnings.append(
-            "surface relaxation kept %s vertices at their pre-relaxation positions "
-            "to prevent %d self-intersecting face(s); all %d requested iterations "
-            "were retained elsewhere"
-            % (
-                f"{smoothing.protected_vertices:,}",
-                smoothing.initial_self_intersecting_faces,
-                smoothing.requested_iterations,
-            )
-        )
+    warnings.extend(_smoothing_warnings("surface relaxation", pre_smoothing))
 
     surface_components = surface.component_count(poly)
     if keep_largest_component:
@@ -189,8 +225,7 @@ def finish_surface(
             )
         if decimation.initial_disoriented_faces:
             avoided_defects.append(
-                "%s disoriented face(s)"
-                % f"{decimation.initial_disoriented_faces:,}"
+                "%s disoriented face(s)" % f"{decimation.initial_disoriented_faces:,}"
             )
         warnings.append(
             "simplification at %.3f mm protected %s source faces (%.2f%%) from collapse "
@@ -206,13 +241,40 @@ def finish_surface(
             )
         )
 
+    if post_surface_smooth_iters > 0:
+        poly, post_smoothing = step(
+            "finish surface",
+            lambda: surface.smooth_safely(
+                poly,
+                post_surface_smooth_iters,
+                SURFACE_RELAX_FORCE,
+            ),
+        )
+        log(
+            "  post-smoothing displacement rms %.4f mm, max %.4f mm"
+            % (
+                post_smoothing.rms_displacement_mm,
+                post_smoothing.max_displacement_mm,
+            )
+        )
+    else:
+        poly, post_smoothing = surface.smooth_safely(
+            poly,
+            post_surface_smooth_iters,
+            SURFACE_RELAX_FORCE,
+        )
+    warnings.extend(
+        _smoothing_warnings("post-simplification relaxation", post_smoothing)
+    )
+
     return SurfaceFinish(
         poly=poly,
         surface_components=surface_components,
         warnings=warnings,
         provenance={
-            "smoothing": asdict(smoothing),
+            "pre_smoothing": asdict(pre_smoothing),
             "decimation": asdict(decimation),
+            "post_smoothing": asdict(post_smoothing),
         },
     )
 
@@ -298,6 +360,7 @@ def mesh_binary_mask(
         poly,
         surface_smooth_iters=settings.surface_smooth_iters,
         simplify_error_mm=settings.simplify_error_mm,
+        post_surface_smooth_iters=settings.post_surface_smooth_iters,
         keep_largest_component=settings.keep_largest_component,
         step=step,
         log=log,
@@ -322,8 +385,12 @@ def mesh_binary_mask(
     )
 
 
-def build_mask(image: sitk.Image, preset: Preset, threshold: float,
-               log: Callable[[str], None] | None = None) -> sitk.Image:
+def build_mask(
+    image: sitk.Image,
+    preset: Preset,
+    threshold: float,
+    log: Callable[[str], None] | None = None,
+) -> sitk.Image:
     """Threshold and clean a volume into a binary bone mask.
 
     Shared by ``convert`` and ``merge`` so the two can never drift apart: a fused
@@ -423,7 +490,9 @@ def source_provenance(
     record.update(
         {
             "hu_calibration": (
-                "verified" if volume_mod.has_calibrated_hu(vol.candidate) else "unverified"
+                "verified"
+                if volume_mod.has_calibrated_hu(vol.candidate)
+                else "unverified"
             ),
             "threshold": threshold,
             "threshold_source": threshold_source,
@@ -478,9 +547,15 @@ def convert(
     )
     add_warnings(volume_mod.warnings_for(vol))
     lo, hi = step("measure intensity range", vol.intensity_range)
-    say("volume %s  spacing %s mm  intensity %.0f..%.0f"
-        % ("x".join(str(v) for v in vol.size),
-           " x ".join("%.3f" % s for s in vol.spacing), lo, hi))
+    say(
+        "volume %s  spacing %s mm  intensity %.0f..%.0f"
+        % (
+            "x".join(str(v) for v in vol.size),
+            " x ".join("%.3f" % s for s in vol.spacing),
+            lo,
+            hi,
+        )
+    )
 
     value, source = step(
         "resolve threshold",

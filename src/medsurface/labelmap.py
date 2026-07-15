@@ -15,11 +15,13 @@ from . import volume as volume_mod
 from .catalog import DicomSource, VolumeCandidate, same_source
 from .defaults import (
     DEFAULT_LABELMAP_MASK_SMOOTH_MM,
+    DEFAULT_LABELMAP_POST_SURFACE_SMOOTH_ITERS,
     DEFAULT_LABELMAP_SURFACE_SMOOTH_ITERS,
     DEFAULT_MERGE_GRID_MM,
 )
 
 Logger = Callable[[str], None]
+
 
 @dataclass
 class LoadedLabelmap:
@@ -50,6 +52,7 @@ def default_surface_settings() -> pipeline.SurfaceSettings:
         mask_smooth_mm=DEFAULT_LABELMAP_MASK_SMOOTH_MM,
         surface_smooth_iters=DEFAULT_LABELMAP_SURFACE_SMOOTH_ITERS,
         simplify_error_mm=0.25,
+        post_surface_smooth_iters=DEFAULT_LABELMAP_POST_SURFACE_SMOOTH_ITERS,
         keep_largest_component=False,
     )
 
@@ -60,15 +63,14 @@ def resolve_surface_settings(
     mask_smooth_mm: float | None = None,
     surface_smooth_iters: int | None = None,
     simplify_error_mm: float | None = None,
+    post_surface_smooth_iters: int | None = None,
 ) -> pipeline.SurfaceSettings:
     base = default_surface_settings()
     settings = replace(
         base,
         resample_mm=base.resample_mm if resample_mm is None else resample_mm,
         mask_smooth_mm=(
-            base.mask_smooth_mm
-            if mask_smooth_mm is None
-            else float(mask_smooth_mm)
+            base.mask_smooth_mm if mask_smooth_mm is None else float(mask_smooth_mm)
         ),
         surface_smooth_iters=(
             base.surface_smooth_iters
@@ -76,9 +78,12 @@ def resolve_surface_settings(
             else surface_smooth_iters
         ),
         simplify_error_mm=(
-            base.simplify_error_mm
-            if simplify_error_mm is None
-            else simplify_error_mm
+            base.simplify_error_mm if simplify_error_mm is None else simplify_error_mm
+        ),
+        post_surface_smooth_iters=(
+            base.post_surface_smooth_iters
+            if post_surface_smooth_iters is None
+            else post_surface_smooth_iters
         ),
     )
     pipeline.validate_surface_settings(settings)
@@ -120,7 +125,9 @@ def load(
     allow_large_volume: bool = False,
 ) -> LoadedLabelmap:
     if isinstance(candidate.source, DicomSource):
-        raise ValueError("labelmap input must be a NIfTI, NRRD, or MetaImage file, not DICOM")
+        raise ValueError(
+            "labelmap input must be a NIfTI, NRRD, or MetaImage file, not DICOM"
+        )
     volume = volume_mod.load(candidate, allow_large_volume=allow_large_volume)
     mask = _binary_mask(volume.image)
     provenance = pipeline.volume_provenance(volume)
@@ -141,6 +148,7 @@ def convert(
     mask_smooth_mm: float | None = None,
     surface_smooth_iters: int | None = None,
     simplify_error_mm: float | None = None,
+    post_surface_smooth_iters: int | None = None,
     cap_field_of_view: bool = True,
     allow_large_volume: bool = False,
     log: Logger | None = None,
@@ -151,6 +159,7 @@ def convert(
         mask_smooth_mm=mask_smooth_mm,
         surface_smooth_iters=surface_smooth_iters,
         simplify_error_mm=simplify_error_mm,
+        post_surface_smooth_iters=post_surface_smooth_iters,
     )
     surface.validate_output_path(output_path)
     started = time.time()
@@ -233,6 +242,7 @@ def merge(
     mask_smooth_mm: float | None = None,
     surface_smooth_iters: int | None = None,
     simplify_error_mm: float | None = None,
+    post_surface_smooth_iters: int | None = None,
     force: bool = False,
     allow_large_volume: bool = False,
     log: Logger | None = None,
@@ -242,12 +252,15 @@ def merge(
         mask_smooth_mm=mask_smooth_mm,
         surface_smooth_iters=surface_smooth_iters,
         simplify_error_mm=simplify_error_mm,
+        post_surface_smooth_iters=post_surface_smooth_iters,
     )
     surface.validate_output_path(output_path)
     if not np.isfinite(grid_mm) or grid_mm <= 0:
         raise ValueError("grid_mm must be finite and greater than zero")
     if same_source(fixed, moving):
-        raise merge_mod.MergeError("fixed and moving inputs resolve to the same labelmap")
+        raise merge_mod.MergeError(
+            "fixed and moving inputs resolve to the same labelmap"
+        )
     started = time.time()
 
     def say(message: str) -> None:
