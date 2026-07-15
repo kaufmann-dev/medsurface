@@ -33,6 +33,8 @@ class DecimationSafeguard:
     error_introduced_mm: float
     initial_self_intersecting_faces: int
     remaining_self_intersecting_faces: int
+    initial_disoriented_faces: int
+    remaining_disoriented_faces: int
     repair_attempts: int
     protected_input_faces: int
     protected_input_face_fraction: float
@@ -243,15 +245,20 @@ def _meshlib_self_intersecting_face_ids(mesh: mrmeshpy.Mesh) -> np.ndarray:
     return np.flatnonzero(selected_self_intersecting_faces(mesh))
 
 
-def _protect_decimation_collision_neighborhood(
+def _meshlib_disoriented_face_ids(mesh: mrmeshpy.Mesh) -> np.ndarray:
+    selected = mrmeshpy.findDisorientedFaces(mesh)
+    return np.flatnonzero(mrmeshnumpy.getNumpyBitSet(selected))
+
+
+def _protect_decimation_face_neighborhood(
     reference_mesh: mrmeshpy.Mesh,
     protected_faces: mrmeshpy.FaceBitSet,
     candidate: mrmeshpy.Mesh,
-    colliding_face_ids: np.ndarray,
+    unsafe_face_ids: np.ndarray,
 ) -> None:
     candidate_verts, candidate_faces = to_arrays(candidate)
     reference = mrmeshpy.MeshPart(reference_mesh)
-    for face_id in colliding_face_ids:
+    for face_id in unsafe_face_ids:
         triangle = candidate_verts[candidate_faces[int(face_id)]]
         for point in (triangle.mean(axis=0), *triangle):
             projection = mrmeshpy.findProjection(
@@ -278,6 +285,8 @@ def decimate_safely(
             error_introduced_mm=0.0,
             initial_self_intersecting_faces=0,
             remaining_self_intersecting_faces=0,
+            initial_disoriented_faces=0,
+            remaining_disoriented_faces=0,
             repair_attempts=0,
             protected_input_faces=0,
             protected_input_face_fraction=0.0,
@@ -289,6 +298,8 @@ def decimate_safely(
     protected_faces = mrmeshpy.FaceBitSet(current)
     initial_intersections = 0
     remaining_intersections = 0
+    initial_disoriented = 0
+    remaining_disoriented = 0
     repair_attempts = 0
     error_introduced_mm = 0.0
     reasons: list[str] = []
@@ -314,31 +325,51 @@ def decimate_safely(
             break
 
         colliding_ids = _meshlib_self_intersecting_face_ids(candidate)
+        disoriented_ids = _meshlib_disoriented_face_ids(candidate)
         remaining_intersections = int(len(colliding_ids))
+        remaining_disoriented = int(len(disoriented_ids))
         if attempt == 0:
             initial_intersections = remaining_intersections
-        if not remaining_intersections:
+            initial_disoriented = remaining_disoriented
+        if not remaining_intersections and not remaining_disoriented:
             break
         if attempt == _MAX_DECIMATION_REPAIR_ATTEMPTS:
-            reasons.append(
-                "%d self-intersecting face(s) remained after local protection"
-                % remaining_intersections
-            )
+            if remaining_intersections:
+                reasons.append(
+                    "%d self-intersecting face(s) remained after local protection"
+                    % remaining_intersections
+                )
+            if remaining_disoriented:
+                reasons.append(
+                    "%d disoriented face(s) remained after local protection"
+                    % remaining_disoriented
+                )
             break
 
+        unsafe_ids = np.union1d(colliding_ids, disoriented_ids)
         protected_before = protected_faces.count()
-        _protect_decimation_collision_neighborhood(
-            reference_mesh, protected_faces, candidate, colliding_ids
+        _protect_decimation_face_neighborhood(
+            reference_mesh, protected_faces, candidate, unsafe_ids
         )
         if protected_faces.count() == protected_before:
-            reasons.append(
-                "%d self-intersecting face(s) remained because their source "
-                "neighborhood could not be expanded" % remaining_intersections
-            )
+            if remaining_intersections:
+                reasons.append(
+                    "%d self-intersecting face(s) remained because their source "
+                    "neighborhood could not be expanded" % remaining_intersections
+                )
+            if remaining_disoriented:
+                reasons.append(
+                    "%d disoriented face(s) remained because their source "
+                    "neighborhood could not be expanded" % remaining_disoriented
+                )
             break
         repair_attempts += 1
 
-    accepted = not reasons and remaining_intersections == 0
+    accepted = (
+        not reasons
+        and remaining_intersections == 0
+        and remaining_disoriented == 0
+    )
     result = candidate if accepted else mesh
     protected_count = int(protected_faces.count())
     return result, DecimationSafeguard(
@@ -350,6 +381,8 @@ def decimate_safely(
         error_introduced_mm=error_introduced_mm if accepted else 0.0,
         initial_self_intersecting_faces=initial_intersections,
         remaining_self_intersecting_faces=remaining_intersections,
+        initial_disoriented_faces=initial_disoriented,
+        remaining_disoriented_faces=remaining_disoriented,
         repair_attempts=repair_attempts,
         protected_input_faces=protected_count,
         protected_input_face_fraction=float(protected_count / current),

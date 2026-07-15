@@ -271,15 +271,15 @@ sets the estimated surface-deviation/QEM limit in physical model millimetres;
 this is not a certified Hausdorff bound, and `0` disables simplification without
 disabling smoothing. A candidate is accepted only when it preserves the
 component/hole/Euler signature, does not increase boundary or non-manifold
-edges, and has no self-intersections. If a candidate
-contains collisions, the colliding triangles are projected back onto the
+edges, and has no self-intersections or disoriented faces. If a candidate
+contains either defect, the affected triangles are projected back onto the
 pre-decimation source mesh. Four-ring source neighborhoods around those
 locations are excluded from collapse and decimation restarts. Up to eight local
-protection passes are allowed. MeshLib supplies every collision check and marks
-both faces from each colliding pair.
+protection passes are allowed. MeshLib supplies both checks and marks both faces
+from each colliding pair.
 
 This keeps simplification active outside small unsafe patches. If topology or
-manifold checks fail, a collision patch cannot be mapped, or all protection
+manifold checks fail, an unsafe patch cannot be mapped, or all protection
 passes are exhausted, the valid pre-decimation mesh is retained and the command
 reports a warning. The resulting face count and MeshLib's introduced-error
 estimate are reported. Because simplification is the last geometry-changing

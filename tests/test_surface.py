@@ -400,6 +400,67 @@ def test_decimation_protects_source_patches_until_the_candidate_is_clean(monkeyp
     assert stats.protected_input_faces > 0
 
 
+def test_disoriented_decimation_is_discarded(monkeypatch):
+    vertices, faces = box()
+    original = surface.from_arrays(vertices, faces)
+    disoriented = surface.from_arrays(vertices, faces)
+    signature = surface._meshlib_topology_signature(original)
+    monkeypatch.setattr(
+        surface,
+        "_decimate_candidate",
+        lambda *_args: (disoriented, signature, signature, 0.25),
+    )
+    monkeypatch.setattr(
+        surface,
+        "_meshlib_disoriented_face_ids",
+        lambda candidate: np.array([0]) if candidate is disoriented else np.array([]),
+    )
+
+    result, stats = surface.decimate_safely(original, 0.25)
+
+    assert result is original
+    assert not stats.accepted
+    assert stats.initial_disoriented_faces == 1
+    assert stats.remaining_disoriented_faces == 1
+    assert "disoriented" in stats.rejection_reason
+
+
+def test_decimation_protects_source_patch_until_winding_is_consistent(monkeypatch):
+    vertices, faces = box()
+    original = surface.from_arrays(vertices, faces)
+    disoriented = surface.from_arrays(vertices, faces)
+    signature = surface._meshlib_topology_signature(original)
+
+    def candidate(_poly, _error, protected):
+        result = original if protected.any() else disoriented
+        return result, signature, signature, 0.25
+
+    monkeypatch.setattr(surface, "_decimate_candidate", candidate)
+    monkeypatch.setattr(
+        surface,
+        "_meshlib_disoriented_face_ids",
+        lambda candidate: np.array([0]) if candidate is disoriented else np.array([]),
+    )
+
+    result, stats = surface.decimate_safely(original, 0.25)
+
+    assert result is original
+    assert stats.accepted
+    assert stats.repair_attempts == 1
+    assert stats.initial_disoriented_faces == 1
+    assert stats.remaining_disoriented_faces == 0
+    assert stats.protected_input_faces > 0
+
+
+def test_meshlib_disoriented_face_ids_match_validation_detector():
+    vertices, faces = box()
+    flipped_faces = faces.copy()
+    flipped_faces[0] = flipped_faces[0][::-1]
+    mesh = surface.from_arrays(vertices, flipped_faces)
+
+    assert surface._meshlib_disoriented_face_ids(mesh).tolist() == [0]
+
+
 def _slab_survives(thickness_voxels, mm, spacing=0.2):
     """Does a slab of the given thickness still register as foreground after
     resampling onto an `mm` isotropic grid?"""

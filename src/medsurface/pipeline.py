@@ -174,15 +174,26 @@ def finish_surface(
             )
         )
     elif decimation.repair_attempts:
+        avoided_defects = []
+        if decimation.initial_self_intersecting_faces:
+            avoided_defects.append(
+                "%s self-intersecting face(s)"
+                % f"{decimation.initial_self_intersecting_faces:,}"
+            )
+        if decimation.initial_disoriented_faces:
+            avoided_defects.append(
+                "%s disoriented face(s)"
+                % f"{decimation.initial_disoriented_faces:,}"
+            )
         warnings.append(
             "simplification at %.3f mm protected %s source faces (%.2f%%) from collapse "
-            "to prevent %s self-intersecting candidate faces; MeshLib estimates %.4f mm "
-            "introduced error and the collision-free result contains %s triangles"
+            "to prevent %s; MeshLib estimates %.4f mm "
+            "introduced error and the valid result contains %s triangles"
             % (
                 decimation.simplify_error_mm,
                 f"{decimation.protected_input_faces:,}",
                 100.0 * decimation.protected_input_face_fraction,
-                f"{decimation.initial_self_intersecting_faces:,}",
+                " and ".join(avoided_defects),
                 decimation.error_introduced_mm,
                 f"{decimation.actual_faces:,}",
             )

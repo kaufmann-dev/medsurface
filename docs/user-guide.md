@@ -305,13 +305,16 @@ normalize unsupported raw face configurations while loading; the report describe
 the imported mesh rather than exposing separate raw non-manifold or degenerate
 face counters. A failed self-intersection measurement is invalid.
 
-Before writing, conversion and merging guard surface relaxation and
-simplification against self-intersections. The fixed relaxation runs every
-requested internal iteration; only vertices in collision neighborhoods retain
-their pre-relaxation positions. These safeguards are reported as warnings and
-recorded in JSON provenance when they are used. Occupancy-field smoothing
-happens before surface extraction and can change anatomy or topology even when
-the resulting mesh is structurally valid.
+Before writing, conversion and merging guard surface relaxation against
+self-intersections and simplification against both self-intersections and
+inconsistent winding. The fixed relaxation runs every requested internal
+iteration; only vertices in collision neighborhoods retain their pre-relaxation
+positions. Simplification retries with unsafe source neighborhoods protected
+from collapse and retains the valid pre-simplification mesh if no safe compact
+result is possible. These safeguards are reported as warnings and recorded in
+JSON provenance when they are used. Occupancy-field smoothing happens before
+surface extraction and can change anatomy or topology even when the resulting
+mesh is structurally valid.
 
 These checks establish mesh structure, not anatomical correctness,
 manufacturability, dimensional accuracy, or fitness for a clinical purpose.
