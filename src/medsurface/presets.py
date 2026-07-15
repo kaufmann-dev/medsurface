@@ -30,8 +30,10 @@ class Preset:
     #: on a head CT, 0.6 mm reopened 257 pores that the closing had sealed.
     #: Prefer simplify_error_mm to control triangle count without coarsening the grid.
     resample_mm: float = 0.0
-    #: Gaussian sigma applied to the binary occupancy field in physical mm.
-    smooth_mm: float = 0.0
+    #: Gaussian sigma applied to the segmented occupancy mask in physical mm.
+    mask_smooth_mm: float = 0.0
+    #: Topology-preserving MeshLib relaxation iterations after meshing.
+    surface_smooth_iters: int = 20
     #: MeshLib estimated surface-deviation/QEM limit in model millimetres.
     #: This is not a certified Hausdorff bound. 0 disables simplification.
     simplify_error_mm: float = 0.0
@@ -47,7 +49,8 @@ PRESETS: dict[str, Preset] = {
         median_mm=1.0,
         closing_mm=2.4,
         min_island_mm3=50.0,
-        smooth_mm=0.8,
+        mask_smooth_mm=0.0,
+        surface_smooth_iters=60,
         simplify_error_mm=0.25,
     ),
     "teeth": Preset(
@@ -60,7 +63,8 @@ PRESETS: dict[str, Preset] = {
         min_island_mm3=5.0,
         keep_largest_island=False,
         keep_largest_component=False,
-        smooth_mm=0.3,
+        mask_smooth_mm=0.0,
+        surface_smooth_iters=10,
         simplify_error_mm=0.12,
     ),
     "skin": Preset(
@@ -71,7 +75,8 @@ PRESETS: dict[str, Preset] = {
         median_mm=1.4,
         closing_mm=3.2,
         min_island_mm3=500.0,
-        smooth_mm=1.0,
+        mask_smooth_mm=0.0,
+        surface_smooth_iters=35,
         simplify_error_mm=0.35,
     ),
     "auto": Preset(
@@ -82,7 +87,8 @@ PRESETS: dict[str, Preset] = {
         median_mm=1.0,
         closing_mm=2.0,
         min_island_mm3=50.0,
-        smooth_mm=0.8,
+        mask_smooth_mm=0.0,
+        surface_smooth_iters=60,
         simplify_error_mm=0.25,
     ),
 }
@@ -105,12 +111,17 @@ def validate(preset: Preset) -> None:
         "opening_mm": preset.opening_mm,
         "min_island_mm3": preset.min_island_mm3,
         "resample_mm": preset.resample_mm,
-        "smooth_mm": preset.smooth_mm,
+        "mask_smooth_mm": preset.mask_smooth_mm,
         "simplify_error_mm": preset.simplify_error_mm,
     }
     for name, value in nonnegative.items():
         if not math.isfinite(value) or value < 0:
             raise ValueError("%s must be finite and non-negative" % name)
+    if (
+        not isinstance(preset.surface_smooth_iters, int)
+        or preset.surface_smooth_iters < 0
+    ):
+        raise ValueError("surface_smooth_iters must be a non-negative integer")
     for name, threshold_value in (
         ("threshold", preset.threshold),
         ("threshold_max", preset.threshold_max),

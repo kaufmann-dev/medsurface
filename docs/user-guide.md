@@ -99,12 +99,12 @@ remain nested under `dicom`.
 A preset supplies the segmentation and mesh-finishing defaults. List the
 installed values at any time with `medsurface presets`.
 
-| preset  | use it for                                              | threshold | median | closing | island floor | smoothing sigma | simplify error |
-| ------- | ------------------------------------------------------- | --------: | -----: | ------: | -----------: | --------------: | -------------: |
-| `bone`  | General CT bone models                                  |    300 HU | 1.0 mm |  2.4 mm |       50 mm³ |          0.8 mm |        0.25 mm |
-| `teeth` | Enamel and dense dentin; keeps separate teeth           |  1,200 HU | 0.6 mm |  0.6 mm |        5 mm³ |          0.3 mm |        0.12 mm |
-| `skin`  | Outer skin surface from CT                              |   −300 HU | 1.4 mm |  3.2 mm |      500 mm³ |          1.0 mm |        0.35 mm |
-| `auto`  | MR, CBCT, ultrasound, or other uncalibrated intensities |      Otsu | 1.0 mm |  2.0 mm |       50 mm³ |          0.8 mm |        0.25 mm |
+| preset  | use it for                                              | threshold | median | closing | island floor | mask smoothing | mesh smoothing | simplify error |
+| ------- | ------------------------------------------------------- | --------: | -----: | ------: | -----------: | -------------: | -------------: | -------------: |
+| `bone`  | General CT bone models                                  |    300 HU | 1.0 mm |  2.4 mm |       50 mm³ |            off |  60 iterations |        0.25 mm |
+| `teeth` | Enamel and dense dentin; keeps separate teeth           |  1,200 HU | 0.6 mm |  0.6 mm |        5 mm³ |            off |  10 iterations |        0.12 mm |
+| `skin`  | Outer skin surface from CT                              |   −300 HU | 1.4 mm |  3.2 mm |      500 mm³ |            off |  35 iterations |        0.35 mm |
+| `auto`  | MR, CBCT, ultrasound, or other uncalibrated intensities |      Otsu | 1.0 mm |  2.0 mm |       50 mm³ |            off |  60 iterations |        0.25 mm |
 
 Numeric thresholds are inclusive lower bounds. `auto` calculates a
 format-neutral Otsu threshold from the volume instead of assuming calibrated
@@ -115,12 +115,14 @@ Other inputs, derived CT without explicit units, inconsistent series, and
 ambiguous multienergy CT receive a warning. Use an intentional numeric
 `--threshold` or `--preset auto` when values are not calibrated HU.
 
-`--smooth-mm` controls a Gaussian applied to the binary occupancy field before
-meshing. It has the same physical meaning for normal and labelmap commands and
-does not depend on triangle density. A fixed light mesh relaxation removes
-residual tessellation noise afterward. `--smooth-mm 0` disables both stages.
-Every command warns when smoothing is enabled because features near the chosen
-sigma can move, merge, or disappear.
+Every normal and labelmap conversion or merge exposes the same two independent
+smoothing controls. `--mask-smooth-mm` applies a Gaussian to the segmented
+occupancy mask before meshing. It uses physical millimetres and does not depend
+on triangle density, but it can change topology: boundaries can move, gaps can
+close, and thin structures can disappear. `--mesh-smooth-iters` applies
+fixed-force, volume-preserving MeshLib relaxation after meshing. It preserves
+mesh connectivity and protects local vertices if relaxation would create
+self-intersections. Setting either value to `0` disables only that stage.
 
 `teeth` keeps every mask island and surface component that survives its size
 floor. The other presets keep only the largest component. `--simplify-error-mm`
@@ -168,21 +170,23 @@ multilabel file can produce one STL containing multiple surviving structures.
 The input must be one direct NIfTI, NRRD, or MetaImage file. Its voxels must be
 finite, non-negative integers; integer-valued floating-point images are
 accepted, but probability maps and fractional labels are not. Every dimension
-must contain at least four voxels, even with `--smooth-mm 0`. Directories, DICOM,
-selectors, presets, and structure-name flags are deliberately absent.
+must contain at least four voxels regardless of the smoothing values.
+Directories, DICOM, selectors, presets, and structure-name flags are
+deliberately absent.
 Labelmaps have independent surface defaults: native grid, a `0.8 mm` Gaussian
-sigma applied in physical space before meshing, light internal surface
-relaxation, a `0.25 mm` simplification limit, and every surviving surface
-component retained. `--smooth-mm` is the only labelmap smoothing control;
-`--smooth-mm 0` disables both field smoothing and the internal relaxation.
-Setting `--simplify-error-mm 0` independently disables triangle reduction.
+sigma applied in physical space before meshing, 20 surface-relaxation
+iterations, a `0.25 mm` simplification limit, and every surviving surface
+component retained. `--mask-smooth-mm 0` preserves the discrete mask topology;
+`--mesh-smooth-iters 0` independently disables surface relaxation. Setting
+`--simplify-error-mm 0` independently disables triangle reduction.
 
 Physical smoothing is intentionally geometry-changing. It reduces voxel-scale
 terracing consistently even when marching cubes creates millions of triangles,
 but it can round boundaries, close narrow gaps, merge nearby regions, or erase
 structures near the configured scale. Every smoothed labelmap command warns
-about this tradeoff. Use both `--smooth-mm 0` and `--simplify-error-mm 0` for the
-most literal full-density surface supported by medsurface.
+about this tradeoff. Use `--mask-smooth-mm 0 --mesh-smooth-iters 0
+--simplify-error-mm 0` for the most literal full-density surface supported by
+medsurface.
 
 TotalSegmentator is not installed or run by medsurface. Its default output is a
 directory containing one binary `.nii.gz` file per structure; pass any one of

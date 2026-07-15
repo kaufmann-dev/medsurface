@@ -7,16 +7,18 @@ DEFAULT_MERGE_GRID_MM = 0.4
 #: Gaussian sigma used to regularize externally segmented labelmap boundaries
 #: before marching cubes. This is deliberately a physical distance rather than
 #: a mesh-iteration count so its effect does not depend on triangle density.
-DEFAULT_LABELMAP_SMOOTH_MM = 0.8
+DEFAULT_LABELMAP_MASK_SMOOTH_MM = 0.8
+
+#: Fixed-force topology-preserving cleanup for external labelmap surfaces.
+DEFAULT_LABELMAP_SURFACE_SMOOTH_ITERS = 20
 
 #: Recursive Gaussian smoothing requires at least four samples per processed
 #: dimension. The shared input contract enforces this from image headers before
 #: pixel data are loaded.
 MIN_VOLUME_AXIS_VOXELS = 4
 
-#: Mesh relaxation is a fixed internal cleanup after physical field smoothing,
-#: not a user-facing geometry control.
-SURFACE_RELAX_ITERS = 20
+#: Mesh relaxation force is fixed so the public surface control needs only one
+#: understandable value: its iteration count.
 SURFACE_RELAX_FORCE = 0.1
 
 #: Coarse emergency ceiling for source volumes and planned processing grids.

@@ -125,11 +125,12 @@ flat and a warning explains that missing anatomy was not recovered.
 1. Discover and load one direct self-describing image file.
 2. Verify that every voxel is finite, non-negative, and integer-valued, then
    convert every nonzero label to one shared foreground mask.
-3. Optionally resample, smooth the occupancy field with a physical-space
+3. Optionally resample, smooth the occupancy mask with a physical-space
    Gaussian, pad field-of-view boundaries, extract the 0.5 isosurface, and
    transform it into the labelmap's physical coordinates.
-4. Apply light intersection-safe surface relaxation, retain every surviving
-   surface component, optionally simplify, validate, and atomically publish.
+4. Optionally apply intersection-safe surface relaxation, retain every
+   surviving surface component, optionally simplify, validate, and atomically
+   publish.
 
 It therefore skips threshold selection, intensity segmentation, morphology,
 mask-island removal, and label interpretation. A binary per-structure mask and
@@ -137,14 +138,14 @@ a multilabel file follow the same path. TotalSegmentator and other segmenters
 remain external dependencies of the user's workflow, not medsurface runtime
 dependencies.
 
-Occupancy smoothing uses SimpleITK's recursive Gaussian with sigma in physical
+Mask smoothing uses SimpleITK's recursive Gaussian with sigma in physical
 millimetres for every conversion and merge path. Every input axis must contain
-at least four voxels, including when `--smooth-mm 0` bypasses both this field
-operation and the subsequent internal relaxation. There is no alternate
-smoothing algorithm for smaller inputs. The 0.5 isovalue keeps a straight
-binary boundary centered, but curved boundaries and features near the sigma can
-move, merge, or disappear. Commands warn whenever smoothing is enabled and
-record `smooth_mm` in JSON provenance.
+at least four voxels regardless of `--mask-smooth-mm` and
+`--mesh-smooth-iters`; there is no alternate smoothing algorithm for smaller
+inputs. The 0.5 isovalue keeps a straight binary boundary centered, but curved
+boundaries and features near the sigma can move, merge, or disappear. Commands
+warn whenever mask smoothing is enabled and record `mask_smooth_mm` and
+`surface_smooth_iters` separately in JSON provenance.
 
 ## File-volume compatibility
 
@@ -249,21 +250,23 @@ to preserve the established sample-coordinate convention. Mesh validity is
 measured rather than assumed. The index-to-physical affine transforms vertices
 before finishing. When its linear component has a negative determinant, the
 transform also reverses every triangle so a left-handed image direction cannot
-turn an outward surface into an inward-wound mesh. Smoothing and simplification
-therefore operate in physical model millimetres instead of voxel-index units.
+turn an outward surface into an inward-wound mesh. All subsequent surface
+operations therefore run in physical model coordinates.
 
-`--smooth-mm` controls one recursive Gaussian pass on the occupancy field before
-marching cubes. Normal presets provide tissue-specific values: bone and auto
-use 0.8 mm, teeth 0.3 mm, and skin 1.0 mm. External labelmaps use 0.8 mm. The
-same physical control applies after fusion for both merge paths.
+`--mask-smooth-mm` controls one recursive Gaussian pass on the segmented
+occupancy mask before marching cubes. Normal presets default to `0` because
+thresholded intensity masks can contain thin cortical or soft-tissue
+connections that a Gaussian can erase. External labelmaps default to `0.8 mm`
+to reduce voxel terracing. Both merge paths apply the same control only after
+occupancy fusion.
 
-When physical smoothing is enabled, one fixed 20-iteration MeshLib
-`relaxKeepVolume` pass at force 0.1 removes residual tessellation noise before
-simplification. Every iteration runs before self-intersection detection. If
-relaxation makes non-adjacent faces collide, vertices in those collision patches
-return to their pre-relaxation positions. The protected set grows by topological
-rings until the mesh is collision-free. `--smooth-mm 0` disables both the
-Gaussian and relaxation stages.
+`--mesh-smooth-iters` independently controls one MeshLib `relaxKeepVolume` pass
+at fixed force 0.1 before simplification. Normal preset defaults are 60 for bone
+and auto, 10 for teeth, and 35 for skin; external labelmaps use 20. Every
+requested iteration runs before self-intersection detection. If relaxation
+makes non-adjacent faces collide, vertices in those collision patches return to
+their pre-relaxation positions. The protected set grows by topological rings
+until the mesh is collision-free. `0` disables only surface relaxation.
 
 Simplification runs after smoothing and uses MeshLib's quadric edge-collapse
 implementation with `DecimateStrategy.MinimizeError`. `--simplify-error-mm`

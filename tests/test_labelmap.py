@@ -86,7 +86,7 @@ def test_labelmap_convert_rejects_short_dimensions_before_meshing(
         labelmap.convert(
             candidate,
             str(tmp_path / "out.stl"),
-            smooth_mm=0,
+            mask_smooth_mm=0,
         )
 
 
@@ -113,7 +113,7 @@ def test_labelmap_merge_rejects_short_dimensions_before_registration(
             fixed,
             moving,
             str(tmp_path / "out.stl"),
-            smooth_mm=0,
+            mask_smooth_mm=0,
         )
 
 
@@ -138,15 +138,17 @@ def test_default_finishing_is_independent_and_keeps_all_shells():
     settings = labelmap.default_surface_settings()
 
     assert settings.resample_mm == 0
-    assert settings.smooth_mm == pytest.approx(0.8)
+    assert settings.mask_smooth_mm == pytest.approx(0.8)
+    assert settings.surface_smooth_iters == 20
     assert settings.simplify_error_mm == pytest.approx(0.25)
     assert settings.keep_largest_component is False
 
 
-def test_disabling_physical_smoothing_keeps_other_surface_settings():
-    settings = labelmap.resolve_surface_settings(smooth_mm=0)
+def test_disabling_mask_smoothing_keeps_surface_smoothing():
+    settings = labelmap.resolve_surface_settings(mask_smooth_mm=0)
 
-    assert settings.smooth_mm == 0
+    assert settings.mask_smooth_mm == 0
+    assert settings.surface_smooth_iters == 20
     assert settings.simplify_error_mm == pytest.approx(0.25)
 
 
@@ -159,7 +161,8 @@ def test_default_labelmap_finishing_is_single_stage_and_error_limited(tmp_path):
     finishing = result.provenance["surface_finishing"]
 
     assert result.quality["valid"]
-    assert result.provenance["surface"]["smooth_mm"] == pytest.approx(0.8)
+    assert result.provenance["surface"]["mask_smooth_mm"] == pytest.approx(0.8)
+    assert result.provenance["surface"]["surface_smooth_iters"] == 20
     assert finishing["smoothing"]["requested_iterations"] == 20
     assert finishing["decimation"]["simplify_error_mm"] == pytest.approx(0.25)
     assert finishing["decimation"]["error_introduced_mm"] <= 0.25
@@ -176,7 +179,8 @@ def test_real_labelmap_formats_convert_all_components(tmp_path, extension):
     result = labelmap.convert(
         candidate,
         str(output),
-        smooth_mm=0,
+        mask_smooth_mm=0,
+        surface_smooth_iters=0,
         simplify_error_mm=0,
     )
 
@@ -203,7 +207,8 @@ def test_labelmap_conversion_preserves_left_handed_physical_geometry(tmp_path):
     result = labelmap.convert(
         catalog.discover(source)[0],
         str(output),
-        smooth_mm=0,
+        mask_smooth_mm=0,
+        surface_smooth_iters=0,
         simplify_error_mm=0,
     )
 
@@ -222,7 +227,8 @@ def test_labelmap_boundary_is_capped_and_reported(tmp_path):
     result = labelmap.convert(
         candidate,
         str(output),
-        smooth_mm=0,
+        mask_smooth_mm=0,
+        surface_smooth_iters=0,
         simplify_error_mm=0,
     )
 
@@ -251,7 +257,8 @@ def test_labelmap_merge_registers_rigid_masks_and_uses_fixed_frame(tmp_path):
         moving,
         str(output),
         grid_mm=1.0,
-        smooth_mm=0,
+        mask_smooth_mm=0,
+        surface_smooth_iters=0,
         simplify_error_mm=0,
     )
 
@@ -296,7 +303,8 @@ def test_labelmap_convert_does_not_call_segmentation(monkeypatch, tmp_path):
     result = labelmap.convert(
         candidate,
         str(tmp_path / "out.stl"),
-        smooth_mm=0,
+        mask_smooth_mm=0,
+        surface_smooth_iters=0,
         simplify_error_mm=0,
     )
     assert result.quality["valid"]

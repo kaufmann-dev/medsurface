@@ -62,3 +62,16 @@ paths smooth only after registration and occupancy fusion. The minimum input
 size is now four voxels per axis for every volume type, with no smoothing
 fallback; this intentionally supersedes the earlier two-voxel ordinary-volume
 contract.
+
+## Follow-up: independent mask and mesh controls
+
+Revised: 2026-07-15 02:47:43 CEST (+0200)
+
+Baseline commit: `06e24ae1f491047c77f1223a57320a5c75daf11f`
+
+Applying labelmap-oriented Gaussian defaults to thresholded intensity masks was
+subsequently found to erase thin cortical bone. All conversion and merge
+commands now expose the same independent `--mask-smooth-mm` and
+`--mesh-smooth-iters` controls. Labelmaps retain the 0.8 mm plus 20-iteration
+defaults that fixed the reported terracing. Normal presets keep mask smoothing
+off and restore their topology-preserving 60/10/35/60 mesh-relaxation defaults.

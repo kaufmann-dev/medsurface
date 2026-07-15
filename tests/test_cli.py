@@ -278,7 +278,10 @@ def test_post_smoothing_option_is_removed(tmp_path, argv):
     assert "No such option" in result.stderr
 
 
-@pytest.mark.parametrize("option", ["--smooth-iters", "--smooth-force"])
+@pytest.mark.parametrize(
+    "option",
+    ["--smooth-mm", "--smooth-iters", "--smooth-force"],
+)
 @pytest.mark.parametrize(
     "argv",
     [
@@ -288,7 +291,7 @@ def test_post_smoothing_option_is_removed(tmp_path, argv):
         ["labelmap", "merge", "INPUT", "MOVING", "-o", "out.stl"],
     ],
 )
-def test_surface_commands_expose_only_physical_smoothing(tmp_path, argv, option):
+def test_legacy_smoothing_options_are_removed(tmp_path, argv, option):
     mask = tmp_path / "mask.nii.gz"
     moving = tmp_path / "moving.nii.gz"
     mask.write_bytes(b"mask")
@@ -306,7 +309,7 @@ def test_surface_commands_expose_only_physical_smoothing(tmp_path, argv, option)
     assert "No such option" in result.stderr
 
 
-def test_surface_help_describes_physical_smoothing_only():
+def test_surface_help_describes_both_independent_smoothing_stages():
     for command in (
         ["convert", "--help"],
         ["merge", "--help"],
@@ -317,8 +320,11 @@ def test_surface_help_describes_physical_smoothing_only():
         normalized = " ".join(result.stdout.replace("│", " ").split())
 
         assert result.returncode == 0
-        assert "--smooth-mm" in normalized
+        assert "--mask-smooth-mm" in normalized
         assert "Gaussian sigma" in normalized
+        assert "--mesh-smooth-iters" in normalized
+        assert "surface relaxation iterations" in normalized
+        assert "--smooth-mm" not in normalized
         assert "--smooth-iters" not in normalized
         assert "--smooth-force" not in normalized
 
@@ -333,7 +339,8 @@ def test_merge_help_describes_shared_processing_options():
         ("--closing-mm", "Pore-sealing kernel"),
         ("--opening-mm", "Bridge-breaking kernel"),
         ("--min-island-mm3", "Drop blobs smaller"),
-        ("--smooth-mm", "Gaussian sigma"),
+        ("--mask-smooth-mm", "Gaussian sigma"),
+        ("--mesh-smooth-iters", "surface relaxation iterations"),
     ):
         assert option in normalized
         assert description_start in normalized
@@ -756,9 +763,12 @@ def test_presets_renders_tissue_table_without_ansi():
     assert result.exit_code == 0
     assert "Tissue presets (--preset)" in result.stdout
     assert "bone" in result.stdout
-    assert "smooth 0.8 mm" in result.stdout
-    assert "smooth 0.3 mm" in result.stdout
-    assert "smooth 1.0 mm" in result.stdout
+    assert "mask" in result.stdout
+    assert "smooth off" in result.stdout
+    assert "surface" in result.stdout
+    assert "smooth 60 iter" in result.stdout
+    assert "smooth 35 iter" in result.stdout
+    assert "smooth 10 iter" in result.stdout
     assert "\x1b" not in result.stdout
 
 
@@ -801,8 +811,10 @@ def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
             "--all-components",
             "--resample-mm",
             "0.8",
-            "--smooth-mm",
+            "--mask-smooth-mm",
             "0.9",
+            "--mesh-smooth-iters",
+            "17",
             "--simplify-error-mm",
             "0.18",
             "--no-cap",
@@ -822,7 +834,8 @@ def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
     assert captured["preset"].threshold == pytest.approx(-300.0)
     assert captured["preset"].median_mm == pytest.approx(1.1)
     assert captured["preset"].opening_mm == pytest.approx(3.3)
-    assert captured["preset"].smooth_mm == pytest.approx(0.9)
+    assert captured["preset"].mask_smooth_mm == pytest.approx(0.9)
+    assert captured["preset"].surface_smooth_iters == 17
     assert captured["preset"].simplify_error_mm == pytest.approx(0.18)
     assert not captured["preset"].keep_largest_island
     assert not captured["preset"].keep_largest_component
@@ -932,7 +945,14 @@ def test_invalid_threshold_is_exit_two_before_discovery(tmp_path, monkeypatch):
     [
         (["convert", "INPUT", "-o", "out.stl", "--median-mm", "-1"], "--median-mm"),
         (["convert", "INPUT", "-o", "out.stl", "--resample-mm", "nan"], "--resample-mm"),
-        (["convert", "INPUT", "-o", "out.stl", "--smooth-mm", "-1"], "--smooth-mm"),
+        (
+            ["convert", "INPUT", "-o", "out.stl", "--mask-smooth-mm", "-1"],
+            "--mask-smooth-mm",
+        ),
+        (
+            ["convert", "INPUT", "-o", "out.stl", "--mesh-smooth-iters", "-1"],
+            "--mesh-smooth-iters",
+        ),
         (["merge", "INPUT", "MOVING", "-o", "out.stl", "--grid-mm", "0"], "--grid-mm"),
         (["merge", "INPUT", "MOVING", "-o", "out.stl", "--grid-mm", "inf"], "--grid-mm"),
         (["merge", "INPUT", "MOVING", "-o", "out.stl", "--opening-mm", "-0.1"], "--opening-mm"),
@@ -1170,8 +1190,10 @@ def test_labelmap_convert_accepts_surface_flags_and_writes_json(tmp_path, monkey
             str(output),
             "--resample-mm",
             "0.8",
-            "--smooth-mm",
+            "--mask-smooth-mm",
             "0.9",
+            "--mesh-smooth-iters",
+            "17",
             "--simplify-error-mm",
             "0.18",
             "--no-cap",
@@ -1188,7 +1210,8 @@ def test_labelmap_convert_accepts_surface_flags_and_writes_json(tmp_path, monkey
     assert result.stderr == ""
     assert captured["candidate"] is chosen
     assert captured["resample_mm"] == pytest.approx(0.8)
-    assert captured["smooth_mm"] == pytest.approx(0.9)
+    assert captured["mask_smooth_mm"] == pytest.approx(0.9)
+    assert captured["surface_smooth_iters"] == 17
     assert captured["simplify_error_mm"] == pytest.approx(0.18)
     assert not captured["cap_field_of_view"]
     assert captured["allow_large_volume"]
@@ -1235,8 +1258,10 @@ def test_labelmap_merge_accepts_fusion_flags_and_writes_json(tmp_path, monkeypat
             str(output),
             "--grid-mm",
             "0.7",
-            "--smooth-mm",
+            "--mask-smooth-mm",
             "0.9",
+            "--mesh-smooth-iters",
+            "17",
             "--simplify-error-mm",
             "0.19",
             "--force",
@@ -1254,7 +1279,8 @@ def test_labelmap_merge_accepts_fusion_flags_and_writes_json(tmp_path, monkeypat
     assert captured["fixed"] is fixed
     assert captured["moving"] is moving
     assert captured["grid_mm"] == pytest.approx(0.7)
-    assert captured["smooth_mm"] == pytest.approx(0.9)
+    assert captured["mask_smooth_mm"] == pytest.approx(0.9)
+    assert captured["surface_smooth_iters"] == 17
     assert captured["force"]
     assert captured["allow_large_volume"]
     payload = json.loads(json_file.read_text())
@@ -1265,8 +1291,27 @@ def test_labelmap_merge_accepts_fusion_flags_and_writes_json(tmp_path, monkeypat
 @pytest.mark.parametrize(
     "argv,option",
     [
-        (["labelmap", "convert", "INPUT", "-o", "out.stl", "--smooth-mm", "-1"], "--smooth-mm"),
-        (["labelmap", "merge", "INPUT", "MOVING", "-o", "out.stl", "--smooth-mm", "nan"], "--smooth-mm"),
+        (
+            [
+                "labelmap", "convert", "INPUT", "-o", "out.stl",
+                "--mask-smooth-mm", "-1",
+            ],
+            "--mask-smooth-mm",
+        ),
+        (
+            [
+                "labelmap", "merge", "INPUT", "MOVING", "-o", "out.stl",
+                "--mask-smooth-mm", "nan",
+            ],
+            "--mask-smooth-mm",
+        ),
+        (
+            [
+                "labelmap", "merge", "INPUT", "MOVING", "-o", "out.stl",
+                "--mesh-smooth-iters", "-1",
+            ],
+            "--mesh-smooth-iters",
+        ),
         (["labelmap", "merge", "INPUT", "MOVING", "-o", "out.stl", "--grid-mm", "0"], "--grid-mm"),
     ],
 )
@@ -1384,8 +1429,10 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
             "--all-components",
             "--grid-mm",
             "0.8",
-            "--smooth-mm",
+            "--mask-smooth-mm",
             "0.4",
+            "--mesh-smooth-iters",
+            "17",
             "--simplify-error-mm",
             "0.2",
             "--force",
@@ -1407,7 +1454,8 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
     assert captured["fixed_threshold"] == pytest.approx(250.0)
     assert captured["moving_threshold"] == "auto"
     assert captured["grid_mm"] == pytest.approx(0.8)
-    assert captured["smooth_mm"] == pytest.approx(0.4)
+    assert captured["mask_smooth_mm"] == pytest.approx(0.4)
+    assert captured["surface_smooth_iters"] == 17
     assert captured["simplify_error_mm"] == pytest.approx(0.2)
     assert captured["force"]
     assert captured["allow_large_volume"]

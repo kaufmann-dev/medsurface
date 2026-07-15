@@ -64,12 +64,14 @@ thresholding and cleanup stages:
 medsurface labelmap convert segmentation.nii.gz -o surface.stl
 ```
 
-Every conversion and merge command smooths voxel-scale terracing with a
-physical Gaussian before meshing. Normal tissue presets choose an anatomical
-default; external labelmaps use `0.8 mm`. Use `--smooth-mm 0` to preserve the
-binary boundary as literally as possible. Smoothing can round or erase
-structures near its scale. Every input axis must contain at least four voxels,
-including when smoothing is disabled.
+Every conversion and merge command offers two independent controls. A Gaussian
+`--mask-smooth-mm` can remove voxel terracing before meshing, but it can also
+change topology or erase thin structures. Topology-preserving
+`--mesh-smooth-iters` relaxes the extracted surface afterward. Normal tissue
+presets keep mask smoothing off and use preset-specific mesh smoothing;
+external labelmaps default to `0.8 mm` and 20 iterations. Set either control to
+`0` to disable that stage. Every input axis must contain at least four voxels,
+regardless of the smoothing settings.
 
 ## Commands
 
