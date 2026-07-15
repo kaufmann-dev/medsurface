@@ -9,6 +9,16 @@ DEFAULT_MERGE_GRID_MM = 0.4
 #: a mesh-iteration count so its effect does not depend on triangle density.
 DEFAULT_LABELMAP_SMOOTH_MM = 0.8
 
+#: Recursive Gaussian smoothing requires at least four samples per processed
+#: dimension. The shared input contract enforces this from image headers before
+#: pixel data are loaded.
+MIN_VOLUME_AXIS_VOXELS = 4
+
+#: Mesh relaxation is a fixed internal cleanup after physical field smoothing,
+#: not a user-facing geometry control.
+SURFACE_RELAX_ITERS = 20
+SURFACE_RELAX_FORCE = 0.1
+
 #: Coarse emergency ceiling for source volumes and planned processing grids.
 #: This is not a memory guarantee: pixel types and concurrent working images vary.
 MAX_VOXELS = 500_000_000

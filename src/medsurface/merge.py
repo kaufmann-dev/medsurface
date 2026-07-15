@@ -335,10 +335,10 @@ def fuse_masks(
         ),
     )
 
-    if settings.field_smooth_mm > 0:
+    if settings.smooth_mm > 0:
         fused = step(
-            "smooth fused labelmap field",
-            lambda: segment.smooth_occupancy(fused, settings.field_smooth_mm),
+            "smooth fused occupancy field",
+            lambda: segment.smooth_occupancy(fused, settings.smooth_mm),
         )
 
     voxel_mm3 = grid_mm**3
@@ -379,8 +379,7 @@ def fuse_masks(
 
     finished = pipeline.finish_surface(
         poly,
-        smooth_iters=settings.smooth_iters,
-        smooth_force=settings.smooth_force,
+        relax_surface=settings.smooth_mm > 0,
         simplify_error_mm=settings.simplify_error_mm,
         keep_largest_component=settings.keep_largest_component,
         step=step,
@@ -423,8 +422,7 @@ def merge(
     fixed_threshold: float | str | None = None,
     moving_threshold: float | str | None = None,
     grid_mm: float = DEFAULT_MERGE_GRID_MM,
-    smooth_iters: int | None = None,
-    smooth_force: float | None = None,
+    smooth_mm: float | None = None,
     simplify_error_mm: float | None = None,
     force: bool = False,
     allow_large_volume: bool = False,
@@ -436,8 +434,7 @@ def merge(
         raise ValueError("grid_mm must be finite and greater than zero")
     preset = override_preset(
         preset,
-        smooth_iters=smooth_iters,
-        smooth_force=smooth_force,
+        smooth_mm=smooth_mm,
         simplify_error_mm=simplify_error_mm,
     )
     validate_preset(preset)
@@ -482,6 +479,9 @@ def merge(
             "--moving-threshold",
         )
     )
+    smoothing_message = pipeline.smoothing_warning(preset.smooth_mm)
+    if smoothing_message:
+        add_warning(smoothing_message)
 
     say("fixed  ID %d  %s  %s" % (fixed.id, fixed.format, fixed.source_name))
     say("moving ID %d  %s  %s" % (moving.id, moving.format, moving.source_name))

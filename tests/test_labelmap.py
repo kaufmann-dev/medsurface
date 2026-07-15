@@ -80,7 +80,7 @@ def test_labelmap_convert_rejects_short_dimensions_before_meshing(
 
     with pytest.raises(
         ValueError,
-        match=r"labelmap dimensions must each contain at least 4 voxels; got %s$"
+        match=r"each volume axis must contain at least 4 voxels; got %s$"
         % dimensions,
     ):
         labelmap.convert(
@@ -106,7 +106,7 @@ def test_labelmap_merge_rejects_short_dimensions_before_registration(
     with pytest.raises(
         ValueError,
         match=(
-            r"labelmap dimensions must each contain at least 4 voxels; got 2x4x4$"
+            r"each volume axis must contain at least 4 voxels; got 2x4x4$"
         ),
     ):
         labelmap.merge(
@@ -138,18 +138,15 @@ def test_default_finishing_is_independent_and_keeps_all_shells():
     settings = labelmap.default_surface_settings()
 
     assert settings.resample_mm == 0
-    assert settings.field_smooth_mm == pytest.approx(0.8)
-    assert settings.smooth_iters == 20
-    assert settings.smooth_force == pytest.approx(0.1)
+    assert settings.smooth_mm == pytest.approx(0.8)
     assert settings.simplify_error_mm == pytest.approx(0.25)
     assert settings.keep_largest_component is False
 
 
-def test_disabling_physical_smoothing_disables_internal_relaxation_only():
+def test_disabling_physical_smoothing_keeps_other_surface_settings():
     settings = labelmap.resolve_surface_settings(smooth_mm=0)
 
-    assert settings.field_smooth_mm == 0
-    assert settings.smooth_iters == 0
+    assert settings.smooth_mm == 0
     assert settings.simplify_error_mm == pytest.approx(0.25)
 
 
@@ -163,7 +160,6 @@ def test_default_labelmap_finishing_is_single_stage_and_error_limited(tmp_path):
 
     assert result.quality["valid"]
     assert result.provenance["surface"]["smooth_mm"] == pytest.approx(0.8)
-    assert "field_smooth_mm" not in result.provenance["surface"]
     assert finishing["smoothing"]["requested_iterations"] == 20
     assert finishing["decimation"]["simplify_error_mm"] == pytest.approx(0.25)
     assert finishing["decimation"]["error_introduced_mm"] <= 0.25
@@ -191,6 +187,10 @@ def test_real_labelmap_formats_convert_all_components(tmp_path, extension):
     assert result.quality["components"] == 2
     assert result.provenance["input"]["foreground"] == "all nonzero voxels"
     assert result.provenance["surface"]["keep_largest_component"] is False
+    assert (
+        result.provenance["surface_finishing"]["smoothing"]["requested_iterations"]
+        == 0
+    )
 
 
 def test_labelmap_conversion_preserves_left_handed_physical_geometry(tmp_path):

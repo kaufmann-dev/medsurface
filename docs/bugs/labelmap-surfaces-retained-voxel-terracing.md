@@ -46,5 +46,19 @@ Baseline commit: `45016b0e088f10125dc981636742ae388fadd620`
 The physical smoothing path now uses `SmoothingRecursiveGaussian` exclusively.
 Labelmap conversion and merge reject any input with fewer than four voxels on
 an axis before meshing or registration, even when `--smooth-mm 0` is selected.
-The error reports the actual dimensions. The ordinary intensity-volume contract
-remains at least two voxels per axis.
+The error reports the actual dimensions. At this revision, the ordinary
+intensity-volume contract remained at least two voxels per axis.
+
+## Follow-up: unified smoothing contract
+
+Revised: 2026-07-15 02:10:32 CEST (+0200)
+
+Baseline commit: `1e50b8de194149546ac7d8a55b4dc7959ed0e4d2`
+
+Normal conversion and merge now use the same recursive-Gaussian occupancy
+smoothing and fixed light mesh relaxation as labelmap commands. The normal
+iteration and force controls were replaced by `--smooth-mm`, and both merge
+paths smooth only after registration and occupancy fusion. The minimum input
+size is now four voxels per axis for every volume type, with no smoothing
+fallback; this intentionally supersedes the earlier two-voxel ordinary-volume
+contract.

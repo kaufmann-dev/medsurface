@@ -108,12 +108,13 @@ program that produced the segmentation.
    normal; for a file volume, use its stored image geometry.
 3. Load the selected candidate with SimpleITK and resolve the intensity threshold.
 4. Apply island filtering, median filtering, optional opening, and closing.
-5. Pad field-of-view boundaries, extract the 0.5 isosurface with MeshLib marching
+5. Optionally resample and smooth the occupancy field with a physical Gaussian,
+   pad field-of-view boundaries, extract the 0.5 isosurface with MeshLib marching
    cubes, and transform it into the input's SimpleITK physical coordinates,
    reversing face order when that affine contains a reflection.
-6. Smooth once, select surface components, optionally simplify, validate the
-   mesh in memory, write and validate a temporary file, then atomically publish
-   it.
+6. Apply fixed light surface relaxation, select surface components, optionally
+   simplify, validate the mesh in memory, write and validate a temporary file,
+   then atomically publish it.
 
 The output is normally a closed surface because the mask is padded with
 background before extraction. When anatomy touches the scan boundary, the cap is
@@ -136,14 +137,14 @@ a multilabel file follow the same path. TotalSegmentator and other segmenters
 remain external dependencies of the user's workflow, not medsurface runtime
 dependencies.
 
-Labelmap occupancy smoothing uses SimpleITK's recursive Gaussian with sigma in
-physical millimetres. Every labelmap axis must contain at least four voxels,
-including when `--smooth-mm 0` bypasses both this field operation and the
-subsequent internal relaxation. There is no alternate smoothing algorithm for
-smaller labelmaps. The default sigma is `0.8 mm`. The 0.5 isovalue keeps a
-straight binary boundary centered, but curved boundaries and features near the
-sigma can move, merge, or disappear. The command warns whenever smoothing is
-enabled and records `smooth_mm` in JSON provenance.
+Occupancy smoothing uses SimpleITK's recursive Gaussian with sigma in physical
+millimetres for every conversion and merge path. Every input axis must contain
+at least four voxels, including when `--smooth-mm 0` bypasses both this field
+operation and the subsequent internal relaxation. There is no alternate
+smoothing algorithm for smaller inputs. The 0.5 isovalue keeps a straight
+binary boundary centered, but curved boundaries and features near the sigma can
+move, merge, or disappear. Commands warn whenever smoothing is enabled and
+record `smooth_mm` in JSON provenance.
 
 ## File-volume compatibility
 
@@ -151,16 +152,14 @@ SimpleITK reads image headers during discovery and pixel data only after
 selection. Discovery separately resolves detached MetaImage and NRRD payload
 references and marks the header unusable when a required payload is absent or
 unreadable. File candidates must be scalar, real-valued 3-D images with at least
-two voxels per axis, finite origin/direction values, finite positive spacing,
+four voxels per axis, finite origin/direction values, finite positive spacing,
 and a nonsingular 3×3 direction matrix.
 
-Labelmap commands add their own constraints. Before pixel data are loaded, they
-require at least four voxels per axis, independently of the smoothing setting;
-the general two-voxel minimum for ordinary intensity volumes is unchanged. Once
-loaded, values must be finite, non-negative integers, at least one voxel must be
-nonzero, and fractional probability maps are unsupported. Integer-valued
-floating-point labelmaps are accepted. Label numbers and semantic names are not
-interpreted; all nonzero values are unioned.
+Labelmap commands add value constraints after loading: values must be finite,
+non-negative integers, at least one voxel must be nonzero, and fractional
+probability maps are unsupported. Integer-valued floating-point labelmaps are
+accepted. Label numbers and semantic names are not interpreted; all nonzero
+values are unioned.
 
 The selected candidate's discovered dimensions are multiplied with Python
 integers before SimpleITK reads pixels. Missing dimensions make the candidate
@@ -253,15 +252,18 @@ transform also reverses every triangle so a left-handed image direction cannot
 turn an outward surface into an inward-wound mesh. Smoothing and simplification
 therefore operate in physical model millimetres instead of voxel-index units.
 
-Smoothing uses one MeshLib `relaxKeepVolume` pass before simplification. The
-preset controls its total iterations and relaxation force. The `--smooth-force`
-option replaces the former backend-specific passband. Smoothing moves surfaces,
-and the project does not provide a general deviation bound. Every requested
-iteration runs before self-intersection detection. If smoothing makes
-non-adjacent faces collide, vertices in those collision patches return to their
-pre-smooth positions. The protected set grows by topological rings until the
-mesh is collision-free. Smoothing is therefore retained globally instead of
-reducing the iteration count for the whole surface.
+`--smooth-mm` controls one recursive Gaussian pass on the occupancy field before
+marching cubes. Normal presets provide tissue-specific values: bone and auto
+use 0.8 mm, teeth 0.3 mm, and skin 1.0 mm. External labelmaps use 0.8 mm. The
+same physical control applies after fusion for both merge paths.
+
+When physical smoothing is enabled, one fixed 20-iteration MeshLib
+`relaxKeepVolume` pass at force 0.1 removes residual tessellation noise before
+simplification. Every iteration runs before self-intersection detection. If
+relaxation makes non-adjacent faces collide, vertices in those collision patches
+return to their pre-relaxation positions. The protected set grows by topological
+rings until the mesh is collision-free. `--smooth-mm 0` disables both the
+Gaussian and relaxation stages.
 
 Simplification runs after smoothing and uses MeshLib's quadric edge-collapse
 implementation with `DecimateStrategy.MinimizeError`. `--simplify-error-mm`
@@ -282,10 +284,9 @@ passes are exhausted, the valid pre-decimation mesh is retained and the command
 reports a warning. The resulting face count and MeshLib's introduced-error
 estimate are reported. Because simplification is the last geometry-changing
 stage, its estimate is not invalidated by later smoothing. Conversion and
-merging use this same finishing path. Labelmap commands use independent defaults:
-native grid, a 0.8 mm physical Gaussian, 20 internal relaxation iterations at
-force 0.1, a 0.25 mm simplification limit, and every surviving surface
-component retained.
+merging use this same finishing path. Labelmap commands retain independent
+non-smoothing defaults: native grid, a 0.25 mm simplification limit, and every
+surviving surface component retained.
 
 ## Merge registration and gates
 
@@ -304,11 +305,11 @@ Moving vertices are sampled to at most 60,000 with seed 0. ICP uses a 4 mm
 correspondence limit and up to 80 iterations per pass.
 
 After registration, both paths resample their masks as fractional occupancy onto
-the isotropic fusion grid and take their voxelwise maximum. `labelmap merge`
-then applies its physical Gaussian to that fused field before volume measurement
-and marching cubes; the intensity-volume merge leaves this extra field
-smoothing disabled. Applying it after the union attenuates both source-grid
-terracing and small boundary disagreements between the registered masks.
+the isotropic fusion grid and take their voxelwise maximum. Both apply their
+configured physical Gaussian to that fused field before volume measurement and
+marching cubes. Applying it after the union attenuates both source-grid terracing
+and small boundary disagreements between the registered masks without changing
+the masks used for registration.
 
 | gate                      | definition                                                                                                           |  threshold |
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------: |

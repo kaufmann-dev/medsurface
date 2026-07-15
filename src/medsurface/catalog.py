@@ -19,6 +19,7 @@ import numpy as np
 import SimpleITK as sitk
 
 from . import series as series_mod
+from .defaults import MIN_VOLUME_AXIS_VOXELS
 from .series import Series
 
 SUPPORTED_EXTENSIONS = (".nii.gz", ".nii", ".nrrd", ".nhdr", ".mha", ".mhd")
@@ -210,8 +211,14 @@ def _geometry_reason(
         return "expected one scalar component, got %d" % components
     if "complex" in pixel_type.casefold():
         return "complex-valued pixels are unsupported"
-    if len(size) != 3 or any(value < 2 for value in size):
-        return "each volume axis must contain at least 2 voxels"
+    if len(size) != 3 or any(value < MIN_VOLUME_AXIS_VOXELS for value in size):
+        return (
+            "each volume axis must contain at least %d voxels; got %s"
+            % (
+                MIN_VOLUME_AXIS_VOXELS,
+                "x".join(str(value) for value in size),
+            )
+        )
     if len(spacing) != 3 or any(not math.isfinite(value) or value <= 0 for value in spacing):
         return "spacing must contain three finite positive values"
     if len(origin) != 3 or any(not math.isfinite(value) for value in origin):
@@ -339,8 +346,18 @@ def _dicom_candidate(series: Series, root: Path) -> VolumeCandidate:
     if series.columns is not None and series.rows is not None:
         size = (series.columns, series.rows, series.n_slices)
     reason = series.unusable_reason
-    if reason is None and (size is None or any(value < 2 for value in size)):
-        reason = "missing or invalid image dimensions"
+    if size is not None and any(
+        value < MIN_VOLUME_AXIS_VOXELS for value in size
+    ):
+        reason = (
+            "each volume axis must contain at least %d voxels; got %s"
+            % (
+                MIN_VOLUME_AXIS_VOXELS,
+                "x".join(str(value) for value in size),
+            )
+        )
+    elif reason is None and size is None:
+        reason = "missing image dimensions"
     spacing = None
     if series.pixel_spacing and series.slice_spacing:
         spacing = (

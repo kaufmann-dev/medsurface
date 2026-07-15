@@ -22,7 +22,7 @@ def _minimal_preset(name: str):
         opening_mm=0.0,
         min_island_mm3=0.0,
         resample_mm=0.0,
-        smooth_iters=0,
+        smooth_mm=0,
         simplify_error_mm=0.0,
     )
 
@@ -126,8 +126,7 @@ def test_real_cross_format_merge_preserves_teeth_components(tmp_path):
     preset = _minimal_preset("teeth")
     effective_preset = replace(
         preset,
-        smooth_iters=2,
-        smooth_force=0.05,
+        smooth_mm=0.2,
         simplify_error_mm=0.01,
     )
     result = merge.merge(
@@ -138,8 +137,7 @@ def test_real_cross_format_merge_preserves_teeth_components(tmp_path):
         fixed_threshold=1000.0,
         moving_threshold=1000.0,
         grid_mm=1.0,
-        smooth_iters=effective_preset.smooth_iters,
-        smooth_force=effective_preset.smooth_force,
+        smooth_mm=effective_preset.smooth_mm,
         simplify_error_mm=effective_preset.simplify_error_mm,
         allow_large_volume=True,
     )
@@ -151,5 +149,5 @@ def test_real_cross_format_merge_preserves_teeth_components(tmp_path):
     assert result.provenance["preset"] == asdict(effective_preset)
     assert result.provenance["allow_large_volume"] is True
     finishing = result.provenance["surface_finishing"]
-    assert finishing["smoothing"]["requested_iterations"] == 2
+    assert finishing["smoothing"]["requested_iterations"] == 20
     assert finishing["decimation"]["simplify_error_mm"] == 0.01

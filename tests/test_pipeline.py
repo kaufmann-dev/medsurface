@@ -90,8 +90,9 @@ def test_conversion_emits_threshold_warning_before_loading(monkeypatch):
         pass
 
     def stop(_candidate, *, allow_large_volume):
-        assert len(emitted_warnings) == 1
+        assert len(emitted_warnings) == 2
         assert "HU calibration cannot be verified" in emitted_warnings[0]
+        assert "Gaussian sigma of 0.80 mm" in emitted_warnings[1]
         assert not allow_large_volume
         raise StopLoading
 
@@ -196,7 +197,7 @@ def test_every_preset_is_self_consistent():
         assert p.name == name
         assert p.description
         assert p.median_mm >= 0 and p.closing_mm >= 0 and p.opening_mm >= 0
-        assert 0.0 < p.smooth_force <= 0.5
+        assert p.smooth_mm >= 0
         assert p.simplify_error_mm >= 0
         if isinstance(p.threshold, str):
             assert p.threshold == "auto"
@@ -205,12 +206,12 @@ def test_every_preset_is_self_consistent():
             assert p.threshold_unit == "HU"
 
     assert {
-        name: preset.smooth_iters for name, preset in presets.PRESETS.items()
+        name: preset.smooth_mm for name, preset in presets.PRESETS.items()
     } == {
-        "bone": 60,
-        "teeth": 10,
-        "skin": 35,
-        "auto": 60,
+        "bone": 0.8,
+        "teeth": 0.3,
+        "skin": 1.0,
+        "auto": 0.8,
     }
 
 
@@ -249,9 +250,7 @@ def test_mask_surface_is_finished_once_in_physical_coordinates(monkeypatch):
         "unused.stl",
         settings=pipeline_mod.SurfaceSettings(
             resample_mm=0,
-            field_smooth_mm=0,
-            smooth_iters=0,
-            smooth_force=0.1,
+            smooth_mm=0,
             simplify_error_mm=0,
             keep_largest_component=False,
         ),
@@ -264,6 +263,53 @@ def test_mask_surface_is_finished_once_in_physical_coordinates(monkeypatch):
 
     assert captured["bounds"] == pytest.approx(expected_bounds)
     assert result.bounds_mm == pytest.approx(expected_bounds)
+
+
+def test_mask_surface_smooths_occupancy_before_meshing(monkeypatch):
+    values = np.zeros((12, 12, 12), dtype=np.uint8)
+    values[3:9, 3:9, 3:9] = 1
+    image = sitk.GetImageFromArray(values)
+    stages = []
+    captured = {}
+
+    def step(name, function):
+        stages.append(name)
+        return function()
+
+    def capture(poly, **kwargs):
+        captured["relax_surface"] = kwargs["relax_surface"]
+        return pipeline_mod.SurfaceFinish(
+            poly=poly,
+            surface_components=surface.component_count(poly),
+            warnings=[],
+            provenance={},
+        )
+
+    monkeypatch.setattr(pipeline_mod, "finish_surface", capture)
+    monkeypatch.setattr(
+        surface,
+        "write_validated",
+        lambda _poly, _path: {"valid": True},
+    )
+
+    pipeline_mod.mesh_binary_mask(
+        image,
+        "unused.stl",
+        settings=pipeline_mod.SurfaceSettings(
+            resample_mm=0,
+            smooth_mm=0.8,
+            simplify_error_mm=0,
+            keep_largest_component=False,
+        ),
+        cap_field_of_view=True,
+        allow_large_volume=False,
+        step=step,
+        log=lambda _message: None,
+        warn=lambda _message: None,
+    )
+
+    assert stages.index("smooth occupancy field") < stages.index("marching cubes")
+    assert captured["relax_surface"] is True
 
 
 def test_zero_simplification_does_not_disable_smoothing():
@@ -280,16 +326,41 @@ def test_zero_simplification_does_not_disable_smoothing():
     )
     finished = pipeline_mod.finish_surface(
         surface.from_arrays(vertices, faces),
-        smooth_iters=7,
-        smooth_force=0.1,
+        relax_surface=True,
         simplify_error_mm=0,
         keep_largest_component=False,
         step=lambda _name, function: function(),
         log=lambda _message: None,
     )
 
-    assert finished.provenance["smoothing"]["requested_iterations"] == 7
+    assert finished.provenance["smoothing"]["requested_iterations"] == 20
     assert finished.provenance["decimation"]["attempted"] is False
+
+
+def test_disabling_physical_smoothing_disables_internal_relaxation():
+    vertices = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    faces = np.asarray(
+        [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+        dtype=np.int32,
+    )
+
+    finished = pipeline_mod.finish_surface(
+        surface.from_arrays(vertices, faces),
+        relax_surface=False,
+        simplify_error_mm=0,
+        keep_largest_component=False,
+        step=lambda _name, function: function(),
+        log=lambda _message: None,
+    )
+
+    assert finished.provenance["smoothing"]["requested_iterations"] == 0
 
 
 def test_override_ignores_none_and_applies_values():
@@ -311,8 +382,7 @@ def test_unknown_preset_lists_alternatives():
     [
         ("median_mm", -1.0),
         ("resample_mm", float("nan")),
-        ("smooth_iters", -1),
-        ("smooth_force", 1.1),
+        ("smooth_mm", -1),
         ("simplify_error_mm", float("inf")),
     ],
 )
