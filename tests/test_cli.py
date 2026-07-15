@@ -25,7 +25,7 @@ from medsurface import __version__, cli
 from medsurface.catalog import DicomSource, FileSource, VolumeCandidate
 from medsurface.series import Series
 
-runner = CliRunner()
+runner = CliRunner(env={"_TYPER_FORCE_DISABLE_TERMINAL": "1"})
 
 
 def _expected_shell_command(arguments) -> str:
