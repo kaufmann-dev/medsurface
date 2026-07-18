@@ -431,6 +431,45 @@ def test_fused_surface_is_finished_in_fixed_physical_coordinates(monkeypatch):
     assert result.bounds_mm == pytest.approx(captured["bounds"])
 
 
+def test_fused_nifti_stops_before_every_surface_stage(tmp_path, monkeypatch):
+    values = np.zeros((12, 12, 12), dtype=np.uint8)
+    values[3:9, 3:9, 3:9] = 1
+    mask = _image(values, origin=(100.0, 200.0, 300.0))
+    output = tmp_path / "fused.nii.gz"
+    messages = []
+
+    monkeypatch.setattr(
+        merge_mod.registration, "rigid_register", lambda *_a, **_k: _result()
+    )
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("NIfTI output entered the surface-processing pipeline")
+
+    monkeypatch.setattr(merge_mod.segment, "smooth_occupancy", forbidden)
+    monkeypatch.setattr(merge_mod.segment, "pad", forbidden)
+    monkeypatch.setattr(merge_mod.surface, "marching_cubes", forbidden)
+    monkeypatch.setattr(merge_mod.pipeline, "finish_surface", forbidden)
+    monkeypatch.setattr(merge_mod.surface, "write_validated", forbidden)
+
+    result = merge_mod.fuse_masks(
+        mask,
+        mask,
+        str(output),
+        settings=None,
+        grid_mm=1.0,
+        log=messages.append,
+    )
+
+    assert isinstance(result, merge_mod.NiftiMaskMergeResult)
+    assert result.foreground_voxels > 0
+    assert output.exists()
+    stored = sitk.ReadImage(str(output))
+    assert stored.GetPixelID() == sitk.sitkUInt8
+    assert set(np.unique(sitk.GetArrayViewFromImage(stored))) <= {0, 1}
+    assert not any("smooth fused" in message for message in messages)
+    assert not any("marching cubes" in message for message in messages)
+
+
 def test_unrelated_anatomy_fails_the_gates():
     """The headline safety property: two scans that share no anatomy must not
     silently fuse. Registration still returns a transform -- it always does."""

@@ -51,15 +51,17 @@ JSON is a separate plain-output contract. `list --json`, `validate --json`, and
 `repair --json` write only JSON to stdout. The intensity-volume and labelmap
 `convert --json FILE` and `merge --json FILE` commands write JSON only to the
 requested file. Human output never shares the JSON destination, and JSON
-contains no ANSI control sequences. Intensity-volume reports include the
-complete effective preset; labelmap reports instead record their surface
-settings and all-nonzero foreground rule. Every conversion and merge report
-includes the measured number of output surface components.
-All convert and merge commands reject mesh or report paths that alias each
-other or any discovered input file through a lexical path, symlink, or hard
+contains no ANSI control sequences. Mesh reports include surface counts,
+finishing provenance, and quality. NIfTI merge reports instead identify the
+labelmap result and record its grid, `uint8` pixel type, foreground voxel and
+volume measurements, registration, and segmentation provenance without mesh
+fields. All convert and merge commands reject primary output or report paths
+that alias each other or any discovered input file through a lexical path, symlink, or hard
 link. This includes every DICOM instance and each payload referenced by a
-detached image header. Convert, merge, and repair reject unsupported output
-extensions before discovery or processing. JSON reports are written to a
+detached image header. Convert, validate, and repair remain mesh-only. Both
+merge commands additionally accept `.nii` and `.nii.gz`; incompatible
+surface-only options and unsupported extensions are rejected before discovery
+or processing. JSON reports are written to a
 temporary sibling and atomically published, so a failed report write preserves
 an existing report.
 Warnings raised by pydicom during discovery are captured, deduplicated with
@@ -144,7 +146,8 @@ remain external dependencies of the user's workflow, not medsurface runtime
 dependencies.
 
 Mask smoothing uses SimpleITK's recursive Gaussian with sigma in physical
-millimetres for every conversion and merge path. Every input axis must contain
+millimetres for every surface-producing conversion and merge path. NIfTI merge
+output stops before this stage. Every input axis must contain
 at least four voxels regardless of `--mask-smooth-mm` and
 the mesh-relaxation settings; there is no alternate smoothing algorithm for
 smaller inputs. The 0.5 isovalue keeps a straight binary boundary centered, but
@@ -262,8 +265,8 @@ operations therefore run in physical model coordinates.
 occupancy mask before marching cubes. Normal presets default to `0` because
 thresholded intensity masks can contain thin cortical or soft-tissue
 connections that a Gaussian can erase. External labelmaps default to `0.8 mm`
-to reduce voxel terracing. Both merge paths apply the same control only after
-occupancy fusion.
+to reduce voxel terracing. Both merge commands apply the same control after
+occupancy fusion only when producing a mesh.
 
 `--mesh-smooth-iters` independently controls one MeshLib `relaxKeepVolume` pass
 at fixed force 0.1 before simplification. Normal preset defaults are 20 for bone
@@ -325,11 +328,21 @@ Moving vertices are sampled to at most 60,000 with seed 0. ICP uses a 4 mm
 correspondence limit and up to 80 iterations per pass.
 
 After registration, both paths resample their masks as fractional occupancy onto
-the isotropic fusion grid and take their voxelwise maximum. Both apply their
-configured physical Gaussian to that fused field before volume measurement and
-marching cubes. Applying it after the union attenuates both source-grid terracing
-and small boundary disagreements between the registered masks without changing
-the masks used for registration.
+the isotropic fusion grid and take their voxelwise maximum. Output dispatch then
+follows the filename extension:
+
+- `.stl`, `.ply`, and `.obj` apply the configured physical Gaussian, measure the
+  fused volume, and continue through padding, marching cubes, surface finishing,
+  validation, and atomic mesh publication.
+- `.nii` and `.nii.gz` threshold occupancy at `0.5`, cast it to `uint8` values
+  `0` and `1`, and stop before every mesh-preparation and surface stage. The
+  temporary NIfTI is read back to verify its type, size, and physical geometry
+  before atomic publication.
+
+The NIfTI grid is isotropic at `--grid-mm` spacing, axis-aligned, and expressed
+in the fixed input's physical coordinate frame. Positive source label IDs are
+not preserved: `labelmap merge` continues to union all nonzero input values as
+one foreground. Explicit surface-only overrides are rejected for NIfTI output.
 
 | gate                      | definition                                                                                                           |  threshold |
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------: |
@@ -372,18 +385,19 @@ even though discovery does not read patient identifiers.
 Validation reports MeshLib-imported triangle/vertex counts, components,
 watertightness, winding, holes, boundary edges, disoriented faces, genus when
 defined, volume when closed, bounding box, and self-intersecting faces. The same
-complete check runs after both `convert` commands, both `merge` commands, and
-`repair`, and for `validate`.
+complete check runs after both `convert` commands, mesh-producing invocations of
+both `merge` commands, `repair`, and `validate`.
 
 A report is valid only when MeshLib imports the mesh as watertight, consistently
 wound, and enclosing a volume, with zero holes, boundary edges, disoriented
 faces, and self-intersecting faces. Multiple closed components are allowed.
 MeshLib can normalize raw face configurations while loading, so validation does
 not expose separate non-manifold or degenerate-face counters. A failed
-self-intersection measurement is invalid. All convert and merge commands, plus
-`repair`, have no validation bypass: they validate both the in-memory mesh and
-the serialized temporary file, then atomically replace the requested destination
-only with a valid output.
+self-intersection measurement is invalid. All mesh-producing convert and merge
+invocations, plus `repair`, have no validation bypass: they validate both the
+in-memory mesh and the serialized temporary file, then atomically replace the
+requested destination only with a valid output. NIfTI output is not a mesh and
+is therefore verified with the image round-trip contract instead of MeshLib.
 
 STL, PLY, and OBJ are loaded directly by MeshLib. VTP is not supported. All
 metrics describe the MeshLib-imported representation, and self-intersections

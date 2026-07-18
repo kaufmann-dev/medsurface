@@ -3,8 +3,9 @@
 [Install](#install) · [Quick start](#quick-start) · [Commands](#commands) ·
 [User guide][user-guide] · [Technical reference][technical-reference]
 
-Turn a medical image volume into an STL, PLY, or OBJ surface mesh from the
-command line. DICOM series, NIfTI, NRRD, and MetaImage inputs are supported.
+Turn medical image volumes into STL, PLY, or OBJ surface meshes, or fuse two
+volumes into an editable NIfTI labelmap. DICOM series, NIfTI, NRRD, and
+MetaImage inputs are supported.
 
 > **Safety:** `medsurface` is not validated for diagnosis, treatment
 > planning, or other clinical decisions. Segmentation and mesh processing can
@@ -64,7 +65,7 @@ thresholding and cleanup stages:
 medsurface labelmap convert segmentation.nii.gz -o surface.stl
 ```
 
-Every conversion and merge command offers three independent finishing controls.
+Every surface-producing conversion and merge offers three independent finishing controls.
 A Gaussian `--mask-smooth-mm` can remove voxel terracing before meshing, but it
 can also change topology or erase thin structures. Topology-preserving
 `--mesh-smooth-iters` relaxes the extracted surface before simplification, and
@@ -77,20 +78,21 @@ the smoothing settings.
 
 ## Commands
 
-| command                                                         | purpose                                                        |
-| --------------------------------------------------------------- | -------------------------------------------------------------- |
-| `medsurface list INPUT`                                         | Show every supported volume and any automatic default          |
-| `medsurface presets`                                            | Show the available tissue presets                              |
-| `medsurface convert INPUT -o MODEL.stl`                         | Segment one intensity volume and create a surface mesh         |
-| `medsurface merge FIXED MOVING -o MODEL.stl`                    | Segment, register, and combine two volumes of the same subject |
-| `medsurface labelmap convert MASK -o MODEL.stl`                 | Create one surface from all nonzero labels in one mask         |
-| `medsurface labelmap merge FIXED_MASK MOVING_MASK -o MODEL.stl` | Register two matching labelmaps and create their fused surface |
-| `medsurface validate MODEL.stl`                                 | Report mesh quality without changing the file                  |
-| `medsurface repair MODEL.stl -o FIXED.stl`                      | Repair an open or non-manifold mesh                            |
+| command                                                      | purpose                                                       |
+| ------------------------------------------------------------ | ------------------------------------------------------------- |
+| `medsurface list INPUT`                                      | Show every supported volume and any automatic default         |
+| `medsurface presets`                                         | Show the available tissue presets                             |
+| `medsurface convert INPUT -o MODEL.stl`                      | Segment one intensity volume and create a surface mesh        |
+| `medsurface merge FIXED MOVING -o OUTPUT`                    | Segment, register, and fuse two volumes into a mesh or NIfTI  |
+| `medsurface labelmap convert MASK -o MODEL.stl`              | Create one surface from all nonzero labels in one mask        |
+| `medsurface labelmap merge FIXED_MASK MOVING_MASK -o OUTPUT` | Register and fuse two matching labelmaps into a mesh or NIfTI |
+| `medsurface validate MODEL.stl`                              | Report mesh quality without changing the file                 |
+| `medsurface repair MODEL.stl -o FIXED.stl`                   | Repair an open or non-manifold mesh                           |
 
 Run `medsurface COMMAND --help` for every option and `medsurface --version` for
-the installed version. Output format follows the extension: `.stl`, `.ply`, or
-`.obj`; unsupported output extensions are rejected before image processing.
+the installed version. Mesh output format follows `.stl`, `.ply`, or `.obj`.
+Both merge commands also accept `.nii` and `.nii.gz`; other commands remain
+mesh-only. Unsupported output extensions are rejected before image processing.
 
 ## Common workflows
 
@@ -138,14 +140,27 @@ medsurface labelmap merge fixed-selected.nii.gz moving-selected.nii.gz \
 Both labelmaps must contain the same selected structures. This command performs
 rigid registration, so it is not a shortcut for combining separate structure
 files from one acquisition; create one multilabel input upstream for that case.
-Both merge commands apply physical smoothing after fusion, so it also
-attenuates voxel terraces and small boundary disagreements introduced by the
-union.
+To edit the registered union before meshing, write an uncompressed or compressed
+NIfTI instead, edit it in a volumetric tool, then convert the edited labelmap:
+
+```sh
+medsurface labelmap merge fixed-selected.nii.gz moving-selected.nii.gz \
+  -o fused.nii.gz
+# Edit fused.nii.gz and save the result as fused-edited.nii.gz.
+medsurface labelmap convert fused-edited.nii.gz -o fused-edited.stl
+```
+
+NIfTI merge output is an unsmoothed `uint8` mask containing only `0` and `1`.
+It stops before padding, marching cubes, and all surface processing. Mesh-only
+options such as `--mask-smooth-mm`, `--mesh-smooth-iters`,
+`--simplify-error-mm`, and `--components` are rejected in this mode.
 
 ## Validate and repair
 
-Every `convert` and `merge` command validates the written mesh. Inspect an
-existing mesh without changing it:
+Every mesh-producing `convert` and `merge` validates the written mesh. NIfTI
+merge output is written to a temporary sibling, read back to verify its stored
+geometry and pixel type, then atomically published. Inspect an existing mesh
+without changing it:
 
 ```sh
 medsurface validate model.stl

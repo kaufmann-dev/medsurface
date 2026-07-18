@@ -32,3 +32,6 @@ MAX_VOXELS = 500_000_000
 
 #: Formats supported consistently by conversion, merge, validation, and repair.
 SUPPORTED_MESH_EXTENSIONS = (".stl", ".ply", ".obj")
+
+#: Editable binary-volume destinations supported by merge workflows.
+SUPPORTED_NIFTI_EXTENSIONS = (".nii", ".nii.gz")
