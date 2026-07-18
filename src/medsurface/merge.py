@@ -38,6 +38,7 @@ from . import pipeline, registration, segment, surface
 from . import volume as volume_mod
 from .catalog import VolumeCandidate, same_source
 from .defaults import DEFAULT_MERGE_GRID_MM, MAX_VOXELS
+from .outputs import OutputKind, merge_output_kind
 from .presets import Preset
 from .presets import override as override_preset
 from .presets import validate as validate_preset
@@ -103,6 +104,21 @@ class MergeResult:
 
 
 @dataclass
+class NiftiMergeResult:
+    output_path: str
+    grid_mm: float
+    grid_size: tuple[int, int, int]
+    registration: RegistrationResult
+    volume_fixed_mm3: float
+    volume_moving_mm3: float
+    volume_union_mm3: float
+    foreground_voxels: int
+    seconds: float
+    warnings: list[str] = field(default_factory=list)
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class MaskMergeResult:
     triangles: int
     vertices: int
@@ -118,6 +134,17 @@ class MaskMergeResult:
     quality: dict[str, Any]
 
 
+@dataclass
+class NiftiMaskMergeResult:
+    grid_size: tuple[int, int, int]
+    registration: RegistrationResult
+    volume_fixed_mm3: float
+    volume_moving_mm3: float
+    volume_union_mm3: float
+    foreground_voxels: int
+    warnings: list[str]
+
+
 RIGID_REGISTRATION_WARNING = (
     "merge uses rigid registration and is intended for matching non-deforming "
     "anatomy such as bone; anatomy that moved or deformed between acquisitions "
@@ -125,13 +152,18 @@ RIGID_REGISTRATION_WARNING = (
 )
 
 
-def check_compatible(fixed: VolumeCandidate, moving: VolumeCandidate) -> list[str]:
+def check_compatible(
+    fixed: VolumeCandidate,
+    moving: VolumeCandidate,
+    output_kind: OutputKind = OutputKind.MESH,
+) -> list[str]:
     """Reject duplicate inputs and state the format-neutral identity contract."""
     if same_source(fixed, moving):
         raise MergeError("fixed and moving inputs resolve to the same volume")
+    result_name = "fused labelmap" if output_kind is OutputKind.NIFTI else "fused surface"
     return [
         "subject identity is not verified; confirm that fixed and moving volumes "
-        "show the same subject before using the fused surface",
+        "show the same subject before using the %s" % result_name,
         RIGID_REGISTRATION_WARNING,
     ]
 
@@ -247,18 +279,22 @@ def fuse_masks(
     moving_mask: sitk.Image,
     output_path: str,
     *,
-    settings: pipeline.SurfaceSettings,
+    settings: pipeline.SurfaceSettings | None,
     grid_mm: float = DEFAULT_MERGE_GRID_MM,
     force: bool = False,
     allow_large_volume: bool = False,
     log: Logger | None = None,
     warn: Logger | None = None,
-) -> MaskMergeResult:
-    """Register two binary masks, fuse their occupancy, and publish one mesh."""
-    surface.validate_output_path(output_path)
+) -> MaskMergeResult | NiftiMaskMergeResult:
+    """Register two binary masks and publish a mesh or editable labelmap."""
+    output_kind = merge_output_kind(output_path)
+    if output_kind is OutputKind.MESH:
+        surface.validate_output_path(output_path)
+        if settings is None:
+            raise ValueError("surface settings are required for mesh output")
+        pipeline.validate_surface_settings(settings)
     if not math.isfinite(grid_mm) or grid_mm <= 0:
         raise ValueError("grid_mm must be finite and greater than zero")
-    pipeline.validate_surface_settings(settings)
 
     def say(message: str) -> None:
         if log:
@@ -347,7 +383,11 @@ def fuse_masks(
         ),
     )
 
-    if settings.mask_smooth_mm > 0:
+    if (
+        output_kind is OutputKind.MESH
+        and settings is not None
+        and settings.mask_smooth_mm > 0
+    ):
         fused = step(
             "smooth fused mask occupancy field",
             lambda: segment.smooth_occupancy(fused, settings.mask_smooth_mm),
@@ -375,6 +415,23 @@ def fuse_masks(
         )
     )
 
+    if output_kind is OutputKind.NIFTI:
+        binary = step(
+            "validate and publish fused labelmap",
+            lambda: volume_mod.write_binary_nifti(fused, output_path),
+        )
+        foreground_voxels = int(sitk.GetArrayViewFromImage(binary).sum())
+        return NiftiMaskMergeResult(
+            grid_size=size,
+            registration=reg,
+            volume_fixed_mm3=fixed_volume_mm3,
+            volume_moving_mm3=moving_volume_mm3,
+            volume_union_mm3=union_volume_mm3,
+            foreground_voxels=foreground_voxels,
+            warnings=warnings,
+        )
+
+    assert settings is not None
     fused = segment.pad(fused, 1)
     affine = surface.index_to_physical(fused)
     poly = step(
@@ -443,17 +500,30 @@ def merge(
     allow_large_volume: bool = False,
     log: Logger | None = None,
     warn: Logger | None = None,
-) -> MergeResult:
-    surface.validate_output_path(output_path)
+) -> MergeResult | NiftiMergeResult:
+    output_kind = merge_output_kind(output_path)
+    if output_kind is OutputKind.MESH:
+        surface.validate_output_path(output_path)
+    elif any(
+        value is not None
+        for value in (
+            mask_smooth_mm,
+            surface_smooth_iters,
+            simplify_error_mm,
+            post_surface_smooth_iters,
+        )
+    ):
+        raise ValueError("surface-processing overrides cannot be used with NIfTI output")
     if not math.isfinite(grid_mm) or grid_mm <= 0:
         raise ValueError("grid_mm must be finite and greater than zero")
-    preset = override_preset(
-        preset,
-        mask_smooth_mm=mask_smooth_mm,
-        surface_smooth_iters=surface_smooth_iters,
-        simplify_error_mm=simplify_error_mm,
-        post_surface_smooth_iters=post_surface_smooth_iters,
-    )
+    if output_kind is OutputKind.MESH:
+        preset = override_preset(
+            preset,
+            mask_smooth_mm=mask_smooth_mm,
+            surface_smooth_iters=surface_smooth_iters,
+            simplify_error_mm=simplify_error_mm,
+            post_surface_smooth_iters=post_surface_smooth_iters,
+        )
     validate_preset(preset)
     started = time.time()
 
@@ -479,7 +549,7 @@ def merge(
         for message in messages:
             add_warning(message)
 
-    add_warnings(check_compatible(fixed, moving))
+    add_warnings(check_compatible(fixed, moving, output_kind))
     add_warnings(
         pipeline.threshold_warnings(
             fixed,
@@ -496,9 +566,10 @@ def merge(
             "--moving-threshold",
         )
     )
-    smoothing_message = pipeline.mask_smoothing_warning(preset.mask_smooth_mm)
-    if smoothing_message:
-        add_warning(smoothing_message)
+    if output_kind is OutputKind.MESH:
+        smoothing_message = pipeline.mask_smoothing_warning(preset.mask_smooth_mm)
+        if smoothing_message:
+            add_warning(smoothing_message)
 
     say("fixed  ID %d  %s  %s" % (fixed.id, fixed.format, fixed.source_name))
     say("moving ID %d  %s  %s" % (moving.id, moving.format, moving.source_name))
@@ -541,7 +612,11 @@ def merge(
         fixed_mask,
         moving_mask,
         output_path,
-        settings=pipeline.surface_settings(preset),
+        settings=(
+            pipeline.surface_settings(preset)
+            if output_kind is OutputKind.MESH
+            else None
+        ),
         grid_mm=grid_mm,
         force=force,
         allow_large_volume=allow_large_volume,
@@ -550,14 +625,12 @@ def merge(
     )
     warnings.extend(fused.warnings)
 
-    provenance = {
+    provenance: dict[str, Any] = {
         "fixed": pipeline.source_provenance(fixed_volume, fixed_value, fixed_source),
         "moving": pipeline.source_provenance(
             moving_volume, moving_value, moving_source
         ),
-        "preset": asdict(preset),
         "grid_mm": grid_mm,
-        "surface_finishing": fused.surface_finishing,
         "transform_moving_to_fixed": fused.registration.transform.tolist(),
         "rotation_deg": fused.registration.rotation_deg,
         "registration": {
@@ -571,6 +644,55 @@ def merge(
         "forced": bool(force),
         "allow_large_volume": bool(allow_large_volume),
     }
+
+    if isinstance(fused, NiftiMaskMergeResult):
+        preset_values = asdict(preset)
+        segmentation_keys = (
+            "name",
+            "description",
+            "threshold",
+            "threshold_unit",
+            "threshold_max",
+            "median_mm",
+            "closing_mm",
+            "opening_mm",
+            "min_island_mm3",
+            "keep_largest_island",
+        )
+        provenance.update(
+            {
+                "output": {
+                    "kind": "labelmap",
+                    "format": "NIfTI",
+                    "pixel_type": "uint8",
+                    "foreground": "1",
+                    "background": "0",
+                },
+                "segmentation_preset": {
+                    key: preset_values[key] for key in segmentation_keys
+                },
+            }
+        )
+        return NiftiMergeResult(
+            output_path=output_path,
+            grid_mm=grid_mm,
+            grid_size=fused.grid_size,
+            registration=fused.registration,
+            volume_fixed_mm3=fused.volume_fixed_mm3,
+            volume_moving_mm3=fused.volume_moving_mm3,
+            volume_union_mm3=fused.volume_union_mm3,
+            foreground_voxels=fused.foreground_voxels,
+            seconds=time.time() - started,
+            warnings=warnings,
+            provenance=provenance,
+        )
+
+    provenance.update(
+        {
+            "preset": asdict(preset),
+            "surface_finishing": fused.surface_finishing,
+        }
+    )
 
     return MergeResult(
         output_path=output_path,

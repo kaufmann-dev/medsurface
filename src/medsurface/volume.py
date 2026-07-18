@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import os
+import tempfile
 from dataclasses import dataclass
 
 import numpy as np
@@ -10,6 +12,7 @@ import SimpleITK as sitk
 
 from .catalog import DicomSource, FileSource, VolumeCandidate, validate_image
 from .defaults import MAX_VOXELS, MIN_VOLUME_AXIS_VOXELS
+from .outputs import extension
 
 
 @dataclass
@@ -148,3 +151,40 @@ def touches_boundary(image: sitk.Image, value: int = 1) -> bool:
         a[:, :, 0], a[:, :, -1],
     )
     return any(bool(np.any(f == value)) for f in faces)
+
+
+def write_binary_nifti(image: sitk.Image, path: str) -> sitk.Image:
+    """Atomically publish a binary uint8 NIfTI and verify its stored geometry."""
+    output_extension = extension(path)
+    if output_extension not in (".nii", ".nii.gz"):
+        raise ValueError("NIfTI output must end in .nii or .nii.gz")
+
+    binary = sitk.Cast(sitk.Greater(image, 0.5), sitk.sitkUInt8)
+    destination = os.path.abspath(path)
+    parent = os.path.dirname(destination)
+    os.makedirs(parent, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".%s." % os.path.basename(destination),
+        suffix=output_extension,
+        dir=parent,
+    )
+    os.close(descriptor)
+    try:
+        sitk.WriteImage(binary, temporary, useCompression=output_extension == ".nii.gz")
+        stored = sitk.ReadImage(temporary)
+        if stored.GetDimension() != 3 or stored.GetPixelID() != sitk.sitkUInt8:
+            raise ValueError("serialized NIfTI is not a scalar uint8 3D image")
+        if stored.GetSize() != binary.GetSize():
+            raise ValueError("serialized NIfTI dimensions changed during writing")
+        for label, actual, expected in (
+            ("spacing", stored.GetSpacing(), binary.GetSpacing()),
+            ("origin", stored.GetOrigin(), binary.GetOrigin()),
+            ("direction", stored.GetDirection(), binary.GetDirection()),
+        ):
+            if not np.allclose(actual, expected, rtol=0.0, atol=1e-5):
+                raise ValueError("serialized NIfTI %s changed during writing" % label)
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return binary

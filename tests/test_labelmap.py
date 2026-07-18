@@ -296,6 +296,57 @@ def test_labelmap_merge_registers_rigid_masks_and_uses_fixed_frame(tmp_path):
     assert any("same rigid structures" in warning for warning in result.warnings)
 
 
+def test_labelmap_merge_returns_nifti_result_without_surface_provenance(
+    tmp_path, monkeypatch
+):
+    fixed_path = tmp_path / "fixed.nii.gz"
+    moving_path = tmp_path / "moving.nii.gz"
+    values = np.zeros((8, 8, 8), dtype=np.uint8)
+    values[2:6, 2:6, 2:6] = 1
+    fixed = _write(fixed_path, values)
+    moving = _write(moving_path, values, origin=(1.0, 0.0, 0.0))
+    registration_result = merge_mod.RegistrationResult(
+        transform=np.eye(4),
+        fft_translation_mm=np.zeros(3),
+        rotation_deg=0.0,
+        translation_mm=np.zeros(3),
+        inlier_rms_mm=0.1,
+        inlier_median_mm=0.1,
+        overlap_moving_in_fixed=0.95,
+        overlap_fixed_in_moving=0.95,
+        shared_fov_dice=0.9,
+        shared_fov_mm3=100_000.0,
+    )
+
+    monkeypatch.setattr(
+        merge_mod,
+        "fuse_masks",
+        lambda *_args, **kwargs: (
+            merge_mod.NiftiMaskMergeResult(
+                grid_size=(20, 21, 22),
+                registration=registration_result,
+                volume_fixed_mm3=100.0,
+                volume_moving_mm3=110.0,
+                volume_union_mm3=150.0,
+                foreground_voxels=150,
+                warnings=[],
+            )
+            if kwargs["settings"] is None
+            else pytest.fail("NIfTI merge received surface settings")
+        ),
+    )
+
+    result = labelmap.merge(fixed, moving, str(tmp_path / "merged.nii.gz"))
+
+    assert isinstance(result, merge_mod.NiftiMergeResult)
+    assert result.grid_size == (20, 21, 22)
+    assert result.foreground_voxels == 150
+    assert result.provenance["output"]["kind"] == "labelmap"
+    assert "surface" not in result.provenance
+    assert "surface_finishing" not in result.provenance
+    assert any("fused labelmap" in warning for warning in result.warnings)
+
+
 def test_labelmap_merge_rejects_the_same_input_before_loading(tmp_path, monkeypatch):
     source = tmp_path / "mask.nii.gz"
     candidate = _write(source, _two_labels())

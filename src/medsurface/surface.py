@@ -12,6 +12,7 @@ import numpy as np
 import SimpleITK as sitk
 
 from .defaults import SUPPORTED_MESH_EXTENSIONS
+from .outputs import extension
 
 
 @dataclass(frozen=True)
@@ -513,7 +514,7 @@ def vertex_normals(mesh: mrmeshpy.Mesh) -> tuple[np.ndarray, np.ndarray]:
 
 def validate_output_path(path: str) -> None:
     """Reject unsupported mesh destinations before expensive processing."""
-    ext = os.path.splitext(path)[1].lower()
+    ext = extension(path)
     if ext not in SUPPORTED_MESH_EXTENSIONS:
         raise ValueError(
             "unsupported output extension %r; supported: %s"

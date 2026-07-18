@@ -37,7 +37,7 @@ surface.
   process or operating system may still terminate when memory is exhausted.
 - Series UIDs, descriptions, file paths, and derived anatomy can remain
   identifying even when demographic fields have been removed.
-- Treat source data, logs, provenance, and output meshes according to the same
+- Treat source data, logs, provenance, and derived outputs according to the same
   privacy rules as other personal health data.
 - Mesh and JSON report paths cannot alias any discovered medical image input,
   including DICOM instances and detached NRRD or MetaImage payloads.
@@ -115,8 +115,8 @@ Other inputs, derived CT without explicit units, inconsistent series, and
 ambiguous multienergy CT receive a warning. Use an intentional numeric
 `--threshold` or `--preset auto` when values are not calibrated HU.
 
-Every normal and labelmap conversion or merge exposes the same three independent
-smoothing controls. `--mask-smooth-mm` applies a Gaussian to the segmented
+Every normal and labelmap conversion or mesh-producing merge exposes the same
+three independent smoothing controls. `--mask-smooth-mm` applies a Gaussian to the segmented
 occupancy mask before meshing. It uses physical millimetres and does not depend
 on triangle density, but it can change topology: boundaries can move, gaps can
 close, and thin structures can disappear. `--mesh-smooth-iters` applies
@@ -155,8 +155,9 @@ medsurface merge fixed.nii.gz moving.mha \
 
 An explicit CLI value overrides the corresponding preset value. Run
 `medsurface convert --help` or `medsurface merge --help` for the complete set of
-overrides. Both commands accept the shared median, opening, closing, island and
-component selection, smoothing, and simplification controls.
+overrides. Mesh output accepts the shared median, opening, closing, island and
+component selection, smoothing, and simplification controls. NIfTI merge output
+uses the segmentation and morphology controls but rejects surface-only options.
 
 ## Using an external labelmap
 
@@ -222,14 +223,34 @@ medsurface labelmap merge fixed-selected.nii.gz moving-selected.nii.gz \
 ```
 
 It rigidly registers the moving foreground to the fixed foreground, checks the
-registration, unions the masks on the shared fusion grid, applies physical
-smoothing to the fused occupancy field, and creates one mesh in the fixed
-labelmap's physical coordinate system. Smoothing after the union attenuates
-both voxel terraces and small boundary disagreements between the masks. Confirm
-that both inputs belong to the same subject and contain the same selected,
-non-deforming structures. `--force` bypasses only failed registration-quality
-gates. Do not use this command merely to combine separate structure files from
-one scan; create one multilabel file upstream instead.
+registration, and unions the masks on an isotropic grid in the fixed labelmap's
+physical coordinate system. A mesh output applies the configured physical
+smoothing before surface extraction. Smoothing after the union attenuates both
+voxel terraces and small boundary disagreements between the masks.
+
+Use NIfTI output when the fused volume needs manual editing before meshing:
+
+```sh
+medsurface labelmap merge fixed-selected.nii.gz moving-selected.nii.gz \
+  -o fused.nii.gz
+# Edit the volume and save it as fused-edited.nii.gz.
+medsurface labelmap convert fused-edited.nii.gz -o fused-edited.stl
+```
+
+The NIfTI branch thresholds fused occupancy at `0.5` and atomically publishes a
+`uint8` labelmap containing only background `0` and foreground `1`. It does not
+smooth or pad the mask and does not run marching cubes, component selection,
+simplification, surface relaxation, or mesh validation. Consequently,
+`--mask-smooth-mm`, `--mesh-smooth-iters`, `--simplify-error-mm`,
+`--post-mesh-smooth-iters`, and `--components` are usage errors with `.nii` or
+`.nii.gz` output. `--grid-mm`, `--force`, and `--allow-large-volume` remain
+applicable. The top-level `merge` command supports the same NIfTI branch after
+segmenting its two intensity inputs.
+
+Confirm that both inputs belong to the same subject and contain the same
+selected, non-deforming structures. `--force` bypasses only failed
+registration-quality gates. Do not use this command merely to combine separate
+structure files from one scan; create one multilabel file upstream instead.
 
 ## Input requirements and limitations
 
@@ -301,23 +322,27 @@ may delay cancellation until it returns control to Python; repeated interrupts
 do not bypass cleanup.
 
 Numeric processing options reject non-finite and out-of-range values as usage
-errors. Unsupported mesh output extensions are rejected before discovery or
-image processing. Grid and resampling allocations are also bounded before the
-image toolkit is asked to allocate them; increase the requested voxel spacing
-if the planned volume is too large.
+errors. Unsupported output extensions and mesh-only options combined with
+NIfTI output are rejected before discovery or image processing. Grid and
+resampling allocations are also bounded before the image toolkit is asked to
+allocate them; increase the requested voxel spacing if the planned volume is
+too large.
 
 ## Understanding validation
 
-Conversion, merging, and repair validate the in-memory surface, write a
-temporary file in the destination directory, validate that serialized file,
-and atomically publish it only when both checks pass. A failed operation leaves
-an existing destination unchanged. `validate` runs the same checks without
-changing its input.
+Mesh-producing conversion, merging, and repair validate the in-memory surface,
+write a temporary file in the destination directory, validate that serialized
+file, and atomically publish it only when both checks pass. NIfTI merge output
+is likewise written to a temporary sibling and read back to confirm its 3-D
+`uint8` type, size, and physical geometry before publication. A failed
+operation leaves an existing destination unchanged. `validate` runs mesh checks
+without changing its input and rejects NIfTI input.
 
 Both `convert` commands and both `merge` commands accept `--json FILE` and
-publish the report atomically. The report and mesh must be different files, and
-neither may overwrite a discovered image header, detached payload, or DICOM
-instance.
+publish the report atomically. The report and primary output must be different
+files, and neither may overwrite a discovered image header, detached payload,
+or DICOM instance. NIfTI reports contain grid, voxel, foreground-volume, and
+registration data rather than mesh quality fields.
 
 A report is valid only when MeshLib imports the mesh as watertight, consistently
 wound, and enclosing a volume, with no holes, boundary edges, disoriented faces,

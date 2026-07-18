@@ -1,4 +1,4 @@
-"""Turn medical image volumes into watertight 3D surface meshes."""
+"""Create surface meshes and fused NIfTI labelmaps from medical images."""
 
 from .presets import PRESETS, Preset  # noqa: F401
 

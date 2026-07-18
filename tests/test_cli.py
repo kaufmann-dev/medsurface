@@ -170,6 +170,38 @@ def _merge_result(
     )
 
 
+def _nifti_merge_result(output: str, *, warnings_: list[str] | None = None):
+    from medsurface import merge as merge_mod
+
+    registration = SimpleNamespace(
+        transform=[
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        rotation_deg=0.0,
+        inlier_rms_mm=0.1,
+        inlier_median_mm=0.1,
+        surface_overlap=0.95,
+        shared_fov_dice=0.9,
+        shared_fov_mm3=100_000.0,
+    )
+    return merge_mod.NiftiMergeResult(
+        output_path=output,
+        grid_mm=0.8,
+        grid_size=(10, 20, 30),
+        registration=registration,
+        volume_fixed_mm3=100.0,
+        volume_moving_mm3=110.0,
+        volume_union_mm3=150.0,
+        foreground_voxels=293,
+        seconds=2.5,
+        warnings=warnings_ or [],
+        provenance={"output": {"kind": "labelmap"}},
+    )
+
+
 def _run_cli_in_clean_interpreter(argv):
     code = """
 import json
@@ -1498,7 +1530,7 @@ def test_convert_rejects_one_path_for_mesh_and_json_before_processing(
     )
 
     assert result.exit_code == 2
-    assert "mesh output and JSON report must be different files" in result.stderr
+    assert "output and JSON report must be different files" in result.stderr
     assert not destination.exists()
 
 
@@ -1679,6 +1711,63 @@ def test_labelmap_merge_accepts_fusion_flags_and_writes_json(tmp_path, monkeypat
     assert payload["quality"]["valid"]
 
 
+def test_labelmap_merge_writes_nifti_result_and_volume_json(tmp_path, monkeypatch):
+    fixed_path = tmp_path / "fixed.nii.gz"
+    moving_path = tmp_path / "moving.nii.gz"
+    fixed_path.write_bytes(b"fixed")
+    moving_path.write_bytes(b"moving")
+    fixed = _file_candidate(fixed_path, row_id=1)
+    moving = _file_candidate(moving_path, row_id=1)
+    output = tmp_path / "merged.nii.gz"
+    json_file = tmp_path / "result.json"
+    captured = {}
+
+    monkeypatch.setattr(
+        cli,
+        "_select_labelmap",
+        lambda path, _role=None: (
+            (fixed, [fixed]) if path == fixed_path else (moving, [moving])
+        ),
+    )
+    from medsurface import labelmap as labelmap_mod
+
+    def fake_merge(**kwargs):
+        captured.update(kwargs)
+        return _nifti_merge_result(str(output))
+
+    monkeypatch.setattr(labelmap_mod, "merge", fake_merge)
+    result = runner.invoke(
+        cli.app,
+        [
+            "labelmap",
+            "merge",
+            str(fixed_path),
+            str(moving_path),
+            "-o",
+            str(output),
+            "--json",
+            str(json_file),
+        ],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["mask_smooth_mm"] is None
+    assert captured["surface_smooth_iters"] is None
+    assert captured["simplify_error_mm"] is None
+    assert captured["post_surface_smooth_iters"] is None
+    assert captured["keep_largest_component"] is None
+    assert "foreground" in result.stdout
+    assert "Mesh quality" not in result.stdout
+    assert "triangles" not in result.stdout
+    payload = json.loads(json_file.read_text())
+    assert payload["result"]["output_kind"] == "labelmap"
+    assert payload["result"]["pixel_type"] == "uint8"
+    assert payload["result"]["foreground_voxels"] == 293
+    assert "quality" not in payload
+    assert "triangles" not in payload["result"]
+
+
 @pytest.mark.parametrize(
     "argv,option",
     [
@@ -1760,6 +1849,95 @@ def test_invalid_labelmap_processing_options_fail_before_discovery(
     assert result.exit_code == 2
     assert option in result.stderr
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "command,option",
+    [
+        ("merge", "--mask-smooth-mm"),
+        ("merge", "--mesh-smooth-iters"),
+        ("merge", "--simplify-error-mm"),
+        ("merge", "--post-mesh-smooth-iters"),
+        ("merge", "--components"),
+        ("labelmap merge", "--mask-smooth-mm"),
+        ("labelmap merge", "--components"),
+    ],
+)
+def test_nifti_merge_rejects_surface_options_before_discovery(
+    tmp_path, monkeypatch, command, option
+):
+    moving = tmp_path / "moving.nii.gz"
+    fixed = tmp_path / "fixed.nii.gz"
+    fixed.write_bytes(b"fixed")
+    moving.write_bytes(b"moving")
+    option_value = "all" if option == "--components" else "1"
+    prefix = command.split()
+    argv = [
+        *prefix,
+        str(fixed),
+        str(moving),
+        "-o",
+        str(tmp_path / "merged.nii.gz"),
+        option,
+        option_value,
+    ]
+    monkeypatch.setattr(
+        cli,
+        "_discover",
+        lambda *_args: pytest.fail("volume discovery must not start"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_select_labelmap",
+        lambda *_args: pytest.fail("labelmap discovery must not start"),
+    )
+
+    result = runner.invoke(cli.app, argv, prog_name="medsurface")
+
+    assert result.exit_code == 2
+    assert option in result.stderr
+    assert "surface processing is skipped" in " ".join(result.stderr.split())
+
+
+@pytest.mark.parametrize("command", ["convert", "labelmap convert"])
+def test_convert_commands_reject_nifti_output_before_discovery(
+    tmp_path, monkeypatch, command
+):
+    source = tmp_path / "input.nii.gz"
+    source.write_bytes(b"input")
+    monkeypatch.setattr(
+        cli,
+        "_discover",
+        lambda *_args: pytest.fail("volume discovery must not start"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_select_labelmap",
+        lambda *_args: pytest.fail("labelmap discovery must not start"),
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [*command.split(), str(source), "-o", str(tmp_path / "out.nii.gz")],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 2
+    assert "unsupported output extension '.nii.gz'" in result.stderr
+
+
+@pytest.mark.parametrize("command", ["validate", "repair"])
+def test_mesh_tools_reject_nifti_input_before_loading(tmp_path, command):
+    source = tmp_path / "input.nii.gz"
+    source.write_bytes(b"input")
+    argv = [command, str(source)]
+    if command == "repair":
+        argv.extend(["-o", str(tmp_path / "out.stl")])
+
+    result = runner.invoke(cli.app, argv, prog_name="medsurface")
+
+    assert result.exit_code == 2
+    assert "unsupported mesh extension '.nii.gz'" in result.stderr
 
 
 def test_convert_requires_id_for_multiple_dicom_modalities(tmp_path, monkeypatch):
@@ -1901,6 +2079,60 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
     )
     assert refused.exit_code == 3
     assert "registration gate refused" in refused.stderr
+
+
+def test_merge_writes_nifti_result_without_mesh_fields(tmp_path, monkeypatch):
+    moving_dir = tmp_path / "moving"
+    moving_dir.mkdir()
+    fixed = _candidate(uid="1.2.3", description="fixed")
+    moving = _candidate(uid="1.2.4", description="moving")
+    output = tmp_path / "merged.nii"
+    json_file = tmp_path / "merged.json"
+    captured = {}
+
+    monkeypatch.setattr(
+        cli,
+        "_discover",
+        lambda path: [moving] if path == moving_dir else [fixed],
+    )
+    from medsurface import merge as merge_mod
+
+    def fake_merge(**kwargs):
+        captured.update(kwargs)
+        return _nifti_merge_result(str(output))
+
+    monkeypatch.setattr(merge_mod, "merge", fake_merge)
+    result = runner.invoke(
+        cli.app,
+        [
+            "merge",
+            str(tmp_path),
+            str(moving_dir),
+            "-o",
+            str(output),
+            "--preset",
+            "bone",
+            "--grid-mm",
+            "0.8",
+            "--json",
+            str(json_file),
+        ],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["preset"].name == "bone"
+    assert captured["mask_smooth_mm"] is None
+    assert captured["surface_smooth_iters"] is None
+    assert captured["simplify_error_mm"] is None
+    assert captured["post_surface_smooth_iters"] is None
+    assert "foreground" in result.stdout
+    assert "Mesh quality" not in result.stdout
+    payload = json.loads(json_file.read_text())
+    assert payload["result"]["format"] == "NIfTI"
+    assert payload["result"]["grid_size"] == [10, 20, 30]
+    assert "quality" not in payload
+    assert "surface_components" not in payload["result"]
 
 
 def test_merge_omitted_components_preserves_teeth_preset_default(

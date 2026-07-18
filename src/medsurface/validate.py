@@ -10,11 +10,12 @@ import meshlib.mrmeshpy as mrmeshpy
 import numpy as np
 
 from .defaults import SUPPORTED_MESH_EXTENSIONS
+from .outputs import extension
 
 
 def _load_mesh(path: str) -> mrmeshpy.Mesh:
     """Load a supported triangle mesh with MeshLib."""
-    ext = os.path.splitext(path)[1].lower()
+    ext = extension(path)
     if ext not in SUPPORTED_MESH_EXTENSIONS:
         raise ValueError(
             "unsupported mesh extension %r; supported: %s"
