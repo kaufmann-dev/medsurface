@@ -172,7 +172,7 @@ def test_conversion_warns_when_the_destination_cannot_represent_all_metadata(
     assert result.warnings == emitted
 
 
-def _write_ct_stack(root: Path) -> None:
+def _write_ct_stack(root: Path, *, invalid_metadata: bool = False) -> None:
     root.mkdir()
     series_uid = generate_uid()
     for index in range(6):
@@ -191,6 +191,8 @@ def _write_ct_stack(root: Path) -> None:
         dataset.Modality = "CT"
         dataset.ImageType = ["ORIGINAL", "PRIMARY", "AXIAL"]
         dataset.SeriesDescription = "conversion CT"
+        if invalid_metadata:
+            dataset.add_new((0x0008, 0x0080), "LO", b"Clinic \xfc")
         dataset.SeriesNumber = 1
         dataset.InstanceNumber = index + 1
         dataset.ImageOrientationPatient = [1, 0, 0, 0, 1, 0]
@@ -226,6 +228,80 @@ def test_synthetic_dicom_converts_without_changing_the_loaded_volume(
     _assert_same_image(_read(destination), expected)
     assert result.provenance["format"] == "DICOM"
     assert result.provenance["dicom"]["series_uid"] == candidate.dicom.uid
+
+
+def test_dicom_metadata_copy_omits_invalid_unicode_without_rewriting_it():
+    class Reader:
+        def GetMetaDataKeys(self, _slice):
+            return ("0008|0060", "0008|0080")
+
+        def GetMetaData(self, _slice, key):
+            return {
+                "0008|0060": "CT",
+                "0008|0080": "Clinic \udcfc",
+            }[key]
+
+    image = sitk.Image((4, 4, 4), sitk.sitkInt16)
+
+    omissions = volume._copy_dicom_metadata(Reader(), image)
+
+    assert omissions == 1
+    assert image.GetMetaData("0008|0060") == "CT"
+    assert not image.HasMetaDataKey("0008|0080")
+
+
+def test_dicom_metadata_copy_does_not_hide_valid_value_failures():
+    class Reader:
+        def GetMetaDataKeys(self, _slice):
+            return ("0008|0060",)
+
+        def GetMetaData(self, _slice, _key):
+            return "CT"
+
+    class BrokenImage:
+        def SetMetaData(self, _key, _value):
+            raise TypeError("unexpected metadata setter failure")
+
+    with pytest.raises(TypeError, match="unexpected metadata setter failure"):
+        volume._copy_dicom_metadata(Reader(), BrokenImage())
+
+
+def test_conversion_omits_invalid_dicom_text_and_warns(tmp_path):
+    source = tmp_path / "dicom"
+    _write_ct_stack(source, invalid_metadata=True)
+    candidate = catalog.select(catalog.discover(source), None)
+    expected = volume.load(candidate).image
+    destination = tmp_path / "converted.nrrd"
+    emitted = []
+
+    result = volume.convert(candidate, str(destination), warn=emitted.append)
+    stored = _read(destination)
+
+    _assert_same_image(stored, expected)
+    assert stored.GetMetaData("0008|0060") == "CT"
+    assert not stored.HasMetaDataKey("0008|0080")
+    assert any(
+        "omitted 1 DICOM metadata value" in warning
+        and "invalid text encoding" in warning
+        for warning in emitted
+    )
+    assert result.warnings == emitted
+
+
+def test_stripped_conversion_does_not_load_or_warn_about_invalid_dicom_text(
+    tmp_path,
+):
+    source = tmp_path / "dicom"
+    _write_ct_stack(source, invalid_metadata=True)
+    candidate = catalog.select(catalog.discover(source), None)
+    destination = tmp_path / "stripped.mha"
+
+    result = volume.convert(candidate, str(destination), strip_metadata=True)
+    stored = _read(destination)
+
+    assert not stored.HasMetaDataKey("0008|0060")
+    assert not stored.HasMetaDataKey("0008|0080")
+    assert not any("invalid text encoding" in warning for warning in result.warnings)
 
 
 def test_conversion_rejects_an_unsupported_output_before_loading(tmp_path, monkeypatch):

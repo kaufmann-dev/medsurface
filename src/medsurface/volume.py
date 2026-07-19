@@ -22,6 +22,7 @@ from .outputs import VolumeOutput, volume_output
 class Volume:
     image: sitk.Image
     candidate: VolumeCandidate
+    metadata_omissions: int = 0
 
     @property
     def spacing(self) -> tuple[float, float, float]:
@@ -100,7 +101,34 @@ def _voxel_count(candidate: VolumeCandidate) -> int:
     return math.prod(int(value) for value in size)
 
 
-def load(candidate: VolumeCandidate, *, allow_large_volume: bool = False) -> Volume:
+def _copy_dicom_metadata(
+    reader: sitk.ImageSeriesReader,
+    image: sitk.Image,
+) -> int:
+    """Promote valid first-slice metadata without guessing malformed text."""
+    omissions = 0
+    for key in reader.GetMetaDataKeys(0):
+        try:
+            value = reader.GetMetaData(0, key)
+            value.encode("utf-8", errors="strict")
+        except (RuntimeError, UnicodeEncodeError):
+            omissions += 1
+            continue
+        image.SetMetaData(key, value)
+    return omissions
+
+
+def _erase_metadata(image: sitk.Image) -> None:
+    for key in image.GetMetaDataKeys():
+        image.EraseMetaData(key)
+
+
+def load(
+    candidate: VolumeCandidate,
+    *,
+    allow_large_volume: bool = False,
+    preserve_metadata: bool = False,
+) -> Volume:
     """Load pixels for one already-selected candidate."""
     if not candidate.usable:
         raise ValueError("volume ID %d is unusable: %s" % (candidate.id, candidate.unusable_reason))
@@ -112,6 +140,7 @@ def load(candidate: VolumeCandidate, *, allow_large_volume: bool = False) -> Vol
             "to attempt it (this may exhaust memory)"
             % (f"{voxels:,}", f"{MAX_VOXELS:,}")
         )
+    metadata_omissions = 0
     try:
         if isinstance(candidate.source, DicomSource):
             series = candidate.source.series
@@ -121,12 +150,12 @@ def load(candidate: VolumeCandidate, *, allow_large_volume: bool = False) -> Vol
                 )
             reader = sitk.ImageSeriesReader()
             reader.SetFileNames(series.files)  # already ordered by physical position
-            reader.MetaDataDictionaryArrayUpdateOn()
-            reader.LoadPrivateTagsOn()
+            if preserve_metadata:
+                reader.MetaDataDictionaryArrayUpdateOn()
+                reader.LoadPrivateTagsOn()
             image = reader.Execute()
-            if series.files:
-                for key in reader.GetMetaDataKeys(0):
-                    image.SetMetaData(key, reader.GetMetaData(0, key))
+            if preserve_metadata and series.files:
+                metadata_omissions = _copy_dicom_metadata(reader, image)
         else:
             source_path = str(candidate.source.path)
             if candidate.source.path.name == candidate.source.path.name.casefold():
@@ -136,6 +165,8 @@ def load(candidate: VolumeCandidate, *, allow_large_volume: bool = False) -> Vol
                     source_path,
                     imageIO=_image_io(candidate.source.path),
                 )
+            if not preserve_metadata:
+                _erase_metadata(image)
     except RuntimeError as exc:
         detail = next(
             (line.strip() for line in reversed(str(exc).splitlines()) if line.strip()),
@@ -151,7 +182,11 @@ def load(candidate: VolumeCandidate, *, allow_large_volume: bool = False) -> Vol
     reason = validate_image(image)
     if reason:
         raise ValueError("volume ID %d is unusable: %s" % (candidate.id, reason))
-    return Volume(image=image, candidate=candidate)
+    return Volume(
+        image=image,
+        candidate=candidate,
+        metadata_omissions=metadata_omissions,
+    )
 
 
 def has_calibrated_hu(candidate: VolumeCandidate) -> bool:
@@ -163,6 +198,13 @@ def loading_warnings_for(volume: Volume) -> list[str]:
     """Non-fatal observations relevant to loading without image processing."""
     out: list[str] = []
     series = volume.candidate.dicom
+
+    if volume.metadata_omissions:
+        noun = "value" if volume.metadata_omissions == 1 else "values"
+        out.append(
+            "omitted %d DICOM metadata %s with invalid text encoding; voxel data "
+            "and geometry are unchanged" % (volume.metadata_omissions, noun)
+        )
 
     if series is not None and not series.spacing_uniform:
         out.append(
@@ -302,7 +344,27 @@ def _metadata(image: sitk.Image) -> dict[str, str]:
     return metadata
 
 
-def _verify_contract(stored: sitk.Image, expected: _ImageContract) -> None:
+def _geometry_tolerance(
+    expected: tuple[float, ...],
+    output: VolumeOutput,
+) -> np.ndarray:
+    tolerance = np.full(len(expected), 1e-5, dtype=np.float64)
+    expected_values = np.asarray(expected, dtype=np.float64)
+    if (
+        output.format == "NIfTI"
+        and np.all(np.abs(expected_values) <= np.finfo(np.float32).max)
+    ):
+        encoded = expected_values.astype(np.float32)
+        ulps = np.abs(np.spacing(encoded).astype(np.float64))
+        tolerance = np.maximum(tolerance, ulps)
+    return tolerance
+
+
+def _verify_contract(
+    stored: sitk.Image,
+    expected: _ImageContract,
+    output: VolumeOutput,
+) -> None:
     checks = (
         ("dimension", stored.GetDimension(), expected.dimension),
         ("dimensions", tuple(stored.GetSize()), expected.size),
@@ -324,11 +386,16 @@ def _verify_contract(stored: sitk.Image, expected: _ImageContract) -> None:
         ("origin", stored.GetOrigin(), expected.origin),
         ("direction", stored.GetDirection(), expected.direction),
     ):
-        if not np.allclose(
-            geometry_actual, geometry_wanted, rtol=0.0, atol=1e-5
-        ):
+        delta = np.abs(
+            np.asarray(geometry_actual, dtype=np.float64)
+            - np.asarray(geometry_wanted, dtype=np.float64)
+        )
+        tolerance = _geometry_tolerance(geometry_wanted, output)
+        if np.any(delta > tolerance):
             raise ValueError(
-                "serialized volume %s changed during writing" % geometry_label
+                "serialized volume %s changed during writing (maximum delta %.6g, "
+                "allowed %.6g)"
+                % (geometry_label, float(delta.max()), float(tolerance.max()))
             )
     if _voxel_digest(stored) != expected.digest:
         raise ValueError("serialized volume voxel values changed during writing")
@@ -387,7 +454,7 @@ def write_verified_volume(
         image = sitk.Image()
 
         stored = sitk.ReadImage(temporary)
-        _verify_contract(stored, expected)
+        _verify_contract(stored, expected, output)
         _verify_compression(temporary, output)
         preserved_metadata = sum(
             stored.HasMetaDataKey(key) and stored.GetMetaData(key) == value
@@ -440,15 +507,15 @@ def convert(
 
     loaded = step(
         "load volume",
-        lambda: load(candidate, allow_large_volume=allow_large_volume),
+        lambda: load(
+            candidate,
+            allow_large_volume=allow_large_volume,
+            preserve_metadata=not strip_metadata,
+        ),
     )
     provenance = provenance_for(loaded)
     for message in loading_warnings_for(loaded):
         add_warning(message)
-
-    if strip_metadata:
-        for key in loaded.image.GetMetaDataKeys():
-            loaded.image.EraseMetaData(key)
 
     dimensions = tuple(int(value) for value in loaded.image.GetSize())
     pixel_type = loaded.image.GetPixelIDTypeAsString()

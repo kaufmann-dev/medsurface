@@ -157,6 +157,21 @@ def test_file_metadata_is_shown_when_the_format_preserves_it(tmp_path):
     assert candidate.description == "synthetic volume"
 
 
+def test_pixel_workflows_drop_file_metadata_unless_preservation_is_requested(
+    tmp_path,
+):
+    path = tmp_path / "scan.mha"
+    sitk.WriteImage(_image(), str(path))
+    candidate = catalog.discover(path)[0]
+
+    processing = volume.load(candidate)
+    preserving = volume.load(candidate, preserve_metadata=True)
+
+    assert not processing.image.GetMetaDataKeys()
+    assert preserving.image.GetMetaData("modality") == "MR"
+    assert preserving.image.GetMetaData("description") == "synthetic volume"
+
+
 def test_file_plane_is_derived_from_stored_direction(tmp_path):
     image = _image()
     image.SetDirection((1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0))
