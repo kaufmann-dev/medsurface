@@ -122,24 +122,31 @@ because label selection belongs to the program that produced the segmentation.
 `volume.convert` performs these stages:
 
 1. Classify the requested atomic output before loading pixels.
-2. Load exactly one already-selected candidate under the source voxel limit.
+2. Load exactly one already-selected candidate under the source voxel limit,
+   requesting source metadata unless `--strip-metadata` is active.
 3. Capture output/result geometry and format-neutral source provenance.
-4. Erase source metadata only when `--strip-metadata` is active.
-5. Publish through `write_verified_volume`.
+4. Publish through `write_verified_volume`.
 
 No thresholding, casting, normalization, resampling, reorientation, or
 segmentation occurs. The preserved core contract is loaded voxel bytes, scalar
 pixel ID/type, component count, image dimension, voxel dimensions, spacing,
 origin, and direction.
 
-For DICOM, `ImageSeriesReader` orders the already-discovered series files,
-updates the per-slice metadata dictionary, loads private tags, and copies the
-representative first slice's available metadata onto the resulting 3-D image.
-File readers retain metadata exposed by their ImageIO. With default preservation,
-the writer compares source metadata values to readback and warns when the
-destination cannot represent every entry. Metadata loss does not relax or fail
-the core image contract. With stripping, every source metadata key is removed;
-required destination-format headers are still synthesized by ImageIO.
+Metadata is operation-specific. Strict conversion preserves it by default;
+extraction and fusion load only pixels and geometry because their derived
+outputs do not carry source metadata. For DICOM preservation,
+`ImageSeriesReader` orders the already-discovered series files, updates the
+per-slice metadata dictionary, loads private tags, and promotes valid metadata
+from the representative first slice onto the resulting 3-D image. Individual
+values that cannot be encoded as UTF-8 are omitted with a warning rather than
+lossily repaired. File readers retain metadata exposed by their ImageIO only
+when preservation is requested.
+
+The verified writer compares preserved source metadata values to readback and
+warns when the destination cannot represent every entry. Metadata loss does not
+relax or fail the core image contract. With `--strip-metadata`, source metadata
+is never requested from DICOM and is removed from file inputs; required
+destination-format headers are still synthesized by ImageIO.
 
 One centralized output classifier defines the storage contract:
 
@@ -164,16 +171,19 @@ as later inputs. `.nhdr` and `.mhd` remain input-only.
 3. Write with suffix-selected compression at level 9 for compressed formats.
 4. Invoke the ownership-release callback and drop the writer's source reference
    before reading the temporary file, avoiding two complete output buffers.
-5. Compare dimension, voxel dimensions, pixel ID, components, and digest exactly;
-   compare spacing, origin, and direction with zero relative tolerance and
-   absolute tolerance `1e-5`.
+5. Compare dimension, voxel dimensions, pixel ID, components, and digest exactly.
+   Compare NRRD and MetaImage geometry with zero relative tolerance and absolute
+   tolerance `1e-5`. NIfTI geometry additionally accepts at most one float32 ULP
+   per field because NIfTI-1 stores its affine and spacing at that precision.
 6. Inspect serialized headers to verify the requested compression contract.
 7. Release readback and atomically replace the destination.
 
 All failure and cancellation paths remove the temporary file. An existing
 destination is untouched until the final replacement. A format that coerces a
 core property—for example, a NIfTI writer orthogonalizing a sheared direction—is
-rejected after readback rather than silently accepted.
+rejected after readback rather than silently accepted. Sub-micrometre NIfTI
+rounding within one representable float32 step is not treated as a geometry
+change.
 
 ## Extraction pipelines
 

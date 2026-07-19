@@ -143,6 +143,36 @@ def test_verified_writer_accepts_case_insensitive_destinations(tmp_path, extensi
     assert not list(tmp_path.glob(".UPPER*"))
 
 
+@pytest.mark.parametrize("extension", [".nii", ".nii.gz"])
+def test_verified_writer_accepts_one_float32_ulp_of_nifti_affine_rounding(
+    tmp_path, extension
+):
+    owner = [_image()]
+    owner[0].SetOrigin((-135.734375, -375.734375, 708.1))
+    destination = tmp_path / ("rounded" + extension)
+
+    volume.write_verified_volume(
+        owner[0], str(destination), release_source=owner.clear
+    )
+
+    assert destination.exists()
+    assert owner == []
+
+
+def test_nifti_geometry_verification_rejects_changes_beyond_float32_rounding():
+    source = _image()
+    source.SetOrigin((-135.734375, -375.734375, 708.1))
+    stored = sitk.Image(source)
+    stored.SetOrigin((-135.734375, -375.734375, 708.101))
+
+    with pytest.raises(ValueError, match="origin changed.*maximum delta"):
+        volume._verify_contract(
+            stored,
+            volume._image_contract(source),
+            outputs.volume_output("output.nii.gz"),
+        )
+
+
 @pytest.mark.parametrize(
     "extension,assert_compressed",
     [

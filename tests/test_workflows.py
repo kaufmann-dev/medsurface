@@ -46,6 +46,7 @@ def _write_ct_stack(root: Path) -> None:
         ds.Modality = "CT"
         ds.ImageType = ["ORIGINAL", "PRIMARY", "AXIAL"]
         ds.SeriesDescription = "workflow CT"
+        ds.add_new((0x0008, 0x0080), "LO", b"Clinic \xfc")
         ds.SeriesNumber = 1
         ds.InstanceNumber = index + 1
         ds.ImageOrientationPatient = [1, 0, 0, 0, 1, 0]
