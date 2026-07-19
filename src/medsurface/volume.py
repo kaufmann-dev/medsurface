@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import tempfile
+import time
 from dataclasses import dataclass
+from typing import Any, Callable
 
 import numpy as np
 import SimpleITK as sitk
 
 from .catalog import DicomSource, FileSource, VolumeCandidate, validate_image
 from .defaults import MAX_VOXELS, MIN_VOLUME_AXIS_VOXELS
-from .outputs import extension
+from .outputs import VolumeOutput, volume_output
 
 
 @dataclass
@@ -36,6 +39,47 @@ class Volume:
     def array(self) -> np.ndarray:
         """Voxels as ``(z, y, x)``."""
         return sitk.GetArrayViewFromImage(self.image)
+
+
+@dataclass(frozen=True)
+class VolumeWriteResult:
+    """Facts observed while serializing and reading back one volume."""
+
+    output: VolumeOutput
+    source_metadata: int
+    preserved_metadata: int
+
+
+@dataclass
+class ConversionResult:
+    """Strict one-volume storage-format conversion result."""
+
+    output_path: str
+    format: str
+    compression: str
+    dimensions: tuple[int, ...]
+    pixel_type: str
+    components: int
+    spacing: tuple[float, ...]
+    origin: tuple[float, ...]
+    direction: tuple[float, ...]
+    seconds: float
+    warnings: list[str]
+    metadata_policy: str
+    provenance: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _ImageContract:
+    digest: str
+    dimension: int
+    size: tuple[int, ...]
+    pixel_id: int
+    pixel_type: str
+    components: int
+    spacing: tuple[float, ...]
+    origin: tuple[float, ...]
+    direction: tuple[float, ...]
 
 
 def _voxel_count(candidate: VolumeCandidate) -> int:
@@ -77,9 +121,21 @@ def load(candidate: VolumeCandidate, *, allow_large_volume: bool = False) -> Vol
                 )
             reader = sitk.ImageSeriesReader()
             reader.SetFileNames(series.files)  # already ordered by physical position
+            reader.MetaDataDictionaryArrayUpdateOn()
+            reader.LoadPrivateTagsOn()
             image = reader.Execute()
+            if series.files:
+                for key in reader.GetMetaDataKeys(0):
+                    image.SetMetaData(key, reader.GetMetaData(0, key))
         else:
-            image = sitk.ReadImage(str(candidate.source.path))
+            source_path = str(candidate.source.path)
+            if candidate.source.path.name == candidate.source.path.name.casefold():
+                image = sitk.ReadImage(source_path)
+            else:
+                image = sitk.ReadImage(
+                    source_path,
+                    imageIO=_image_io(candidate.source.path),
+                )
     except RuntimeError as exc:
         detail = next(
             (line.strip() for line in reversed(str(exc).splitlines()) if line.strip()),
@@ -103,11 +159,10 @@ def has_calibrated_hu(candidate: VolumeCandidate) -> bool:
     return bool(candidate.dicom and candidate.dicom.has_calibrated_hu)
 
 
-def warnings_for(volume: Volume) -> list[str]:
-    """Non-fatal data-quality observations worth surfacing to the user."""
+def loading_warnings_for(volume: Volume) -> list[str]:
+    """Non-fatal observations relevant to loading without image processing."""
     out: list[str] = []
-    candidate = volume.candidate
-    series = candidate.dicom
+    series = volume.candidate.dicom
 
     if series is not None and not series.spacing_uniform:
         out.append(
@@ -115,6 +170,14 @@ def warnings_for(volume: Volume) -> list[str]:
             "resampled onto a regular grid and geometry may shift slightly"
             % series.spacing_spread_mm
         )
+    return out
+
+
+def warnings_for(volume: Volume) -> list[str]:
+    """Non-fatal data-quality observations relevant to surface workflows."""
+    out = loading_warnings_for(volume)
+    candidate = volume.candidate
+    series = candidate.dicom
 
     sx, sy, sz = volume.spacing
     aniso = max(sx, sy, sz) / min(sx, sy, sz)
@@ -135,6 +198,56 @@ def warnings_for(volume: Volume) -> list[str]:
     return out
 
 
+def _image_io(path: os.PathLike[str] | str) -> str:
+    name = os.fspath(path).casefold()
+    if name.endswith((".nii", ".nii.gz")):
+        return "NiftiImageIO"
+    if name.endswith((".nrrd", ".nhdr")):
+        return "NrrdImageIO"
+    if name.endswith((".mha", ".mhd")):
+        return "MetaImageIO"
+    return ""
+
+
+def provenance_for(volume: Volume) -> dict[str, Any]:
+    """Format-neutral provenance shared by every volume workflow."""
+    candidate = volume.candidate
+    if isinstance(candidate.source, DicomSource):
+        path = str(candidate.source.catalog_path)
+    else:
+        path = str(candidate.source.path)
+    record: dict[str, Any] = {
+        "id": candidate.id,
+        "format": candidate.format,
+        "path": path,
+        "source": candidate.source_name,
+        "size": list(volume.size),
+        "pixel_type": volume.image.GetPixelIDTypeAsString(),
+        "components": volume.image.GetNumberOfComponentsPerPixel(),
+        "spacing_mm": list(volume.spacing),
+        "origin_mm": list(volume.image.GetOrigin()),
+        "direction": list(volume.image.GetDirection()),
+        "modality": candidate.modality,
+        "description": candidate.description,
+        "plane": candidate.plane,
+    }
+    if candidate.dicom is not None:
+        series = candidate.dicom
+        record["dicom"] = {
+            "series_uid": series.uid,
+            "series_orientation_part": [series.part, series.n_parts],
+            "series_number": series.series_number,
+            "description": series.description,
+            "convolution_kernel": list(series.kernel_values),
+            "slices": series.n_slices,
+            "image_type": list(series.image_type),
+            "rescale_type": series.rescale_type,
+            "multi_energy_ct_acquisition": series.multi_energy_ct_acquisition,
+            "hu_calibration_consistent": series.hu_calibration_consistent,
+        }
+    return record
+
+
 def touches_boundary(image: sitk.Image, value: int = 1) -> bool:
     """True if any foreground voxel lies on the outer face of the volume.
 
@@ -153,38 +266,231 @@ def touches_boundary(image: sitk.Image, value: int = 1) -> bool:
     return any(bool(np.any(f == value)) for f in faces)
 
 
-def write_binary_nifti(image: sitk.Image, path: str) -> sitk.Image:
-    """Atomically publish a binary uint8 NIfTI and verify its stored geometry."""
-    output_extension = extension(path)
-    if output_extension not in (".nii", ".nii.gz"):
-        raise ValueError("NIfTI output must end in .nii or .nii.gz")
+def _voxel_digest(image: sitk.Image) -> str:
+    """Hash voxel bytes without materializing another complete volume."""
+    values = sitk.GetArrayViewFromImage(image)
+    digest = hashlib.sha256()
+    if values.ndim <= 1:
+        digest.update(values.tobytes(order="C"))
+    else:
+        for plane in values:
+            digest.update(np.ascontiguousarray(plane).tobytes(order="C"))
+    return digest.hexdigest()
 
-    binary = sitk.Cast(sitk.Greater(image, 0.5), sitk.sitkUInt8)
+
+def _image_contract(image: sitk.Image) -> _ImageContract:
+    return _ImageContract(
+        digest=_voxel_digest(image),
+        dimension=image.GetDimension(),
+        size=tuple(int(value) for value in image.GetSize()),
+        pixel_id=image.GetPixelID(),
+        pixel_type=image.GetPixelIDTypeAsString(),
+        components=image.GetNumberOfComponentsPerPixel(),
+        spacing=tuple(float(value) for value in image.GetSpacing()),
+        origin=tuple(float(value) for value in image.GetOrigin()),
+        direction=tuple(float(value) for value in image.GetDirection()),
+    )
+
+
+def _metadata(image: sitk.Image) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    for key in image.GetMetaDataKeys():
+        try:
+            metadata[key] = image.GetMetaData(key)
+        except RuntimeError:
+            continue
+    return metadata
+
+
+def _verify_contract(stored: sitk.Image, expected: _ImageContract) -> None:
+    checks = (
+        ("dimension", stored.GetDimension(), expected.dimension),
+        ("dimensions", tuple(stored.GetSize()), expected.size),
+        ("pixel type", stored.GetPixelID(), expected.pixel_id),
+        (
+            "component count",
+            stored.GetNumberOfComponentsPerPixel(),
+            expected.components,
+        ),
+    )
+    for label, actual, wanted in checks:
+        if actual != wanted:
+            raise ValueError(
+                "serialized volume %s changed during writing (%r != %r)"
+                % (label, actual, wanted)
+            )
+    for geometry_label, geometry_actual, geometry_wanted in (
+        ("spacing", stored.GetSpacing(), expected.spacing),
+        ("origin", stored.GetOrigin(), expected.origin),
+        ("direction", stored.GetDirection(), expected.direction),
+    ):
+        if not np.allclose(
+            geometry_actual, geometry_wanted, rtol=0.0, atol=1e-5
+        ):
+            raise ValueError(
+                "serialized volume %s changed during writing" % geometry_label
+            )
+    if _voxel_digest(stored) != expected.digest:
+        raise ValueError("serialized volume voxel values changed during writing")
+
+
+def _verify_compression(path: str, output: VolumeOutput) -> None:
+    with open(path, "rb") as handle:
+        header = handle.read(4096)
+    lowered = header.lower()
+    if output.extension == ".nii" and header.startswith(b"\x1f\x8b"):
+        raise ValueError("serialized .nii volume was unexpectedly compressed")
+    if output.extension == ".nii.gz" and not header.startswith(b"\x1f\x8b"):
+        raise ValueError("serialized .nii.gz volume is not gzip-compressed")
+    if output.extension == ".nrrd" and b"encoding: gzip" not in lowered:
+        raise ValueError("serialized .nrrd volume is not losslessly compressed")
+    if output.extension == ".mha" and b"compresseddata = true" not in lowered:
+        raise ValueError("serialized .mha volume is not losslessly compressed")
+
+
+def write_verified_volume(
+    image: sitk.Image,
+    path: str,
+    *,
+    release_source: Callable[[], None],
+) -> VolumeWriteResult:
+    """Verify and atomically publish one exact single-file volume.
+
+    ``release_source`` clears the caller's owning reference after serialization
+    and before read-back, so verification never requires two complete pixel
+    buffers.
+    """
+    output = volume_output(path)
+    expected = _image_contract(image)
+    source_metadata = _metadata(image)
     destination = os.path.abspath(path)
     parent = os.path.dirname(destination)
     os.makedirs(parent, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
         prefix=".%s." % os.path.basename(destination),
-        suffix=output_extension,
+        # ITK dispatch is case-sensitive for NIfTI and treats uppercase .MHA as
+        # detached MetaImage. A normalized final compound suffix guarantees the
+        # requested single-file writer while the final rename preserves the
+        # caller's spelling.
+        suffix=output.extension,
         dir=parent,
     )
     os.close(descriptor)
     try:
-        sitk.WriteImage(binary, temporary, useCompression=output_extension == ".nii.gz")
+        sitk.WriteImage(
+            image,
+            temporary,
+            useCompression=output.compressed,
+            compressionLevel=9 if output.compressed else -1,
+        )
+        release_source()
+        image = sitk.Image()
+
         stored = sitk.ReadImage(temporary)
-        if stored.GetDimension() != 3 or stored.GetPixelID() != sitk.sitkUInt8:
-            raise ValueError("serialized NIfTI is not a scalar uint8 3D image")
-        if stored.GetSize() != binary.GetSize():
-            raise ValueError("serialized NIfTI dimensions changed during writing")
-        for label, actual, expected in (
-            ("spacing", stored.GetSpacing(), binary.GetSpacing()),
-            ("origin", stored.GetOrigin(), binary.GetOrigin()),
-            ("direction", stored.GetDirection(), binary.GetDirection()),
-        ):
-            if not np.allclose(actual, expected, rtol=0.0, atol=1e-5):
-                raise ValueError("serialized NIfTI %s changed during writing" % label)
+        _verify_contract(stored, expected)
+        _verify_compression(temporary, output)
+        preserved_metadata = sum(
+            stored.HasMetaDataKey(key) and stored.GetMetaData(key) == value
+            for key, value in source_metadata.items()
+        )
+        stored = sitk.Image()
         os.replace(temporary, destination)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-    return binary
+    return VolumeWriteResult(
+        output=output,
+        source_metadata=len(source_metadata),
+        preserved_metadata=preserved_metadata,
+    )
+
+
+def convert(
+    candidate: VolumeCandidate,
+    output_path: str,
+    *,
+    strip_metadata: bool = False,
+    allow_large_volume: bool = False,
+    log: Callable[[str], None] | None = None,
+    warn: Callable[[str], None] | None = None,
+) -> ConversionResult:
+    """Preserve one selected image while changing only its storage format."""
+    output = volume_output(output_path)
+    if os.path.isdir(output_path):
+        raise ValueError("volume output path is a directory: %s" % output_path)
+    started = time.time()
+
+    def say(message: str) -> None:
+        if log:
+            log(message)
+
+    def step(message: str, function):
+        say("%s ..." % message)
+        before = time.time()
+        value = function()
+        say("  %-34s %6.1fs" % (message, time.time() - before))
+        return value
+
+    warnings: list[str] = []
+
+    def add_warning(message: str) -> None:
+        warnings.append(message)
+        if warn:
+            warn(message)
+
+    loaded = step(
+        "load volume",
+        lambda: load(candidate, allow_large_volume=allow_large_volume),
+    )
+    provenance = provenance_for(loaded)
+    for message in loading_warnings_for(loaded):
+        add_warning(message)
+
+    if strip_metadata:
+        for key in loaded.image.GetMetaDataKeys():
+            loaded.image.EraseMetaData(key)
+
+    dimensions = tuple(int(value) for value in loaded.image.GetSize())
+    pixel_type = loaded.image.GetPixelIDTypeAsString()
+    components = loaded.image.GetNumberOfComponentsPerPixel()
+    spacing = tuple(float(value) for value in loaded.image.GetSpacing())
+    origin = tuple(float(value) for value in loaded.image.GetOrigin())
+    direction = tuple(float(value) for value in loaded.image.GetDirection())
+
+    written = step(
+        "write and verify volume",
+        lambda: write_verified_volume(
+            loaded.image,
+            output_path,
+            release_source=lambda: setattr(loaded, "image", sitk.Image()),
+        ),
+    )
+    if (
+        not strip_metadata
+        and written.preserved_metadata < written.source_metadata
+    ):
+        add_warning(
+            "%s preserved %d of %d source metadata entries; metadata not "
+            "representable by the destination format was omitted"
+            % (
+                output.format,
+                written.preserved_metadata,
+                written.source_metadata,
+            )
+        )
+
+    return ConversionResult(
+        output_path=output_path,
+        format=output.format,
+        compression=output.compression,
+        dimensions=dimensions,
+        pixel_type=pixel_type,
+        components=components,
+        spacing=spacing,
+        origin=origin,
+        direction=direction,
+        seconds=time.time() - started,
+        warnings=warnings,
+        metadata_policy="stripped" if strip_metadata else "preserved-best-effort",
+        provenance=provenance,
+    )

@@ -1,4 +1,4 @@
-"""Registration and fusion, including the refusals.
+"""Registration and binary fusion, including the refusals.
 
 Registration cannot fail on its own -- FFT always has a peak, ICP always
 converges somewhere. The tests that matter here are the ones asserting that a
@@ -12,10 +12,9 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 
-from medsurface import merge as merge_mod
-from medsurface import pipeline, presets, registration, surface, volume
+from medsurface import fusion, pipeline, presets, registration, segment, surface, volume
 from medsurface.catalog import DicomSource, FileSource, VolumeCandidate
-from medsurface.merge import MergeError
+from medsurface.fusion import FusionError
 from medsurface.series import Series
 
 
@@ -160,7 +159,7 @@ def test_empty_mask_is_reported_not_silently_registered():
         registration.rigid_register(solid, empty)
 
 
-def test_merge_translates_registration_failure_to_its_public_error(monkeypatch):
+def test_fusion_translates_registration_failure_to_its_public_error(monkeypatch):
     image = _image(_ball((30, 30, 30), (15, 15, 15), 8))
 
     def load(candidate, *, allow_large_volume):
@@ -172,18 +171,16 @@ def test_merge_translates_registration_failure_to_its_public_error(monkeypatch):
             "one mask vanished on the registration grid"
         )
 
-    monkeypatch.setattr(merge_mod.volume_mod, "load", load)
-    monkeypatch.setattr(
-        merge_mod.pipeline, "build_mask", lambda *_args, **_kwargs: image
-    )
-    monkeypatch.setattr(merge_mod.registration, "rigid_register", fail_registration)
+    monkeypatch.setattr(fusion.volume_mod, "load", load)
+    monkeypatch.setattr(fusion.pipeline, "build_mask", lambda *_args, **_kwargs: image)
+    monkeypatch.setattr(fusion.registration, "rigid_register", fail_registration)
 
-    with pytest.raises(MergeError, match="one mask vanished"):
-        merge_mod.merge(
+    with pytest.raises(FusionError, match="one mask vanished"):
+        fusion.fuse(
             _candidate(uid="a"),
             _candidate(uid="b"),
             presets.get("bone"),
-            "unused.stl",
+            "unused.nii",
             fixed_threshold=1.0,
             moving_threshold=1.0,
         )
@@ -208,7 +205,7 @@ def _result(**kw):
 
 
 def test_good_registration_passes_the_gates():
-    merge_mod.check_registration(_result())  # must not raise
+    fusion.check_registration(_result())  # must not raise
 
 
 def test_surface_overlap_is_the_weaker_direction():
@@ -217,8 +214,8 @@ def test_surface_overlap_is_the_weaker_direction():
     scored 0.964 forward and 0.270 backward."""
     r = _result(overlap_moving_in_fixed=0.964, overlap_fixed_in_moving=0.270)
     assert r.surface_overlap == pytest.approx(0.270)
-    with pytest.raises(MergeError, match="fixed->moving"):
-        merge_mod.check_registration(r)
+    with pytest.raises(FusionError, match="fixed->moving"):
+        fusion.check_registration(r)
 
 
 @pytest.mark.parametrize(
@@ -231,15 +228,78 @@ def test_surface_overlap_is_the_weaker_direction():
     ],
 )
 def test_bad_registration_is_refused_with_a_reason(kw, expected):
-    with pytest.raises(MergeError, match=expected):
-        merge_mod.check_registration(_result(**kw))
+    with pytest.raises(FusionError, match=expected):
+        fusion.check_registration(_result(**kw))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("transform", np.diag([1.0, 1.0, 1.0, float("nan")])),
+        ("fft_translation_mm", np.array([0.0, float("inf"), 0.0])),
+        ("rotation_deg", float("nan")),
+        ("translation_mm", np.array([0.0, 0.0, float("inf")])),
+        ("inlier_rms_mm", float("nan")),
+        ("inlier_median_mm", float("inf")),
+        ("overlap_moving_in_fixed", float("nan")),
+        ("overlap_fixed_in_moving", float("inf")),
+        ("shared_fov_dice", float("nan")),
+        ("shared_fov_mm3", float("inf")),
+    ],
+)
+def test_nonfinite_registration_results_cannot_be_forced(field, value):
+    with pytest.raises(FusionError, match="invalid registration result.*finite"):
+        fusion.check_registration(_result(**{field: value}), force=True)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("rotation_deg", -0.1),
+        ("rotation_deg", 180.1),
+        ("inlier_rms_mm", -0.1),
+        ("inlier_median_mm", -0.1),
+        ("overlap_moving_in_fixed", -0.1),
+        ("overlap_moving_in_fixed", 1.1),
+        ("overlap_fixed_in_moving", -0.1),
+        ("overlap_fixed_in_moving", 1.1),
+        ("shared_fov_dice", -0.1),
+        ("shared_fov_dice", 1.1),
+        ("shared_fov_mm3", -0.1),
+    ],
+)
+def test_out_of_range_registration_results_cannot_be_forced(field, value):
+    with pytest.raises(FusionError, match="invalid registration result"):
+        fusion.check_registration(_result(**{field: value}), force=True)
+
+
+@pytest.mark.parametrize(
+    "transform",
+    [
+        np.eye(3),
+        np.eye(4).reshape(16),
+        np.array(
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.2, 1.0],
+            ]
+        ),
+        np.diag([2.0, 1.0, 1.0, 1.0]),
+        np.diag([-1.0, 1.0, 1.0, 1.0]),
+    ],
+)
+def test_malformed_registration_transforms_cannot_be_forced(transform):
+    with pytest.raises(FusionError, match="invalid registration result.*transform"):
+        fusion.check_registration(_result(transform=transform), force=True)
 
 
 def test_residual_is_reported_but_not_gated():
     """The residual does not discriminate: an impostor scores 0.43 mm, a
     5%-oversized skull 0.41 mm, true pairs 0.09-0.21 mm. ICP drives some residual
     down whatever it is fitting, so it informs but never decides."""
-    merge_mod.check_registration(_result(inlier_rms_mm=9.9))  # must not raise
+    fusion.check_registration(_result(inlier_rms_mm=9.9))  # must not raise
     assert "rms" in _result().summary()
 
 
@@ -252,59 +312,47 @@ def test_geometry_alone_cannot_reject_a_similar_body():
         overlap_fixed_in_moving=0.989,
         shared_fov_dice=0.675,
     )
-    merge_mod.check_registration(similar_body)  # geometry waves it through
+    fusion.check_registration(similar_body)  # geometry waves it through
 
 
 def test_gates_have_margin_against_real_measurements():
     """Thresholds must sit between the worst true pair and the best impostor,
-    not hug either. Numbers measured on real studies; see merge.py."""
+    not hug either. Numbers measured on real studies; see fusion.py."""
     worst_true_overlap, worst_true_dice = 0.922, 0.835
     impostor_overlap, impostor_dice = 0.270, 0.323
 
-    assert impostor_overlap < merge_mod.MIN_SURFACE_OVERLAP < worst_true_overlap
-    assert impostor_dice < merge_mod.MIN_SHARED_FOV_DICE < worst_true_dice
+    assert impostor_overlap < fusion.MIN_SURFACE_OVERLAP < worst_true_overlap
+    assert impostor_dice < fusion.MIN_SHARED_FOV_DICE < worst_true_dice
     # and not by a hair
-    assert merge_mod.MIN_SURFACE_OVERLAP - impostor_overlap > 0.2
-    assert worst_true_overlap - merge_mod.MIN_SURFACE_OVERLAP > 0.2
-    assert merge_mod.MIN_SHARED_FOV_DICE - impostor_dice > 0.15
-    assert worst_true_dice - merge_mod.MIN_SHARED_FOV_DICE > 0.15
+    assert fusion.MIN_SURFACE_OVERLAP - impostor_overlap > 0.2
+    assert worst_true_overlap - fusion.MIN_SURFACE_OVERLAP > 0.2
+    assert fusion.MIN_SHARED_FOV_DICE - impostor_dice > 0.15
+    assert worst_true_dice - fusion.MIN_SHARED_FOV_DICE > 0.15
 
 
-def test_surface_stage_comes_from_the_preset():
-    """A fused mesh must be finished exactly as a single-scan one is.
-
-    Slice terracing is baked into each scan's mask by its own slice pitch, so an
-    isotropic fused grid does not remove it -- it merely samples it more finely.
-    Smoothing the fused surface any more lightly than `convert` does leaves it
-    visibly rougher than the scans it was built from.
-    """
+def test_fusion_interfaces_expose_no_surface_controls():
     import inspect
 
-    from medsurface import presets
-
-    signature = inspect.signature(merge_mod.merge)
-    for name in (
+    forbidden = {
+        "settings",
+        "components",
         "mask_smooth_mm",
         "surface_smooth_iters",
         "simplify_error_mm",
         "post_surface_smooth_iters",
-    ):
-        assert signature.parameters[name].default is None, (
-            "%s must default to the preset, not to a merge-specific constant" % name
-        )
-
-    bone = presets.get("bone")
-    assert bone.mask_smooth_mm == 0
-    assert bone.surface_smooth_iters == 20
-    assert bone.post_surface_smooth_iters == 40
+        "cap_field_of_view",
+        "keep_largest_component",
+    }
+    assert forbidden.isdisjoint(inspect.signature(fusion.fuse).parameters)
+    assert forbidden.isdisjoint(inspect.signature(fusion.fuse_masks).parameters)
 
 
 @pytest.mark.parametrize("grid_mm", [0.0, -0.4, float("nan"), float("inf")])
-def test_merge_rejects_invalid_grid_before_loading(grid_mm, monkeypatch):
+def test_fusion_rejects_invalid_grid_before_loading(grid_mm, monkeypatch):
     monkeypatch.setattr(
-        merge_mod.volume_mod,
+        fusion.volume_mod,
         "load",
-        lambda _candidate: pytest.fail(
+        lambda *_args, **_kwargs: pytest.fail(
             "volume loading must not start for an invalid grid"
         ),
     )
@@ -312,11 +360,11 @@ def test_merge_rejects_invalid_grid_before_loading(grid_mm, monkeypatch):
     with pytest.raises(
         ValueError, match="grid_mm must be finite and greater than zero"
     ):
-        merge_mod.merge(
+        fusion.fuse(
             _candidate(uid="a"),
             _candidate(uid="b"),
             presets.get("bone"),
-            "unused.stl",
+            "unused.nii",
             grid_mm=grid_mm,
         )
 
@@ -324,15 +372,15 @@ def test_merge_rejects_invalid_grid_before_loading(grid_mm, monkeypatch):
 def test_common_grid_rejects_tiny_spacing_without_integer_overflow():
     mask = _image(_lumpy_shell(), spacing=(1.0, 1.0, 1.0))
 
-    with pytest.raises(MergeError, match="raise --grid-mm"):
-        merge_mod._common_grid(mask, mask, np.eye(4), 1e-12)
+    with pytest.raises(FusionError, match="raise --grid-mm"):
+        fusion._common_grid(mask, mask, np.eye(4), 1e-12)
 
 
 def test_common_grid_accepts_exactly_the_default_voxel_limit():
     mask = sitk.Image((2, 2, 2), sitk.sitkUInt8)
     mask.SetSpacing((495.0, 995.0, 995.0))
 
-    size, _origin = merge_mod._common_grid(mask, mask, np.eye(4), 1.0)
+    size, _origin = fusion._common_grid(mask, mask, np.eye(4), 1.0)
 
     assert size == (500, 1_000, 1_000)
     assert math.prod(size) == 500_000_000
@@ -341,7 +389,7 @@ def test_common_grid_accepts_exactly_the_default_voxel_limit():
 def test_common_grid_override_allows_a_grid_above_the_default_limit():
     mask = _image(_lumpy_shell(), spacing=(1.0, 1.0, 1.0))
 
-    size, _origin = merge_mod._common_grid(
+    size, _origin = fusion._common_grid(
         mask,
         mask,
         np.eye(4),
@@ -353,7 +401,7 @@ def test_common_grid_override_allows_a_grid_above_the_default_limit():
 
 
 def test_force_overrides_the_gates():
-    merge_mod.check_registration(
+    fusion.check_registration(
         _result(
             overlap_moving_in_fixed=0.0,
             overlap_fixed_in_moving=0.0,
@@ -363,109 +411,91 @@ def test_force_overrides_the_gates():
     )
 
 
-def test_fused_surface_is_finished_in_fixed_physical_coordinates(monkeypatch):
+@pytest.mark.parametrize(
+    "extension,expected_format,expected_compression",
+    [
+        (".nii", "NIfTI", "none"),
+        (".nii.gz", "NIfTI", "gzip"),
+        (".nrrd", "NRRD", "gzip"),
+        (".mha", "MetaImage", "zlib"),
+    ],
+)
+def test_binary_fusion_supports_every_output_without_surface_stages(
+    tmp_path,
+    monkeypatch,
+    extension,
+    expected_format,
+    expected_compression,
+):
     values = np.zeros((12, 12, 12), dtype=np.uint8)
     values[3:9, 3:9, 3:9] = 1
     mask = _image(values, origin=(100.0, 200.0, 300.0))
-    captured = {}
+    mask.SetMetaData("patient", "must not be copied")
+    output = tmp_path / ("fused" + extension)
     messages = []
 
     monkeypatch.setattr(
-        merge_mod.registration, "rigid_register", lambda *_a, **_k: _result()
-    )
-
-    def capture(poly, **_kwargs):
-        captured["bounds"] = surface.bounds_mm(poly)
-        captured["surface_smooth_iters"] = _kwargs["surface_smooth_iters"]
-        captured["post_surface_smooth_iters"] = _kwargs["post_surface_smooth_iters"]
-        return pipeline.SurfaceFinish(
-            poly=poly,
-            surface_components=surface.component_count(poly),
-            warnings=[],
-            provenance={},
-        )
-
-    monkeypatch.setattr(merge_mod.pipeline, "finish_surface", capture)
-    monkeypatch.setattr(
-        merge_mod.surface,
-        "write_validated",
-        lambda _poly, _path: {"valid": True},
-    )
-    result = merge_mod.fuse_masks(
-        mask,
-        mask,
-        "unused.stl",
-        settings=pipeline.SurfaceSettings(
-            resample_mm=0,
-            mask_smooth_mm=0.2,
-            surface_smooth_iters=7,
-            simplify_error_mm=0,
-            post_surface_smooth_iters=9,
-            keep_largest_component=False,
-        ),
-        grid_mm=1.0,
-        log=messages.append,
-    )
-
-    fused_index = next(
-        index
-        for index, message in enumerate(messages)
-        if message.startswith("fuse occupancy")
-    )
-    smooth_index = next(
-        index
-        for index, message in enumerate(messages)
-        if message.startswith("smooth fused")
-    )
-    mesh_index = next(
-        index
-        for index, message in enumerate(messages)
-        if message.startswith("marching cubes")
-    )
-    assert fused_index < smooth_index < mesh_index
-    assert captured["surface_smooth_iters"] == 7
-    assert captured["post_surface_smooth_iters"] == 9
-    assert captured["bounds"][0] > 100
-    assert captured["bounds"][2] > 200
-    assert captured["bounds"][4] > 300
-    assert result.bounds_mm == pytest.approx(captured["bounds"])
-
-
-def test_fused_nifti_stops_before_every_surface_stage(tmp_path, monkeypatch):
-    values = np.zeros((12, 12, 12), dtype=np.uint8)
-    values[3:9, 3:9, 3:9] = 1
-    mask = _image(values, origin=(100.0, 200.0, 300.0))
-    output = tmp_path / "fused.nii.gz"
-    messages = []
-
-    monkeypatch.setattr(
-        merge_mod.registration, "rigid_register", lambda *_a, **_k: _result()
+        fusion.registration, "rigid_register", lambda *_a, **_k: _result()
     )
 
     def forbidden(*_args, **_kwargs):
-        pytest.fail("NIfTI output entered the surface-processing pipeline")
+        pytest.fail("binary fusion entered the surface-processing pipeline")
 
-    monkeypatch.setattr(merge_mod.segment, "smooth_occupancy", forbidden)
-    monkeypatch.setattr(merge_mod.segment, "pad", forbidden)
-    monkeypatch.setattr(merge_mod.surface, "marching_cubes", forbidden)
-    monkeypatch.setattr(merge_mod.pipeline, "finish_surface", forbidden)
-    monkeypatch.setattr(merge_mod.surface, "write_validated", forbidden)
+    monkeypatch.setattr(segment, "smooth_occupancy", forbidden)
+    monkeypatch.setattr(segment, "pad", forbidden)
+    monkeypatch.setattr(surface, "marching_cubes", forbidden)
+    monkeypatch.setattr(surface, "write_validated", forbidden)
+    monkeypatch.setattr(pipeline, "finish_surface", forbidden)
+    monkeypatch.setattr(pipeline, "mesh_binary_mask", forbidden)
 
-    result = merge_mod.fuse_masks(
+    result = fusion.fuse_masks(
         mask,
         mask,
         str(output),
-        settings=None,
         grid_mm=1.0,
         log=messages.append,
     )
 
-    assert isinstance(result, merge_mod.NiftiMaskMergeResult)
-    assert result.foreground_voxels > 0
+    assert isinstance(result, fusion.FusionResult)
+    assert result.output_format == expected_format
+    assert result.compression == expected_compression
+    assert result.foreground_fixed_voxels > 0
+    assert result.foreground_fixed_voxels == result.foreground_moving_voxels
+    assert result.foreground_fused_voxels == result.foreground_fixed_voxels
+    assert result.volume_fused_mm3 == pytest.approx(
+        result.foreground_fused_voxels * result.grid_mm**3
+    )
     assert output.exists()
     stored = sitk.ReadImage(str(output))
     assert stored.GetPixelID() == sitk.sitkUInt8
-    assert set(np.unique(sitk.GetArrayViewFromImage(stored))) <= {0, 1}
+    assert stored.GetSize() == result.grid_size
+    assert stored.GetSpacing() == pytest.approx((1.0, 1.0, 1.0))
+    assert stored.GetOrigin() == pytest.approx(result.grid_origin_mm, abs=1e-5)
+    assert stored.GetDirection() == pytest.approx(result.grid_direction, abs=1e-5)
+    assert set(np.unique(sitk.GetArrayViewFromImage(stored))) == {0, 1}
+    assert (
+        int(sitk.GetArrayViewFromImage(stored).sum()) == result.foreground_fused_voxels
+    )
+    assert not stored.HasMetaDataKey("patient")
+    assert result.provenance["output"] == {
+        "kind": "binary labelmap",
+        "format": expected_format,
+        "compression": expected_compression,
+        "pixel_type": "uint8",
+        "components": 1,
+        "background": 0,
+        "foreground": 1,
+    }
+    assert result.provenance["grid"] == {
+        "size": list(result.grid_size),
+        "spacing_mm": [1.0, 1.0, 1.0],
+        "origin_mm": list(result.grid_origin_mm),
+        "direction": list(result.grid_direction),
+    }
+    registration_provenance = result.provenance["registration"]
+    assert registration_provenance["transform_moving_to_fixed"] == np.eye(4).tolist()
+    assert registration_provenance["surface_overlap"] == pytest.approx(0.92)
+    assert registration_provenance["shared_fov_dice"] == pytest.approx(0.85)
     assert not any("smooth fused" in message for message in messages)
     assert not any("marching cubes" in message for message in messages)
 
@@ -480,8 +510,8 @@ def test_unrelated_anatomy_fails_the_gates():
     other = _image(bar, origin=(400.0, -250.0, 900.0))
 
     result = registration.rigid_register(shell, other, samples=20000)
-    with pytest.raises(MergeError):
-        merge_mod.check_registration(result)
+    with pytest.raises(FusionError):
+        fusion.check_registration(result)
 
 
 # ------------------------------------------------------------- compatibility
@@ -509,14 +539,14 @@ def _candidate(uid="1.2.3", modality="CT", part=1, *, path=None):
     )
 
 
-def test_every_merge_warns_that_registration_requires_rigid_anatomy():
-    warnings = merge_mod.check_compatible(_candidate(uid="a"), _candidate(uid="b"))
+def test_every_fusion_warns_that_registration_requires_rigid_anatomy():
+    warnings = fusion.check_compatible(_candidate(uid="a"), _candidate(uid="b"))
 
     assert any("rigid registration" in warning for warning in warnings)
     assert any("non-deforming anatomy" in warning for warning in warnings)
 
 
-def test_merge_announces_volume_loading_before_it_starts(monkeypatch):
+def test_fusion_announces_volume_loading_before_it_starts(monkeypatch):
     messages = []
     emitted_warnings = []
 
@@ -528,27 +558,27 @@ def test_merge_announces_volume_loading_before_it_starts(monkeypatch):
         assert allow_large_volume
         assert emitted_warnings[0] == (
             "subject identity is not verified; confirm that fixed and moving volumes "
-            "show the same subject before using the fused surface"
+            "show the same subject before using the fused labelmap"
         )
         assert any("--fixed-threshold" in message for message in emitted_warnings)
         assert any("--moving-threshold" in message for message in emitted_warnings)
         assert not any("Gaussian sigma" in message for message in emitted_warnings)
         raise StopLoading
 
-    monkeypatch.setattr(merge_mod.volume_mod, "load", stop)
+    monkeypatch.setattr(fusion.volume_mod, "load", stop)
     with pytest.raises(StopLoading):
-        merge_mod.merge(
+        fusion.fuse(
             _candidate(uid="a"),
             _candidate(uid="b"),
             presets.get("bone"),
-            "unused.stl",
+            "unused.nii",
             allow_large_volume=True,
             log=messages.append,
             warn=emitted_warnings.append,
         )
 
 
-def test_merge_emits_fixed_volume_warnings_before_loading_moving(monkeypatch):
+def test_fusion_emits_fixed_volume_warnings_before_loading_moving(monkeypatch):
     fixed = _candidate(uid="a")
     moving = _candidate(uid="b")
     emitted_warnings = []
@@ -565,33 +595,33 @@ def test_merge_emits_fixed_volume_warnings_before_loading_moving(monkeypatch):
         assert "fixed geometry warning" in emitted_warnings
         raise StopMovingLoad
 
-    monkeypatch.setattr(merge_mod.volume_mod, "load", load)
+    monkeypatch.setattr(fusion.volume_mod, "load", load)
     monkeypatch.setattr(
-        merge_mod.volume_mod,
+        fusion.volume_mod,
         "warnings_for",
         lambda volume: ["fixed geometry warning"] if volume is fixed_loaded else [],
     )
 
     with pytest.raises(StopMovingLoad):
-        merge_mod.merge(
+        fusion.fuse(
             fixed,
             moving,
             presets.get("bone"),
-            "unused.stl",
+            "unused.nii",
             warn=emitted_warnings.append,
         )
 
 
 def test_same_volume_twice_is_refused():
     candidate = _candidate()
-    with pytest.raises(MergeError, match="same volume"):
-        merge_mod.check_compatible(candidate, candidate)
+    with pytest.raises(FusionError, match="same volume"):
+        fusion.check_compatible(candidate, candidate)
 
 
-def test_modality_differences_do_not_change_merge_compatibility():
+def test_modality_differences_do_not_change_fusion_compatibility():
     fixed = _candidate(uid="a", modality="CT")
     moving = _candidate(uid="b", modality="MR")
-    warnings = merge_mod.check_compatible(fixed, moving)
+    warnings = fusion.check_compatible(fixed, moving)
     assert any("identity is not verified" in warning for warning in warnings)
 
 
@@ -602,5 +632,5 @@ def test_same_file_via_hard_link_is_refused(tmp_path):
     alias.hardlink_to(source)
     fixed = _candidate(path=str(source))
     moving = _candidate(path=str(alias))
-    with pytest.raises(MergeError, match="same volume"):
-        merge_mod.check_compatible(fixed, moving)
+    with pytest.raises(FusionError, match="same volume"):
+        fusion.check_compatible(fixed, moving)

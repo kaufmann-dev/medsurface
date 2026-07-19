@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -11,7 +11,7 @@ import SimpleITK as sitk
 from pydicom.dataset import FileDataset, FileMetaDataset
 from pydicom.uid import CTImageStorage, ExplicitVRLittleEndian, generate_uid
 
-from medsurface import catalog, merge, pipeline, presets
+from medsurface import catalog, fusion, labelmap, pipeline, presets
 
 
 def _minimal_preset(name: str):
@@ -67,13 +67,13 @@ def _write_ct_stack(root: Path) -> None:
         pydicom.dcmwrite(path, ds, enforce_file_format=True)
 
 
-def test_real_dicom_stack_converts_to_a_valid_mesh(tmp_path):
+def test_real_dicom_stack_extracts_to_a_valid_mesh(tmp_path):
     source = tmp_path / "dicom"
     _write_ct_stack(source)
     candidate = catalog.discover(source)[0]
     output = tmp_path / "dicom.stl"
 
-    result = pipeline.convert(
+    result = pipeline.extract(
         candidate,
         _minimal_preset("bone"),
         str(output),
@@ -85,7 +85,7 @@ def test_real_dicom_stack_converts_to_a_valid_mesh(tmp_path):
     assert result.quality["triangles"] > 0
 
 
-def test_left_handed_nifti_converts_to_a_valid_outward_wound_mesh(tmp_path):
+def test_left_handed_nifti_extracts_to_a_valid_outward_wound_mesh(tmp_path):
     zz, yy, xx = np.indices((24, 24, 24))
     pixels = np.zeros((24, 24, 24), dtype=np.int16)
     pixels[(xx - 12) ** 2 + (yy - 12) ** 2 + (zz - 12) ** 2 <= 7**2] = 2_000
@@ -96,7 +96,7 @@ def test_left_handed_nifti_converts_to_a_valid_outward_wound_mesh(tmp_path):
     sitk.WriteImage(image, str(source))
 
     candidate = catalog.discover(source)[0]
-    result = pipeline.convert(
+    result = pipeline.extract(
         candidate,
         _minimal_preset("bone"),
         str(output),
@@ -111,7 +111,7 @@ def test_left_handed_nifti_converts_to_a_valid_outward_wound_mesh(tmp_path):
     assert result.provenance["allow_large_volume"] is True
 
 
-def test_real_cross_format_merge_preserves_teeth_components(tmp_path):
+def test_intensity_fuse_then_labelmap_extract_produces_a_valid_mesh(tmp_path):
     pixels = np.zeros((32, 32, 32), dtype=np.int16)
     pixels[4:12, 4:12, 4:12] = 2000
     pixels[20:28, 20:28, 20:28] = 2000
@@ -123,38 +123,96 @@ def test_real_cross_format_merge_preserves_teeth_components(tmp_path):
     sitk.WriteImage(image, str(moving_path))
     fixed = catalog.discover(fixed_path)[0]
     moving = catalog.discover(moving_path)[0]
-    output = tmp_path / "merged.stl"
+    fused_output = tmp_path / "fused.nrrd"
+    mesh_output = tmp_path / "fused.stl"
 
-    preset = _minimal_preset("teeth")
-    effective_preset = replace(
-        preset,
-        mask_smooth_mm=0.2,
-        surface_smooth_iters=7,
-        simplify_error_mm=0.01,
-        post_surface_smooth_iters=9,
+    fusion_preset = replace(
+        _minimal_preset("teeth"),
+        mask_smooth_mm=9.0,
+        surface_smooth_iters=77,
+        simplify_error_mm=4.0,
+        post_surface_smooth_iters=88,
     )
-    result = merge.merge(
+    fused = fusion.fuse(
         fixed,
         moving,
-        preset,
-        str(output),
+        fusion_preset,
+        str(fused_output),
         fixed_threshold=1000.0,
         moving_threshold=1000.0,
         grid_mm=1.0,
-        mask_smooth_mm=effective_preset.mask_smooth_mm,
-        surface_smooth_iters=effective_preset.surface_smooth_iters,
-        simplify_error_mm=effective_preset.simplify_error_mm,
-        post_surface_smooth_iters=effective_preset.post_surface_smooth_iters,
         allow_large_volume=True,
     )
+    fused_image = sitk.ReadImage(str(fused_output))
+    extracted = labelmap.extract(
+        catalog.discover(fused_output)[0],
+        str(mesh_output),
+    )
 
-    assert output.exists()
-    assert result.quality["valid"]
-    assert result.quality["components"] == 2
-    assert result.surface_components == 2
-    assert result.provenance["preset"] == asdict(effective_preset)
-    assert result.provenance["allow_large_volume"] is True
-    finishing = result.provenance["surface_finishing"]
-    assert finishing["pre_smoothing"]["requested_iterations"] == 7
-    assert finishing["decimation"]["simplify_error_mm"] == 0.01
-    assert finishing["post_smoothing"]["requested_iterations"] == 9
+    assert fused_output.exists()
+    assert set(np.unique(sitk.GetArrayViewFromImage(fused_image))) == {0, 1}
+    assert fused.foreground_fused_voxels == int(
+        sitk.GetArrayViewFromImage(fused_image).sum()
+    )
+    assert set(fused.provenance["segmentation"]) == {
+        "name",
+        "description",
+        "threshold",
+        "threshold_unit",
+        "threshold_max",
+        "median_mm",
+        "closing_mm",
+        "opening_mm",
+        "min_island_mm3",
+        "keep_largest_island",
+    }
+    assert "surface_finishing" not in fused.provenance
+    assert fused.provenance["allow_large_volume"] is True
+    assert mesh_output.exists()
+    assert extracted.quality["valid"]
+    assert extracted.quality["components"] == 2
+    assert extracted.provenance["surface"]["mask_smooth_mm"] == 0.8
+    assert extracted.provenance["surface"]["surface_smooth_iters"] == 20
+    assert extracted.provenance["surface"]["post_surface_smooth_iters"] == 0
+
+
+def test_labelmap_fuse_then_labelmap_extract_produces_a_valid_mesh(tmp_path):
+    zz, yy, xx = np.indices((48, 48, 48))
+    foreground = (
+        ((xx - 24) / 14) ** 2
+        + ((yy - 23) / 11) ** 2
+        + ((zz - 22) / 9) ** 2
+        <= 1
+    )
+    foreground[16:24, 29:36, 33:40] = True
+    fixed_image = sitk.GetImageFromArray((foreground * 5).astype(np.uint16))
+    moving_image = sitk.GetImageFromArray((foreground * 203).astype(np.uint16))
+    moving_image.SetOrigin((3.0, -2.0, 1.0))
+    fixed_path = tmp_path / "fixed-labels.nii.gz"
+    moving_path = tmp_path / "moving-labels.mha"
+    fused_path = tmp_path / "fused-labels.mha"
+    mesh_path = tmp_path / "fused-labels.stl"
+    sitk.WriteImage(fixed_image, str(fixed_path))
+    sitk.WriteImage(moving_image, str(moving_path))
+
+    fused = labelmap.fuse(
+        catalog.discover(fixed_path)[0],
+        catalog.discover(moving_path)[0],
+        str(fused_path),
+        grid_mm=1.0,
+    )
+    fused_image = sitk.ReadImage(str(fused_path))
+    extracted = labelmap.extract(
+        catalog.discover(fused_path)[0],
+        str(mesh_path),
+    )
+
+    assert set(np.unique(sitk.GetArrayViewFromImage(fused_image))) == {0, 1}
+    assert fused.registration.surface_overlap > 0.9
+    assert fused.registration.shared_fov_dice > 0.9
+    assert fused.provenance["segmentation"]["foreground"].endswith(
+        "normalized to 1"
+    )
+    assert mesh_path.exists()
+    assert extracted.quality["valid"]
+    assert extracted.quality["components"] == 1

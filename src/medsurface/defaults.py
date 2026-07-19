@@ -1,8 +1,8 @@
 """Lightweight command defaults shared by the CLI and processing modules."""
 
 #: Fine enough to preserve sub-millimetre bone while keeping a whole-head fused
-#: grid within the merge pipeline's memory limit.
-DEFAULT_MERGE_GRID_MM = 0.4
+#: grid within the fusion pipeline's memory limit.
+DEFAULT_FUSION_GRID_MM = 0.4
 
 #: Gaussian sigma used to regularize externally segmented labelmap boundaries
 #: before marching cubes. This is deliberately a physical distance rather than
@@ -30,8 +30,10 @@ SURFACE_RELAX_FORCE = 0.1
 #: This is not a memory guarantee: pixel types and concurrent working images vary.
 MAX_VOXELS = 500_000_000
 
-#: Formats supported consistently by conversion, merge, validation, and repair.
+#: Surface formats supported consistently by extraction, validation, and repair.
 SUPPORTED_MESH_EXTENSIONS = (".stl", ".ply", ".obj")
 
-#: Editable binary-volume destinations supported by merge workflows.
-SUPPORTED_NIFTI_EXTENSIONS = (".nii", ".nii.gz")
+#: Atomic single-file volume destinations supported by conversion and fusion.
+#: Detached NRRD and MetaImage headers remain input-only because they cannot be
+#: published with one atomic filesystem replacement.
+SUPPORTED_VOLUME_EXTENSIONS = (".nii", ".nii.gz", ".nrrd", ".mha")

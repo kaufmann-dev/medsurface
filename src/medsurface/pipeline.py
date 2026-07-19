@@ -1,4 +1,4 @@
-"""End-to-end medical image volume to surface conversion."""
+"""End-to-end medical image volume to surface extraction."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import SimpleITK as sitk
 
 from . import segment, surface
 from . import volume as volume_mod
-from .catalog import DicomSource, VolumeCandidate
+from .catalog import VolumeCandidate
 from .defaults import SURFACE_RELAX_FORCE
 from .presets import Preset
 from .presets import validate as validate_preset
@@ -47,7 +47,7 @@ class SurfaceFinish:
 
 @dataclass(frozen=True)
 class SurfaceSettings:
-    """Mask-to-mesh controls shared by conversion and fusion workflows."""
+    """Mask-to-mesh controls shared by intensity and labelmap extraction."""
 
     resample_mm: float
     mask_smooth_mm: float
@@ -72,7 +72,7 @@ class MaskSurfaceResult:
 def surface_settings(
     preset: Preset, *, keep_largest_component: bool | None = None
 ) -> SurfaceSettings:
-    """Extract only the mask-to-mesh portion of a conversion preset."""
+    """Extract only the mask-to-mesh portion of an extraction preset."""
     return SurfaceSettings(
         resample_mm=preset.resample_mm,
         mask_smooth_mm=preset.mask_smooth_mm,
@@ -165,7 +165,7 @@ def finish_surface(
     step: StepRunner,
     log: Logger,
 ) -> SurfaceFinish:
-    """Shared, intersection-safe finishing for conversion and fusion."""
+    """Shared, intersection-safe finishing for intensity and labelmap extraction."""
     warnings = []
 
     poly, pre_smoothing = step(
@@ -393,9 +393,8 @@ def build_mask(
 ) -> sitk.Image:
     """Threshold and clean a volume into a binary bone mask.
 
-    Shared by ``convert`` and ``merge`` so the two can never drift apart: a fused
-    surface must be built from exactly the mask a single-scan conversion would
-    have produced.
+    Shared by ``extract`` and ``fuse`` so both independently produce the same
+    cleaned foreground mask from one intensity volume.
 
     """
     binary = segment.binarize(image, threshold, preset.threshold_max)
@@ -443,50 +442,12 @@ def threshold_warnings(
     ]
 
 
-def volume_provenance(vol: volume_mod.Volume) -> dict[str, Any]:
-    """Format-neutral provenance shared by intensity and labelmap inputs."""
-    candidate = vol.candidate
-    if isinstance(candidate.source, DicomSource):
-        path = str(candidate.source.catalog_path)
-    else:
-        path = str(candidate.source.path)
-    record: dict[str, Any] = {
-        "id": candidate.id,
-        "format": candidate.format,
-        "path": path,
-        "source": candidate.source_name,
-        "size": list(vol.size),
-        "pixel_type": vol.image.GetPixelIDTypeAsString(),
-        "spacing_mm": list(vol.spacing),
-        "origin_mm": list(vol.image.GetOrigin()),
-        "direction": list(vol.image.GetDirection()),
-        "modality": candidate.modality,
-        "description": candidate.description,
-        "plane": candidate.plane,
-    }
-    if candidate.dicom is not None:
-        series = candidate.dicom
-        record["dicom"] = {
-            "series_uid": series.uid,
-            "series_orientation_part": [series.part, series.n_parts],
-            "series_number": series.series_number,
-            "description": series.description,
-            "convolution_kernel": list(series.kernel_values),
-            "slices": series.n_slices,
-            "image_type": list(series.image_type),
-            "rescale_type": series.rescale_type,
-            "multi_energy_ct_acquisition": series.multi_energy_ct_acquisition,
-            "hu_calibration_consistent": series.hu_calibration_consistent,
-        }
-    return record
-
-
 def source_provenance(
     vol: volume_mod.Volume,
     threshold: float,
     threshold_source: str,
 ) -> dict[str, Any]:
-    record = volume_provenance(vol)
+    record = volume_mod.provenance_for(vol)
     record.update(
         {
             "hu_calibration": (
@@ -501,7 +462,7 @@ def source_provenance(
     return record
 
 
-def convert(
+def extract(
     candidate: VolumeCandidate,
     preset: Preset,
     output_path: str,

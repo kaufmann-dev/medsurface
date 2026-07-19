@@ -82,7 +82,7 @@ def test_conversion_announces_volume_loading_before_it_starts(monkeypatch):
 
     monkeypatch.setattr(pipeline_mod.volume_mod, "load", stop)
     with pytest.raises(StopLoading):
-        pipeline_mod.convert(
+        pipeline_mod.extract(
             _candidate(),
             presets.get("bone"),
             "unused.stl",
@@ -105,7 +105,7 @@ def test_conversion_emits_threshold_warning_before_loading(monkeypatch):
 
     monkeypatch.setattr(pipeline_mod.volume_mod, "load", stop)
     with pytest.raises(StopLoading):
-        pipeline_mod.convert(
+        pipeline_mod.extract(
             _candidate(file=True),
             presets.get("bone"),
             "unused.stl",
@@ -465,7 +465,7 @@ def test_invalid_presets_are_rejected_before_volume_loading(field, value, monkey
     )
 
     with pytest.raises(ValueError):
-        pipeline_mod.convert(_candidate(), invalid, "unused.stl")
+            pipeline_mod.extract(_candidate(), invalid, "unused.stl")
 
 
 def test_validate_does_not_repair_the_mesh_it_measures(tmp_path):

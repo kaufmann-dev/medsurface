@@ -6,12 +6,14 @@ import json
 import math
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import warnings
 from collections import Counter
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar, Token
 from enum import Enum
 from pathlib import Path
@@ -27,7 +29,7 @@ from rich.text import Text
 
 from . import __version__, defaults
 from . import presets as presets_mod
-from .outputs import OutputKind, extension, merge_output_kind
+from .outputs import VolumeOutput, extension, volume_output
 from .presets import PRESETS
 
 
@@ -60,7 +62,7 @@ stderr_console = Console(stderr=True, highlight=False, markup=False)
 
 app = typer.Typer(
     add_completion=False,
-    help="Create surface meshes and fused NIfTI labelmaps from medical images.",
+    help="Convert volumes, fuse binary labelmaps, and extract surface meshes.",
     invoke_without_command=True,
     no_args_is_help=False,
     pretty_exceptions_show_locals=False,
@@ -68,7 +70,7 @@ app = typer.Typer(
 )
 labelmap_app = typer.Typer(
     add_completion=False,
-    help="Create surfaces from externally segmented labelmaps.",
+    help="Fuse labelmaps or extract their surface meshes.",
     invoke_without_command=True,
     no_args_is_help=False,
     pretty_exceptions_show_locals=False,
@@ -94,14 +96,14 @@ def root(
         help="Show version and exit.",
     ),
 ) -> None:
-    """Create surface meshes and fused NIfTI labelmaps from medical images."""
+    """Convert volumes, fuse binary labelmaps, and extract surface meshes."""
     if ctx.invoked_subcommand is None:
         stdout_console.print(ctx.get_help())
 
 
 @labelmap_app.callback()
 def labelmap_root(ctx: typer.Context) -> None:
-    """Create surfaces from externally segmented labelmaps."""
+    """Fuse labelmaps or extract their surface meshes."""
     if ctx.invoked_subcommand is None:
         stdout_console.print(ctx.get_help())
 
@@ -331,56 +333,60 @@ def _validate_mesh_input(path: Path) -> None:
         raise typer.Exit(2)
 
 
-def _validate_merge_output(path: Path) -> OutputKind:
+def _validate_volume_output(path: Path) -> VolumeOutput:
     try:
-        return merge_output_kind(path)
+        output = volume_output(path)
+        if path.exists() and path.is_dir():
+            raise ValueError("volume output path is a directory: %s" % path)
+        return output
     except ValueError as exc:
         _error(exc)
         raise typer.Exit(2) from None
 
 
-def _reject_nifti_surface_options(
-    output_kind: OutputKind,
-    options: list[tuple[str, object | None]],
-) -> None:
-    if output_kind is not OutputKind.NIFTI:
-        return
-    incompatible = [name for name, value in options if value is not None]
-    if incompatible:
-        _error(
-            "%s cannot be used with NIfTI output because surface processing is skipped"
-            % ", ".join(incompatible)
-        )
-        raise typer.Exit(2)
-
-
-def _nifti_merge_result_payload(result: Any) -> dict[str, Any]:
+def _fusion_result_payload(result: Any) -> dict[str, Any]:
     return {
         "output": result.output_path,
-        "output_kind": "labelmap",
-        "format": "NIfTI",
+        "format": result.output_format,
+        "compression": result.compression,
         "pixel_type": "uint8",
+        "components": 1,
         "grid_mm": result.grid_mm,
         "grid_size": list(result.grid_size),
-        "foreground_voxels": result.foreground_voxels,
+        "grid_origin_mm": list(result.grid_origin_mm),
+        "grid_direction": list(result.grid_direction),
+        "foreground_fixed_voxels": result.foreground_fixed_voxels,
+        "foreground_moving_voxels": result.foreground_moving_voxels,
+        "foreground_fused_voxels": result.foreground_fused_voxels,
         "volume_fixed_mm3": result.volume_fixed_mm3,
         "volume_moving_mm3": result.volume_moving_mm3,
-        "volume_fused_mm3": result.volume_union_mm3,
+        "volume_fused_mm3": result.volume_fused_mm3,
         "seconds": result.seconds,
         "warnings": result.warnings,
     }
 
 
-def _print_nifti_merge_result(result: Any) -> None:
+def _print_fusion_result(result: Any) -> None:
     _success("wrote %s" % result.output_path)
     _log(
         "%s voxels at %.3f mm   foreground %.0f cm3   %.1fs"
         % (
             "x".join(str(value) for value in result.grid_size),
             result.grid_mm,
-            result.volume_union_mm3 / 1000.0,
+            result.volume_fused_mm3 / 1000.0,
             result.seconds,
         )
+    )
+    _print_command_hint(
+        "Extract a surface with:  ",
+        [
+            "medsurface",
+            "labelmap",
+            "extract",
+            result.output_path,
+            "-o",
+            "MODEL.stl",
+        ],
     )
 
 
@@ -668,6 +674,54 @@ def _write_json_file(path: Path, payload: object) -> None:
             os.unlink(temporary)
 
 
+@contextmanager
+def _restore_output_on_failure(path: Path):
+    """Roll back a primary output if its optional report cannot be written."""
+    destination = path.absolute()
+    backup: str | None = None
+    existed = os.path.lexists(destination)
+    original_stat: os.stat_result | None = None
+    if existed:
+        if not destination.is_file() and not destination.is_symlink():
+            raise ValueError("output path is not a file: %s" % destination)
+        original_stat = os.lstat(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, backup = tempfile.mkstemp(
+            prefix=".%s.rollback." % destination.name,
+            dir=destination.parent,
+        )
+        os.close(descriptor)
+        os.unlink(backup)
+        try:
+            os.link(destination, backup, follow_symlinks=False)
+        except OSError:
+            shutil.copy2(destination, backup, follow_symlinks=False)
+    try:
+        yield
+    except BaseException:
+        unchanged = False
+        if original_stat is not None and os.path.lexists(destination):
+            unchanged = os.path.samestat(os.lstat(destination), original_stat)
+        if unchanged and backup is not None:
+            os.unlink(backup)
+        elif backup is not None and os.path.lexists(backup):
+            if os.path.lexists(destination):
+                os.unlink(destination)
+            os.replace(backup, destination)
+        elif os.path.lexists(destination):
+            os.unlink(destination)
+        raise
+    else:
+        if backup is not None:
+            if os.path.lexists(destination):
+                os.unlink(backup)
+            else:
+                os.replace(backup, destination)
+    finally:
+        if backup is not None and os.path.lexists(backup):
+            os.unlink(backup)
+
+
 def _protect_output_paths(
     candidates: list[Any], output: Path, json_file: Path | None
 ) -> None:
@@ -760,8 +814,8 @@ def list_volumes(
     )
     if recommended is not None:
         _print_command_hint(
-            "Convert the default with:  ",
-            ["medsurface", "convert", input_path, "-o", "out.stl"],
+            "Extract the default with:  ",
+            ["medsurface", "extract", input_path, "-o", "out.stl"],
         )
     elif any(candidate.usable for candidate in found):
         ambiguity = catalog.selection_ambiguity(found)
@@ -773,7 +827,7 @@ def list_volumes(
             "Choose a volume with:  ",
             [
                 "medsurface",
-                "convert",
+                "extract",
                 input_path,
                 "--volume",
                 "ID",
@@ -840,6 +894,135 @@ def presets() -> None:
 
 @app.command()
 def convert(
+    input_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=True,
+        readable=True,
+        help="Volume file or directory tree containing supported volumes.",
+    ),
+    output: Path = typer.Option(
+        ...,
+        "-o",
+        "--output",
+        help="Atomic .nii/.nii.gz/.nrrd/.mha output file.",
+    ),
+    volume_id: int | None = typer.Option(
+        None,
+        "--volume",
+        min=1,
+        help="Integer volume ID displayed by 'medsurface list'.",
+    ),
+    strip_metadata: bool = typer.Option(
+        False,
+        "--strip-metadata",
+        help="Remove source metadata while retaining required format headers.",
+    ),
+    allow_large_volume: bool = typer.Option(
+        False,
+        "--allow-large-volume",
+        help="Bypass the 500-million-voxel source limit; may exhaust memory.",
+    ),
+    json_file: Path | None = typer.Option(
+        None, "--json", help="Write results and provenance to this JSON file."
+    ),
+    quiet: bool = typer.Option(
+        False, "-q", "--quiet", help="Suppress normal progress output."
+    ),
+) -> None:
+    """Preserve one image while changing only its storage format."""
+    _validate_volume_output(output)
+    emitted_warnings: list[str] = []
+
+    def emit_warning(message: str) -> None:
+        emitted_warnings.append(message)
+        _warn(message)
+
+    progress = _ProgressDisplay(not quiet, "Discovering volumes ...")
+    with progress:
+        found = _discover(input_path)
+        if not found:
+            _error("no supported volumes found under %s" % input_path)
+            raise typer.Exit(1)
+
+        from . import catalog
+
+        try:
+            chosen = catalog.select(found, volume_id)
+            _protect_output_paths(found, output, json_file)
+        except ValueError as exc:
+            _error(exc)
+            raise typer.Exit(2) from None
+
+        progress.log(
+            "volume ID %d  %s  %s" % (chosen.id, chosen.format, chosen.source_name)
+        )
+        progress.update("Loading volume conversion engine ...")
+        from . import volume as volume_mod
+
+        transaction = (
+            _restore_output_on_failure(output)
+            if json_file is not None
+            else nullcontext()
+        )
+        try:
+            with transaction:
+                result = volume_mod.convert(
+                    candidate=chosen,
+                    output_path=str(output),
+                    strip_metadata=strip_metadata,
+                    allow_large_volume=allow_large_volume,
+                    log=progress.log,
+                    warn=emit_warning,
+                )
+                if json_file is not None:
+                    payload = {
+                        "result": {
+                            "output": result.output_path,
+                            "format": result.format,
+                            "compression": result.compression,
+                            "dimensions": list(result.dimensions),
+                            "pixel_type": result.pixel_type,
+                            "components": result.components,
+                            "spacing_mm": list(result.spacing),
+                            "origin_mm": list(result.origin),
+                            "direction": list(result.direction),
+                            "seconds": result.seconds,
+                            "warnings": result.warnings,
+                            "metadata_policy": result.metadata_policy,
+                        },
+                        "provenance": result.provenance,
+                    }
+                    progress.update("Writing JSON report ...")
+                    try:
+                        _write_json_file(json_file, payload)
+                    except OSError as exc:
+                        _error("cannot write JSON report %s: %s" % (json_file, exc))
+                        raise typer.Exit(1) from None
+        except typer.Exit:
+            raise
+        except (OSError, RuntimeError, ValueError) as exc:
+            _error(exc)
+            raise typer.Exit(1) from None
+
+    _emit_remaining_warnings(result.warnings, emitted_warnings)
+    if not quiet:
+        _success("wrote %s" % result.output_path)
+        _log(
+            "%s voxels   %s   %.1fs"
+            % (
+                "x".join(str(value) for value in result.dimensions),
+                result.pixel_type,
+                result.seconds,
+            )
+        )
+        if json_file is not None:
+            _success("wrote %s" % json_file)
+
+
+@app.command()
+def extract(
     input_path: Path = typer.Argument(
         ...,
         exists=True,
@@ -923,7 +1106,7 @@ def convert(
         False, "-q", "--quiet", help="Suppress normal progress output."
     ),
 ) -> None:
-    """Extract a surface mesh from a medical image volume."""
+    """Segment an intensity volume and extract its surface mesh."""
     _validate_mesh_output(output)
     threshold_value = _parse_threshold(threshold)
     _validate_processing_numbers(
@@ -979,11 +1162,11 @@ def convert(
             keep_largest_island=False if all_islands else None,
             keep_largest_component=_keep_largest_component(components),
         )
-        progress.update("Loading conversion engine ...")
+        progress.update("Loading surface extraction engine ...")
         from . import pipeline
 
         try:
-            result = pipeline.convert(
+            result = pipeline.extract(
                 candidate=chosen,
                 preset=resolved_preset,
                 output_path=str(output),
@@ -1039,8 +1222,8 @@ def convert(
     _exit_for_quality(report)
 
 
-@labelmap_app.command("convert")
-def convert_labelmap(
+@labelmap_app.command("extract")
+def extract_labelmap(
     input_path: Path = typer.Argument(
         ...,
         exists=True,
@@ -1123,11 +1306,11 @@ def convert_labelmap(
             _error(exc)
             raise typer.Exit(2) from None
 
-        progress.update("Loading labelmap conversion engine ...")
+        progress.update("Loading labelmap extraction engine ...")
         from . import labelmap as labelmap_mod
 
         try:
-            result = labelmap_mod.convert(
+            result = labelmap_mod.extract(
                 candidate=chosen,
                 output_path=str(output),
                 resample_mm=resample_mm,
@@ -1183,8 +1366,8 @@ def convert_labelmap(
     _exit_for_quality(report)
 
 
-@labelmap_app.command("merge")
-def merge_labelmaps(
+@labelmap_app.command("fuse")
+def fuse_labelmaps(
     fixed_input: Path = typer.Argument(
         ...,
         exists=True,
@@ -1205,37 +1388,12 @@ def merge_labelmaps(
         ...,
         "-o",
         "--output",
-        help="Output .stl/.ply/.obj mesh or .nii/.nii.gz labelmap.",
+        help="Atomic .nii/.nii.gz/.nrrd/.mha binary labelmap.",
     ),
     grid_mm: float = typer.Option(
-        defaults.DEFAULT_MERGE_GRID_MM,
+        defaults.DEFAULT_FUSION_GRID_MM,
         "--grid-mm",
         help="Isotropic fused-grid voxel size in mm.",
-    ),
-    mask_smooth_mm: float | None = typer.Option(
-        None,
-        "--mask-smooth-mm",
-        help="Gaussian sigma applied before meshing (mesh output default: 0.8 mm).",
-    ),
-    surface_smooth_iters: int | None = typer.Option(
-        None,
-        "--mesh-smooth-iters",
-        help="Surface relaxation iterations (mesh output default: 20; 0 = off).",
-    ),
-    simplify_error_mm: float | None = typer.Option(
-        None,
-        "--simplify-error-mm",
-        help="MeshLib estimated surface-deviation/QEM limit in model mm (0 = off).",
-    ),
-    post_surface_smooth_iters: int | None = typer.Option(
-        None,
-        "--post-mesh-smooth-iters",
-        help="Final surface relaxation iterations after simplification (mesh output default: 0).",
-    ),
-    components: ComponentChoice | None = typer.Option(
-        None,
-        "--components",
-        help="Surface components to keep (mesh output default: all).",
     ),
     force: bool = typer.Option(
         False, "--force", help="Override registration-quality gates."
@@ -1252,25 +1410,10 @@ def merge_labelmaps(
         False, "-q", "--quiet", help="Suppress normal progress output."
     ),
 ) -> None:
-    """Register and fuse two labelmaps into a mesh or editable NIfTI mask."""
-    output_kind = _validate_merge_output(output)
-    _reject_nifti_surface_options(
-        output_kind,
-        [
-            ("--mask-smooth-mm", mask_smooth_mm),
-            ("--mesh-smooth-iters", surface_smooth_iters),
-            ("--simplify-error-mm", simplify_error_mm),
-            ("--post-mesh-smooth-iters", post_surface_smooth_iters),
-            ("--components", components),
-        ],
-    )
+    """Register and union two labelmaps into one binary labelmap."""
+    _validate_volume_output(output)
     _validate_processing_numbers(
-        nonnegative=[
-            ("--mask-smooth-mm", mask_smooth_mm),
-            ("--mesh-smooth-iters", surface_smooth_iters),
-            ("--simplify-error-mm", simplify_error_mm),
-            ("--post-mesh-smooth-iters", post_surface_smooth_iters),
-        ],
+        nonnegative=[],
         positive=(("--grid-mm", grid_mm),),
     )
     emitted_warnings: list[str] = []
@@ -1293,85 +1436,56 @@ def merge_labelmaps(
             _error(exc)
             raise typer.Exit(2) from None
 
-        progress.update("Loading labelmap merge engine ...")
+        progress.update("Loading labelmap fusion engine ...")
+        from . import fusion as fusion_mod
         from . import labelmap as labelmap_mod
-        from . import merge as merge_mod
 
+        transaction = (
+            _restore_output_on_failure(output)
+            if json_file is not None
+            else nullcontext()
+        )
         try:
-            result = labelmap_mod.merge(
-                fixed=fixed,
-                moving=moving,
-                output_path=str(output),
-                grid_mm=grid_mm,
-                mask_smooth_mm=mask_smooth_mm,
-                surface_smooth_iters=surface_smooth_iters,
-                simplify_error_mm=simplify_error_mm,
-                post_surface_smooth_iters=post_surface_smooth_iters,
-                keep_largest_component=_keep_largest_component(components),
-                force=force,
-                allow_large_volume=allow_large_volume,
-                log=progress.log,
-                warn=emit_warning,
-            )
-        except merge_mod.MergeError as exc:
+            with transaction:
+                result = labelmap_mod.fuse(
+                    fixed=fixed,
+                    moving=moving,
+                    output_path=str(output),
+                    grid_mm=grid_mm,
+                    force=force,
+                    allow_large_volume=allow_large_volume,
+                    log=progress.log,
+                    warn=emit_warning,
+                )
+                if json_file is not None:
+                    payload = {
+                        "result": _fusion_result_payload(result),
+                        "provenance": result.provenance,
+                    }
+                    progress.update("Writing JSON report ...")
+                    try:
+                        _write_json_file(json_file, payload)
+                    except OSError as exc:
+                        _error("cannot write JSON report %s: %s" % (json_file, exc))
+                        raise typer.Exit(1) from None
+        except typer.Exit:
+            raise
+        except fusion_mod.FusionError as exc:
             _error(exc)
             raise typer.Exit(3) from None
-        except ValueError as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             _error(exc)
             raise typer.Exit(1) from None
 
-        if json_file is not None:
-            if isinstance(result, merge_mod.NiftiMergeResult):
-                payload = {
-                    "result": _nifti_merge_result_payload(result),
-                    "provenance": result.provenance,
-                }
-            else:
-                payload = {
-                    "result": {
-                        "output": result.output_path,
-                        "triangles": result.triangles,
-                        "vertices": result.vertices,
-                        "bounds_mm": list(result.bounds_mm),
-                        "grid_mm": result.grid_mm,
-                        "grid_size": list(result.grid_size),
-                        "volume_fixed_mm3": result.volume_fixed_mm3,
-                        "volume_moving_mm3": result.volume_moving_mm3,
-                        "volume_fused_mm3": result.volume_union_mm3,
-                        "surface_components": result.surface_components,
-                        "seconds": result.seconds,
-                        "warnings": result.warnings,
-                    },
-                    "provenance": result.provenance,
-                    "quality": result.quality,
-                }
-            progress.update("Writing JSON report ...")
-            try:
-                _write_json_file(json_file, payload)
-            except OSError as exc:
-                _error("cannot write JSON report %s: %s" % (json_file, exc))
-                raise typer.Exit(1) from None
-
     _emit_remaining_warnings(result.warnings, emitted_warnings)
     if not quiet:
-        if isinstance(result, merge_mod.NiftiMergeResult):
-            _print_nifti_merge_result(result)
-        else:
-            _success("wrote %s" % result.output_path)
-            _log(
-                "triangles %s   vertices %s   %.1fs"
-                % (f"{result.triangles:,}", f"{result.vertices:,}", result.seconds)
-            )
-            _print_quality(result.quality)
+        _print_fusion_result(result)
         if json_file is not None:
             _success("wrote %s" % json_file)
-    if not isinstance(result, merge_mod.NiftiMergeResult):
-        _warn_if_invalid(result.quality, "fused output")
-        _exit_for_quality(result.quality)
 
 
 @app.command()
-def merge(
+def fuse(
     fixed_input: Path = typer.Argument(
         ...,
         exists=True,
@@ -1384,7 +1498,7 @@ def merge(
         ...,
         "-o",
         "--output",
-        help="Output .stl/.ply/.obj mesh or .nii/.nii.gz labelmap.",
+        help="Atomic .nii/.nii.gz/.nrrd/.mha binary labelmap.",
     ),
     moving_input: Path = typer.Argument(
         ...,
@@ -1432,35 +1546,10 @@ def merge(
     all_islands: bool = typer.Option(
         False, "--all-islands", help="Keep every labelmap island."
     ),
-    components: ComponentChoice | None = typer.Option(
-        None,
-        "--components",
-        help="Surface components to keep (default: preset).",
-    ),
     grid_mm: float = typer.Option(
-        defaults.DEFAULT_MERGE_GRID_MM,
+        defaults.DEFAULT_FUSION_GRID_MM,
         "--grid-mm",
         help="Isotropic fused-grid voxel size in mm.",
-    ),
-    mask_smooth_mm: float | None = typer.Option(
-        None,
-        "--mask-smooth-mm",
-        help="Gaussian sigma in physical mm applied to the fused mask before meshing (0 = off).",
-    ),
-    surface_smooth_iters: int | None = typer.Option(
-        None,
-        "--mesh-smooth-iters",
-        help="Topology-preserving surface relaxation iterations after meshing (0 = off).",
-    ),
-    simplify_error_mm: float | None = typer.Option(
-        None,
-        "--simplify-error-mm",
-        help="MeshLib estimated surface-deviation/QEM limit in model mm, not a certified Hausdorff bound (0 = off).",
-    ),
-    post_surface_smooth_iters: int | None = typer.Option(
-        None,
-        "--post-mesh-smooth-iters",
-        help="Final topology-preserving surface relaxation iterations after simplification (0 = off).",
     ),
     force: bool = typer.Option(
         False,
@@ -1479,18 +1568,8 @@ def merge(
         False, "-q", "--quiet", help="Suppress normal progress output."
     ),
 ) -> None:
-    """Register two scans and fuse them into a mesh or editable NIfTI mask."""
-    output_kind = _validate_merge_output(output)
-    _reject_nifti_surface_options(
-        output_kind,
-        [
-            ("--mask-smooth-mm", mask_smooth_mm),
-            ("--mesh-smooth-iters", surface_smooth_iters),
-            ("--simplify-error-mm", simplify_error_mm),
-            ("--post-mesh-smooth-iters", post_surface_smooth_iters),
-            ("--components", components),
-        ],
-    )
+    """Segment, register, and union two volumes into a binary labelmap."""
+    _validate_volume_output(output)
     fixed_threshold_value = _parse_threshold(fixed_threshold, "--fixed-threshold")
     moving_threshold_value = _parse_threshold(moving_threshold, "--moving-threshold")
     _validate_processing_numbers(
@@ -1499,10 +1578,6 @@ def merge(
             ("--closing-mm", closing_mm),
             ("--opening-mm", opening_mm),
             ("--min-island-mm3", min_island_mm3),
-            ("--mask-smooth-mm", mask_smooth_mm),
-            ("--mesh-smooth-iters", surface_smooth_iters),
-            ("--simplify-error-mm", simplify_error_mm),
-            ("--post-mesh-smooth-iters", post_surface_smooth_iters),
         ],
         positive=(("--grid-mm", grid_mm),),
     )
@@ -1550,86 +1625,56 @@ def merge(
             opening_mm=opening_mm,
             min_island_mm3=min_island_mm3,
             keep_largest_island=False if all_islands else None,
-            keep_largest_component=_keep_largest_component(components),
         )
-        progress.update("Loading merge engine ...")
-        from . import merge as merge_mod
+        progress.update("Loading fusion engine ...")
+        from . import fusion as fusion_mod
 
+        transaction = (
+            _restore_output_on_failure(output)
+            if json_file is not None
+            else nullcontext()
+        )
         try:
-            result = merge_mod.merge(
-                fixed=fixed_candidate,
-                moving=moving_candidate,
-                preset=resolved_preset,
-                output_path=str(output),
-                fixed_threshold=fixed_threshold_value,
-                moving_threshold=moving_threshold_value,
-                grid_mm=grid_mm,
-                mask_smooth_mm=mask_smooth_mm,
-                surface_smooth_iters=surface_smooth_iters,
-                simplify_error_mm=simplify_error_mm,
-                post_surface_smooth_iters=post_surface_smooth_iters,
-                force=force,
-                allow_large_volume=allow_large_volume,
-                log=progress.log,
-                warn=emit_warning,
-            )
-        except merge_mod.MergeError as exc:
+            with transaction:
+                result = fusion_mod.fuse(
+                    fixed=fixed_candidate,
+                    moving=moving_candidate,
+                    preset=resolved_preset,
+                    output_path=str(output),
+                    fixed_threshold=fixed_threshold_value,
+                    moving_threshold=moving_threshold_value,
+                    grid_mm=grid_mm,
+                    force=force,
+                    allow_large_volume=allow_large_volume,
+                    log=progress.log,
+                    warn=emit_warning,
+                )
+                if json_file is not None:
+                    payload = {
+                        "result": _fusion_result_payload(result),
+                        "provenance": result.provenance,
+                    }
+                    progress.update("Writing JSON report ...")
+                    try:
+                        _write_json_file(json_file, payload)
+                    except OSError as exc:
+                        _error("cannot write JSON report %s: %s" % (json_file, exc))
+                        raise typer.Exit(1) from None
+        except typer.Exit:
+            raise
+        except fusion_mod.FusionError as exc:
             _error(exc)
             raise typer.Exit(3) from None
-        except ValueError as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             _error(exc)
             raise typer.Exit(2) from None
-
-        if json_file is not None:
-            if isinstance(result, merge_mod.NiftiMergeResult):
-                payload = {
-                    "result": _nifti_merge_result_payload(result),
-                    "provenance": result.provenance,
-                }
-            else:
-                payload = {
-                    "result": {
-                        "output": result.output_path,
-                        "triangles": result.triangles,
-                        "vertices": result.vertices,
-                        "bounds_mm": list(result.bounds_mm),
-                        "grid_mm": result.grid_mm,
-                        "grid_size": list(result.grid_size),
-                        "volume_fixed_mm3": result.volume_fixed_mm3,
-                        "volume_moving_mm3": result.volume_moving_mm3,
-                        "volume_fused_mm3": result.volume_union_mm3,
-                        "surface_components": result.surface_components,
-                        "seconds": result.seconds,
-                        "warnings": result.warnings,
-                    },
-                    "provenance": result.provenance,
-                    "quality": result.quality,
-                }
-            progress.update("Writing JSON report ...")
-            try:
-                _write_json_file(json_file, payload)
-            except OSError as exc:
-                _error("cannot write JSON report %s: %s" % (json_file, exc))
-                raise typer.Exit(1) from None
 
     _emit_remaining_warnings(result.warnings, emitted_warnings)
 
     if not quiet:
-        if isinstance(result, merge_mod.NiftiMergeResult):
-            _print_nifti_merge_result(result)
-        else:
-            _success("wrote %s" % result.output_path)
-            _log(
-                "triangles %s   vertices %s   %.1fs"
-                % (f"{result.triangles:,}", f"{result.vertices:,}", result.seconds)
-            )
-            _print_quality(result.quality)
+        _print_fusion_result(result)
         if json_file is not None:
             _success("wrote %s" % json_file)
-
-    if not isinstance(result, merge_mod.NiftiMergeResult):
-        _warn_if_invalid(result.quality, "fused output")
-        _exit_for_quality(result.quality)
 
 
 @app.command()

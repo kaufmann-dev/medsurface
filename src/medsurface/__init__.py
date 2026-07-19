@@ -1,4 +1,4 @@
-"""Create surface meshes and fused NIfTI labelmaps from medical images."""
+"""Convert medical volumes, fuse binary labelmaps, and extract surface meshes."""
 
 from .presets import PRESETS, Preset  # noqa: F401
 

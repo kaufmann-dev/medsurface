@@ -1,4 +1,4 @@
-"""External labelmap validation, conversion, and registered fusion."""
+"""External labelmap validation, extraction, and registered binary fusion."""
 
 from __future__ import annotations
 
@@ -8,8 +8,7 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 
-from medsurface import catalog, labelmap
-from medsurface import merge as merge_mod
+from medsurface import catalog, fusion, labelmap, registration
 
 
 def _image(values: np.ndarray, *, origin=(0.0, 0.0, 0.0)) -> sitk.Image:
@@ -68,7 +67,7 @@ def test_invalid_labelmap_values_are_rejected(values, message):
         ((3, 4, 4), "4x4x3"),
     ],
 )
-def test_labelmap_convert_rejects_short_dimensions_before_meshing(
+def test_labelmap_extract_rejects_short_dimensions_before_meshing(
     tmp_path, monkeypatch, shape, dimensions
 ):
     candidate = _write(tmp_path / "short.nii.gz", np.ones(shape, dtype=np.uint8))
@@ -82,7 +81,7 @@ def test_labelmap_convert_rejects_short_dimensions_before_meshing(
         ValueError,
         match=r"each volume axis must contain at least 4 voxels; got %s$" % dimensions,
     ):
-        labelmap.convert(
+        labelmap.extract(
             candidate,
             str(tmp_path / "out.stl"),
             mask_smooth_mm=0,
@@ -90,14 +89,14 @@ def test_labelmap_convert_rejects_short_dimensions_before_meshing(
 
 
 @pytest.mark.parametrize("invalid_role", ["fixed", "moving"])
-def test_labelmap_merge_rejects_short_dimensions_before_registration(
+def test_labelmap_fuse_rejects_short_dimensions_before_registration(
     tmp_path, monkeypatch, invalid_role
 ):
     valid = _write(tmp_path / "valid.nii.gz", np.ones((4, 4, 4), dtype=np.uint8))
     short = _write(tmp_path / "short.nii.gz", np.ones((4, 4, 2), dtype=np.uint8))
     fixed, moving = (short, valid) if invalid_role == "fixed" else (valid, short)
     monkeypatch.setattr(
-        labelmap.merge_mod,
+        labelmap.fusion,
         "fuse_masks",
         lambda *_args, **_kwargs: pytest.fail("registration must not start"),
     )
@@ -106,11 +105,10 @@ def test_labelmap_merge_rejects_short_dimensions_before_registration(
         ValueError,
         match=(r"each volume axis must contain at least 4 voxels; got 2x4x4$"),
     ):
-        labelmap.merge(
+        labelmap.fuse(
             fixed,
             moving,
-            str(tmp_path / "out.stl"),
-            mask_smooth_mm=0,
+            str(tmp_path / "out.nii.gz"),
         )
 
 
@@ -121,7 +119,7 @@ def test_four_voxel_labelmap_is_accepted_with_recursive_smoothing(tmp_path):
     )
     output = tmp_path / "minimum.stl"
 
-    result = labelmap.convert(
+    result = labelmap.extract(
         candidate,
         str(output),
         simplify_error_mm=0,
@@ -162,7 +160,7 @@ def test_default_labelmap_finishing_uses_no_post_simplification_relaxation(tmp_p
     output = tmp_path / "labels.stl"
     candidate = _write(source, _two_labels())
 
-    result = labelmap.convert(candidate, str(output))
+    result = labelmap.extract(candidate, str(output))
     finishing = result.provenance["surface_finishing"]
 
     assert result.quality["valid"]
@@ -178,12 +176,12 @@ def test_default_labelmap_finishing_uses_no_post_simplification_relaxation(tmp_p
 
 
 @pytest.mark.parametrize("extension", [".nii.gz", ".nrrd", ".mha"])
-def test_real_labelmap_formats_convert_all_components(tmp_path, extension):
+def test_real_labelmap_formats_extract_all_components(tmp_path, extension):
     source = tmp_path / ("labels" + extension)
     output = tmp_path / ("labels-%s.stl" % extension.replace(".", ""))
     candidate = _write(source, _two_labels())
 
-    result = labelmap.convert(
+    result = labelmap.extract(
         candidate,
         str(output),
         mask_smooth_mm=0,
@@ -204,12 +202,12 @@ def test_real_labelmap_formats_convert_all_components(tmp_path, extension):
     )
 
 
-def test_labelmap_convert_can_keep_only_the_largest_component(tmp_path):
+def test_labelmap_extract_can_keep_only_the_largest_component(tmp_path):
     source = tmp_path / "labels.nii.gz"
     output = tmp_path / "largest.stl"
     candidate = _write(source, _two_labels())
 
-    result = labelmap.convert(
+    result = labelmap.extract(
         candidate,
         str(output),
         mask_smooth_mm=0,
@@ -224,14 +222,14 @@ def test_labelmap_convert_can_keep_only_the_largest_component(tmp_path):
     assert result.provenance["surface"]["keep_largest_component"] is True
 
 
-def test_labelmap_conversion_preserves_left_handed_physical_geometry(tmp_path):
+def test_labelmap_extraction_preserves_left_handed_physical_geometry(tmp_path):
     source = tmp_path / "left-handed.nii.gz"
     output = tmp_path / "left-handed.stl"
     image = _image(_two_labels())
     image.SetDirection((-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0))
     sitk.WriteImage(image, str(source))
 
-    result = labelmap.convert(
+    result = labelmap.extract(
         catalog.discover(source)[0],
         str(output),
         mask_smooth_mm=0,
@@ -251,7 +249,7 @@ def test_labelmap_boundary_is_capped_and_reported(tmp_path):
     output = tmp_path / "clipped.stl"
     candidate = _write(source, values)
 
-    result = labelmap.convert(
+    result = labelmap.extract(
         candidate,
         str(output),
         mask_smooth_mm=0,
@@ -264,7 +262,7 @@ def test_labelmap_boundary_is_capped_and_reported(tmp_path):
     assert any("capped flat" in warning for warning in result.warnings)
 
 
-def test_labelmap_merge_registers_rigid_masks_and_uses_fixed_frame(tmp_path):
+def test_labelmap_fuse_registers_rigid_masks_and_uses_fixed_frame(tmp_path):
     zz, yy, xx = np.indices((64, 64, 64))
     values = (
         ((xx - 32) / 18) ** 2 + ((yy - 31) / 15) ** 2 + ((zz - 30) / 12) ** 2 <= 1
@@ -272,40 +270,40 @@ def test_labelmap_merge_registers_rigid_masks_and_uses_fixed_frame(tmp_path):
     values[25:37, 28:35, 45:50] = 1
     fixed_path = tmp_path / "fixed.nii.gz"
     moving_path = tmp_path / "moving.nii.gz"
-    fixed = _write(fixed_path, values)
-    moving = _write(moving_path, values, origin=(4.0, -3.0, 2.0))
-    output = tmp_path / "merged.stl"
+    fixed = _write(fixed_path, values * 5)
+    moving = _write(moving_path, values * 91, origin=(4.0, -3.0, 2.0))
+    output = tmp_path / "fused.nrrd"
 
-    result = labelmap.merge(
+    result = labelmap.fuse(
         fixed,
         moving,
         str(output),
         grid_mm=1.0,
-        mask_smooth_mm=0,
-        surface_smooth_iters=0,
-        simplify_error_mm=0,
     )
 
     assert output.exists()
-    assert result.quality["valid"]
+    stored = sitk.ReadImage(str(output))
+    assert stored.GetPixelID() == sitk.sitkUInt8
+    assert set(np.unique(sitk.GetArrayViewFromImage(stored))) == {0, 1}
+    assert int(sitk.GetArrayViewFromImage(stored).sum()) == result.foreground_fused_voxels
     assert result.registration.surface_overlap > 0.9
     assert result.registration.shared_fov_dice > 0.9
-    assert result.provenance["coordinate_system"].endswith("fixed labelmap")
+    assert "fixed labelmap" in result.provenance["coordinate_system"]
     assert result.provenance["fixed"]["foreground"] == "all nonzero voxels"
+    assert result.provenance["moving"]["foreground"] == "all nonzero voxels"
+    assert result.provenance["segmentation"] == {
+        "input_kind": "labelmap",
+        "validation": "finite, discrete, and non-negative",
+        "foreground": "all nonzero source values normalized to 1",
+    }
+    assert "surface" not in result.provenance
+    assert "surface_finishing" not in result.provenance
     assert any("rigid registration" in warning for warning in result.warnings)
     assert any("same rigid structures" in warning for warning in result.warnings)
 
 
-def test_labelmap_merge_returns_nifti_result_without_surface_provenance(
-    tmp_path, monkeypatch
-):
-    fixed_path = tmp_path / "fixed.nii.gz"
-    moving_path = tmp_path / "moving.nii.gz"
-    values = np.zeros((8, 8, 8), dtype=np.uint8)
-    values[2:6, 2:6, 2:6] = 1
-    fixed = _write(fixed_path, values)
-    moving = _write(moving_path, values, origin=(1.0, 0.0, 0.0))
-    registration_result = merge_mod.RegistrationResult(
+def _registration_result() -> registration.RegistrationResult:
+    return registration.RegistrationResult(
         transform=np.eye(4),
         fft_translation_mm=np.zeros(3),
         rotation_deg=0.0,
@@ -318,36 +316,80 @@ def test_labelmap_merge_returns_nifti_result_without_surface_provenance(
         shared_fov_mm3=100_000.0,
     )
 
+
+@pytest.mark.parametrize(
+    "extension,expected_format,expected_compression",
+    [
+        (".nii", "NIfTI", "none"),
+        (".nii.gz", "NIfTI", "gzip"),
+        (".nrrd", "NRRD", "gzip"),
+        (".mha", "MetaImage", "zlib"),
+    ],
+)
+def test_labelmap_fuse_normalizes_multilabel_values_in_every_output_format(
+    tmp_path,
+    monkeypatch,
+    extension,
+    expected_format,
+    expected_compression,
+):
+    fixed_values = _two_labels()
+    moving_values = np.zeros_like(fixed_values)
+    moving_values[fixed_values == 5] = 17
+    moving_values[fixed_values == 91] = 203
+    fixed = _write(tmp_path / "fixed.nii.gz", fixed_values)
+    moving = _write(tmp_path / "moving.mha", moving_values)
+    output = tmp_path / ("fused" + extension)
     monkeypatch.setattr(
-        merge_mod,
-        "fuse_masks",
-        lambda *_args, **kwargs: (
-            merge_mod.NiftiMaskMergeResult(
-                grid_size=(20, 21, 22),
-                registration=registration_result,
-                volume_fixed_mm3=100.0,
-                volume_moving_mm3=110.0,
-                volume_union_mm3=150.0,
-                foreground_voxels=150,
-                warnings=[],
-            )
-            if kwargs["settings"] is None
-            else pytest.fail("NIfTI merge received surface settings")
-        ),
+        fusion.registration,
+        "rigid_register",
+        lambda *_args, **_kwargs: _registration_result(),
     )
 
-    result = labelmap.merge(fixed, moving, str(tmp_path / "merged.nii.gz"))
+    result = labelmap.fuse(fixed, moving, str(output), grid_mm=1.0)
+    stored = sitk.ReadImage(str(output))
+    stored_values = sitk.GetArrayViewFromImage(stored)
 
-    assert isinstance(result, merge_mod.NiftiMergeResult)
-    assert result.grid_size == (20, 21, 22)
-    assert result.foreground_voxels == 150
-    assert result.provenance["output"]["kind"] == "labelmap"
+    assert isinstance(result, fusion.FusionResult)
+    assert result.output_format == expected_format
+    assert result.compression == expected_compression
+    assert set(np.unique(stored_values)) == {0, 1}
+    assert 5 not in stored_values
+    assert 17 not in stored_values
+    assert 91 not in stored_values
+    assert 203 not in stored_values
+    assert result.foreground_fixed_voxels == 2 * 8**3
+    assert result.foreground_moving_voxels == 2 * 8**3
+    assert result.foreground_fused_voxels == 2 * 8**3
+    assert result.provenance["output"]["kind"] == "binary labelmap"
     assert "surface" not in result.provenance
     assert "surface_finishing" not in result.provenance
     assert any("fused labelmap" in warning for warning in result.warnings)
 
 
-def test_labelmap_merge_rejects_the_same_input_before_loading(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "invalid_values,message",
+    [
+        (np.zeros((4, 4, 4), dtype=np.uint8), "no nonzero foreground"),
+        (np.full((4, 4, 4), 0.25, dtype=np.float32), "fractional"),
+    ],
+)
+def test_labelmap_fuse_rejects_invalid_moving_values_before_registration(
+    tmp_path, monkeypatch, invalid_values, message
+):
+    valid = _write(tmp_path / "valid.nii.gz", np.ones((4, 4, 4), dtype=np.uint8))
+    invalid = _write(tmp_path / "invalid.nrrd", invalid_values)
+    monkeypatch.setattr(
+        fusion,
+        "fuse_masks",
+        lambda *_args, **_kwargs: pytest.fail("registration must not start"),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        labelmap.fuse(valid, invalid, str(tmp_path / "out.nii"))
+
+
+def test_labelmap_fuse_rejects_the_same_input_before_loading(tmp_path, monkeypatch):
     source = tmp_path / "mask.nii.gz"
     candidate = _write(source, _two_labels())
     monkeypatch.setattr(
@@ -358,11 +400,11 @@ def test_labelmap_merge_rejects_the_same_input_before_loading(tmp_path, monkeypa
         ),
     )
 
-    with pytest.raises(merge_mod.MergeError, match="same labelmap"):
-        labelmap.merge(candidate, candidate, str(tmp_path / "out.stl"))
+    with pytest.raises(fusion.FusionError, match="same labelmap"):
+        labelmap.fuse(candidate, candidate, str(tmp_path / "out.nii"))
 
 
-def test_labelmap_convert_does_not_call_segmentation(monkeypatch, tmp_path):
+def test_labelmap_extract_does_not_call_segmentation(monkeypatch, tmp_path):
     source = tmp_path / "mask.nii.gz"
     candidate = _write(source, _two_labels())
 
@@ -373,11 +415,11 @@ def test_labelmap_convert_does_not_call_segmentation(monkeypatch, tmp_path):
             segment,
             name,
             lambda *_args, _name=name, **_kwargs: pytest.fail(
-                "labelmap conversion called segmentation step %s" % _name
+                "labelmap extraction called segmentation step %s" % _name
             ),
         )
 
-    result = labelmap.convert(
+    result = labelmap.extract(
         candidate,
         str(tmp_path / "out.stl"),
         mask_smooth_mm=0,

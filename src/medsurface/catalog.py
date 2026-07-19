@@ -100,6 +100,14 @@ def _format_for(extension: str) -> str:
     return "MetaImage"
 
 
+def _image_io(extension: str) -> str:
+    if extension in (".nii", ".nii.gz"):
+        return "NiftiImageIO"
+    if extension in (".nrrd", ".nhdr"):
+        return "NrrdImageIO"
+    return "MetaImageIO"
+
+
 def _header_value(lines: list[str], pattern: re.Pattern[str]) -> tuple[int, str] | None:
     for index, line in enumerate(lines):
         match = pattern.match(line.strip())
@@ -277,6 +285,7 @@ def _file_candidate(path: Path, root: Path) -> VolumeCandidate:
     try:
         reader = sitk.ImageFileReader()
         reader.SetFileName(str(path))
+        reader.SetImageIO(_image_io(extension))
         reader.ReadImageInformation()
         dimension = reader.GetDimension()
         size = tuple(int(value) for value in reader.GetSize())
