@@ -20,9 +20,6 @@ Python 3.10 or newer and [uv](https://docs.astral.sh/uv/) are required.
 uv tool install .
 ```
 
-Mesh finishing and validation use the pinned MeshLib Python package; no system
-OpenGL libraries are required.
-
 ## Quick start
 
 First inspect the available volumes:
