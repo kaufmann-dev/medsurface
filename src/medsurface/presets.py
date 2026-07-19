@@ -111,11 +111,8 @@ def get(name: str) -> Preset:
 
 def validate(preset: Preset) -> None:
     """Reject invalid processing values before image or mesh allocation begins."""
+    validate_segmentation(preset)
     nonnegative = {
-        "median_mm": preset.median_mm,
-        "closing_mm": preset.closing_mm,
-        "opening_mm": preset.opening_mm,
-        "min_island_mm3": preset.min_island_mm3,
         "resample_mm": preset.resample_mm,
         "mask_smooth_mm": preset.mask_smooth_mm,
         "simplify_error_mm": preset.simplify_error_mm,
@@ -133,6 +130,18 @@ def validate(preset: Preset) -> None:
         or preset.post_surface_smooth_iters < 0
     ):
         raise ValueError("post_surface_smooth_iters must be a non-negative integer")
+
+
+def validate_segmentation(preset: Preset) -> None:
+    """Validate only fields used to turn intensities into a binary mask."""
+    for name, value in {
+        "median_mm": preset.median_mm,
+        "closing_mm": preset.closing_mm,
+        "opening_mm": preset.opening_mm,
+        "min_island_mm3": preset.min_island_mm3,
+    }.items():
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("%s must be finite and non-negative" % name)
     for name, threshold_value in (
         ("threshold", preset.threshold),
         ("threshold_max", preset.threshold_max),

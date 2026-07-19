@@ -1,7 +1,8 @@
-"""Convert or fuse externally produced discrete segmentation labelmaps."""
+"""Extract or fuse externally produced discrete segmentation labelmaps."""
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Callable
@@ -9,17 +10,16 @@ from typing import Any, Callable
 import numpy as np
 import SimpleITK as sitk
 
-from . import merge as merge_mod
-from . import pipeline, surface
+from . import fusion, pipeline, surface
 from . import volume as volume_mod
 from .catalog import DicomSource, VolumeCandidate, same_source
 from .defaults import (
+    DEFAULT_FUSION_GRID_MM,
     DEFAULT_LABELMAP_MASK_SMOOTH_MM,
     DEFAULT_LABELMAP_POST_SURFACE_SMOOTH_ITERS,
     DEFAULT_LABELMAP_SURFACE_SMOOTH_ITERS,
-    DEFAULT_MERGE_GRID_MM,
 )
-from .outputs import OutputKind, merge_output_kind
+from .outputs import volume_output
 
 Logger = Callable[[str], None]
 
@@ -137,7 +137,7 @@ def load(
         )
     volume = volume_mod.load(candidate, allow_large_volume=allow_large_volume)
     mask = _binary_mask(volume.image)
-    provenance = pipeline.volume_provenance(volume)
+    provenance = volume_mod.provenance_for(volume)
     provenance.update(
         {
             "input_kind": "labelmap",
@@ -147,7 +147,7 @@ def load(
     return LoadedLabelmap(volume=volume, mask=mask, provenance=provenance)
 
 
-def convert(
+def extract(
     candidate: VolumeCandidate,
     output_path: str,
     *,
@@ -242,51 +242,24 @@ def convert(
     )
 
 
-def merge(
+def fuse(
     fixed: VolumeCandidate,
     moving: VolumeCandidate,
     output_path: str,
     *,
-    grid_mm: float = DEFAULT_MERGE_GRID_MM,
-    mask_smooth_mm: float | None = None,
-    surface_smooth_iters: int | None = None,
-    simplify_error_mm: float | None = None,
-    post_surface_smooth_iters: int | None = None,
-    keep_largest_component: bool | None = None,
+    grid_mm: float = DEFAULT_FUSION_GRID_MM,
     force: bool = False,
     allow_large_volume: bool = False,
     log: Logger | None = None,
     warn: Logger | None = None,
-) -> merge_mod.MergeResult | merge_mod.NiftiMergeResult:
-    output_kind = merge_output_kind(output_path)
-    if output_kind is OutputKind.NIFTI and any(
-        value is not None
-        for value in (
-            mask_smooth_mm,
-            surface_smooth_iters,
-            simplify_error_mm,
-            post_surface_smooth_iters,
-            keep_largest_component,
-        )
-    ):
-        raise ValueError("surface-processing overrides cannot be used with NIfTI output")
-    settings = (
-        resolve_surface_settings(
-            mask_smooth_mm=mask_smooth_mm,
-            surface_smooth_iters=surface_smooth_iters,
-            simplify_error_mm=simplify_error_mm,
-            post_surface_smooth_iters=post_surface_smooth_iters,
-            keep_largest_component=keep_largest_component,
-        )
-        if output_kind is OutputKind.MESH
-        else None
-    )
-    if output_kind is OutputKind.MESH:
-        surface.validate_output_path(output_path)
+) -> fusion.FusionResult:
+    volume_output(output_path)
+    if os.path.isdir(output_path):
+        raise ValueError("volume output path is a directory: %s" % output_path)
     if not np.isfinite(grid_mm) or grid_mm <= 0:
         raise ValueError("grid_mm must be finite and greater than zero")
     if same_source(fixed, moving):
-        raise merge_mod.MergeError(
+        raise fusion.FusionError(
             "fixed and moving inputs resolve to the same labelmap"
         )
     started = time.time()
@@ -309,19 +282,12 @@ def merge(
         if warn:
             warn(message)
 
-    for message in merge_mod.check_compatible(fixed, moving, output_kind):
+    for message in fusion.check_compatible(fixed, moving):
         add_warning(message)
-    result_name = (
-        "fused labelmap" if output_kind is OutputKind.NIFTI else "fused surface"
-    )
     add_warning(
         "labelmap contents are not verified; confirm that fixed and moving masks "
-        "represent the same rigid structures before using the %s" % result_name
+        "represent the same rigid structures before using the fused labelmap"
     )
-    if settings is not None:
-        smoothing_message = pipeline.mask_smoothing_warning(settings.mask_smooth_mm)
-        if smoothing_message:
-            add_warning(smoothing_message)
 
     say("fixed  ID %d  %s  %s" % (fixed.id, fixed.format, fixed.source_name))
     say("moving ID %d  %s  %s" % (moving.id, moving.format, moving.source_name))
@@ -338,79 +304,37 @@ def merge(
     for message in volume_mod.warnings_for(moving_loaded.volume):
         add_warning(message)
 
-    fused = merge_mod.fuse_masks(
+    fixed_provenance = fixed_loaded.provenance
+    moving_provenance = moving_loaded.provenance
+    fixed_loaded.volume.image = sitk.Image()
+    moving_loaded.volume.image = sitk.Image()
+    result = fusion.fuse_masks(
         fixed_loaded.mask,
         moving_loaded.mask,
         output_path,
-        settings=settings,
         grid_mm=grid_mm,
         force=force,
         allow_large_volume=allow_large_volume,
         log=say,
         warn=warn,
     )
-    warnings.extend(fused.warnings)
-    registration = fused.registration
-    provenance: dict[str, Any] = {
-        "fixed": fixed_loaded.provenance,
-        "moving": moving_loaded.provenance,
-        "grid_mm": grid_mm,
-        "transform_moving_to_fixed": registration.transform.tolist(),
-        "rotation_deg": registration.rotation_deg,
-        "registration": {
-            "inlier_rms_mm": registration.inlier_rms_mm,
-            "inlier_median_mm": registration.inlier_median_mm,
-            "surface_overlap": registration.surface_overlap,
-            "shared_fov_dice": registration.shared_fov_dice,
-            "shared_fov_mm3": registration.shared_fov_mm3,
-        },
-        "coordinate_system": "SimpleITK physical space of the fixed labelmap",
-        "forced": bool(force),
-        "allow_large_volume": bool(allow_large_volume),
-    }
-    if isinstance(fused, merge_mod.NiftiMaskMergeResult):
-        provenance["output"] = {
-            "kind": "labelmap",
-            "format": "NIfTI",
-            "pixel_type": "uint8",
-            "foreground": "all source nonzero values, stored as 1",
-            "background": "0",
-        }
-        return merge_mod.NiftiMergeResult(
-            output_path=output_path,
-            grid_mm=grid_mm,
-            grid_size=fused.grid_size,
-            registration=registration,
-            volume_fixed_mm3=fused.volume_fixed_mm3,
-            volume_moving_mm3=fused.volume_moving_mm3,
-            volume_union_mm3=fused.volume_union_mm3,
-            foreground_voxels=fused.foreground_voxels,
-            seconds=time.time() - started,
-            warnings=warnings,
-            provenance=provenance,
-        )
-
-    assert settings is not None
-    provenance.update(
+    result.seconds = time.time() - started
+    result.warnings = warnings + result.warnings
+    result.provenance.update(
         {
-            "surface": surface_provenance(settings),
-            "surface_finishing": fused.surface_finishing,
+            "fixed": fixed_provenance,
+            "moving": moving_provenance,
+            "segmentation": {
+                "input_kind": "labelmap",
+                "validation": "finite, discrete, and non-negative",
+                "foreground": "all nonzero source values normalized to 1",
+            },
+            "forced": bool(force),
+            "allow_large_volume": bool(allow_large_volume),
+            "coordinate_system": (
+                "axis-aligned isotropic lattice in the fixed labelmap's "
+                "SimpleITK physical coordinate system"
+            ),
         }
     )
-    return merge_mod.MergeResult(
-        output_path=output_path,
-        triangles=fused.triangles,
-        vertices=fused.vertices,
-        bounds_mm=fused.bounds_mm,
-        grid_mm=grid_mm,
-        grid_size=fused.grid_size,
-        registration=registration,
-        volume_fixed_mm3=fused.volume_fixed_mm3,
-        volume_moving_mm3=fused.volume_moving_mm3,
-        volume_union_mm3=fused.volume_union_mm3,
-        surface_components=fused.surface_components,
-        seconds=time.time() - started,
-        warnings=warnings,
-        provenance=provenance,
-        quality=fused.quality,
-    )
+    return result

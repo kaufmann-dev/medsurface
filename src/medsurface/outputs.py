@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import os
-from enum import Enum
+from dataclasses import dataclass
 
-from .defaults import SUPPORTED_MESH_EXTENSIONS, SUPPORTED_NIFTI_EXTENSIONS
+from .defaults import SUPPORTED_MESH_EXTENSIONS, SUPPORTED_VOLUME_EXTENSIONS
 
 
-class OutputKind(str, Enum):
-    """The two result types produced by merge workflows."""
+@dataclass(frozen=True)
+class VolumeOutput:
+    """Suffix-selected storage contract for one atomic volume file."""
 
-    MESH = "mesh"
-    NIFTI = "nifti"
+    extension: str
+    format: str
+    compression: str
+
+    @property
+    def compressed(self) -> bool:
+        return self.compression != "none"
 
 
 def extension(path: str | os.PathLike[str]) -> str:
@@ -23,20 +29,22 @@ def extension(path: str | os.PathLike[str]) -> str:
     return os.path.splitext(normalized)[1]
 
 
-def merge_output_kind(path: str | os.PathLike[str]) -> OutputKind:
-    """Classify a merge destination or reject its unsupported extension."""
+def volume_output(path: str | os.PathLike[str]) -> VolumeOutput:
+    """Classify an atomic volume destination or reject its extension."""
     ext = extension(path)
-    if ext in SUPPORTED_MESH_EXTENSIONS:
-        return OutputKind.MESH
-    if ext in SUPPORTED_NIFTI_EXTENSIONS:
-        return OutputKind.NIFTI
-    raise ValueError(
-        "unsupported output extension %r; supported: %s"
-        % (
-            ext,
-            ", ".join((*SUPPORTED_MESH_EXTENSIONS, *SUPPORTED_NIFTI_EXTENSIONS)),
-        )
-    )
+    contracts = {
+        ".nii": VolumeOutput(".nii", "NIfTI", "none"),
+        ".nii.gz": VolumeOutput(".nii.gz", "NIfTI", "gzip"),
+        ".nrrd": VolumeOutput(".nrrd", "NRRD", "gzip"),
+        ".mha": VolumeOutput(".mha", "MetaImage", "zlib"),
+    }
+    try:
+        return contracts[ext]
+    except KeyError:
+        raise ValueError(
+            "unsupported volume output extension %r; supported: %s"
+            % (ext, ", ".join(SUPPORTED_VOLUME_EXTENSIONS))
+        ) from None
 
 
 def validate_mesh_output(path: str | os.PathLike[str]) -> None:

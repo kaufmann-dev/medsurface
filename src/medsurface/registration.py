@@ -2,7 +2,7 @@
 
 Inputs are interpreted in their physical coordinate systems. This implementation
 does not assume that two volumes already align; origin, pose, and head tilt can
-differ between acquisitions, so ``merge`` always registers the moving scan.
+differ between acquisitions, so ``fuse`` always registers the moving scan.
 
 The search is global-then-local:
 

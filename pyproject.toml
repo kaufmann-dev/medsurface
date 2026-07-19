@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "medsurface"
 version = "0.1.0"
-description = "Create surface meshes and fused NIfTI labelmaps from medical images"
+description = "Convert medical volumes, fuse binary labelmaps, and extract surface meshes"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

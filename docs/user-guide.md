@@ -1,103 +1,180 @@
 # User guide
 
 [Project README](../README.md) · [Choosing a volume](#choosing-a-volume) ·
-[Choosing a preset](#choosing-a-preset) ·
+[Strict volume conversion](#strict-volume-conversion) ·
+[Extracting an intensity surface](#extracting-an-intensity-surface) ·
 [Using an external labelmap](#using-an-external-labelmap) ·
+[Binary fusion](#binary-fusion) ·
 [Input limitations](#input-requirements-and-limitations) ·
-[Long-running commands](#long-running-commands) ·
-[Safety and privacy](#safety-and-privacy) · [Technical reference](technical-reference.md)
+[Safety and privacy](#safety-and-privacy) ·
+[Technical reference](technical-reference.md)
 
-This guide explains the user-visible choices and limitations of
-`medsurface`. See the [technical reference](technical-reference.md) for the
-processing algorithms, metrics, thresholds, and dependency details.
+`medsurface` separates storage conversion, segmentation-based fusion, and
+surface extraction. This distinction keeps derived labelmaps inspectable and
+editable before a mesh is created. See the [technical
+reference](technical-reference.md) for algorithms, metrics, and dependency
+details.
 
 ## Safety and privacy
 
 `medsurface` is not validated for diagnosis, treatment planning, or other
-clinical decisions. Independently review both the source images and generated
-surface.
+clinical decisions. Independently review source images, binary labelmaps, and
+generated surfaces.
 
-- Segmentation thresholds, smoothing, field-of-view capping, and scan resolution
-  can change or omit anatomy.
-- A valid and watertight mesh can still be anatomically wrong.
-- Anatomy cut off by the scan is capped flat by default; missing anatomy cannot
-  be recovered from the input.
-- `merge` does not read identity fields or establish subject identity. Confirm
-  that both inputs show the same subject before merging them.
-- Both merge commands use rigid registration and are intended for matching
-  non-deforming anatomy such as bone. Movement or deformation between
-  acquisitions can produce a plausible but incorrect fusion.
-- Before `labelmap merge`, also confirm that both masks contain the same selected
-  structures. Label values and structure names are not inspected.
-- `--force` can bypass failed registration-quality checks and produce a
-  plausible-looking but incorrect fusion. It does not bypass selection, loading,
-  duplicate-input, or voxel-count errors.
-- `--allow-large-volume` bypasses the default voxel-count guard for source,
-  resampled, and fused grids. It does not make the operation memory-safe; the
-  process or operating system may still terminate when memory is exhausted.
-- Series UIDs, descriptions, file paths, and derived anatomy can remain
-  identifying even when demographic fields have been removed.
-- Treat source data, logs, provenance, and derived outputs according to the same
-  privacy rules as other personal health data.
-- Mesh and JSON report paths cannot alias any discovered medical image input,
-  including DICOM instances and detached NRRD or MetaImage payloads.
+- Segmentation thresholds, morphology, resampling, registration, smoothing,
+  field-of-view capping, and scan resolution can change or omit anatomy.
+- A structurally valid mesh and a storage-verified volume can still be
+  anatomically wrong.
+- Anatomy cut off by the scan is capped flat during surface extraction by
+  default; missing anatomy cannot be recovered.
+- Fusion does not inspect patient identity fields or establish subject
+  identity. Confirm that both inputs show the same subject.
+- Fusion uses rigid registration and is intended for matching non-deforming
+  anatomy such as bone. Motion or deformation can produce a plausible but
+  incorrect union.
+- Before `labelmap fuse`, confirm that both masks represent the same selected
+  structures. Label values and names are not compared.
+- `--force` bypasses failed registration-quality gates only. It does not bypass
+  duplicate-input, selection, loading, malformed-image, or voxel-limit errors.
+- `--allow-large-volume` bypasses the default voxel-count guard. It does not make
+  an operation memory-safe; allocation failure or operating-system termination
+  remains possible.
+- Conversion preserves source metadata best effort by default. Use
+  `--strip-metadata` when source metadata must be removed, and independently
+  inspect the result.
+- Fused labelmaps do not copy source image metadata, but paths, UIDs,
+  descriptions, registration data, and derived anatomy in logs or optional JSON
+  provenance can remain identifying.
+- Primary outputs and JSON reports cannot alias each other or any discovered
+  medical input through a lexical path, symlink, or hard link. Protected inputs
+  include every DICOM instance, detached header, and detached payload.
+
+Treat source data, outputs, logs, and provenance according to the same privacy
+rules as other personal health data.
 
 ## Choosing a volume
 
-Run `medsurface list INPUT` immediately before conversion when an input can
-contain more than one volume. `INPUT` may be a supported image file or a
-directory tree. Directory discovery combines all classic DICOM series and all
-`.nii`, `.nii.gz`, `.nrrd`, `.nhdr`, `.mha`, and `.mhd` files into one list. For
-example, a directory containing a DICOM stack and `mask.nrrd` produces two rows
-in one ID space; neither source type hides the other.
+Run `medsurface list INPUT` immediately before conversion, intensity extraction,
+or fusion when an input may contain more than one volume. `INPUT` may be a
+supported file or a directory tree. Directory discovery combines classic DICOM
+series with `.nii`, `.nii.gz`, `.nrrd`, `.nhdr`, `.mha`, and `.mhd` files in one
+ID space.
 
-The table retains useful imaging metadata across formats: modality, description,
-slice count, voxel spacing, and anatomical plane. DICOM also shows
-`SeriesNumber` as `DICOM #`. File-format metadata is used when it is present,
-and plane is derived from the stored direction matrix. A missing value is shown
-as `-`.
+The table shows modality, description, slice count, voxel spacing, anatomical
+plane, and usability when available. DICOM also shows `SeriesNumber` as
+`DICOM #`. Plane comes from stored geometry rather than a text label.
 
-Every row has a unique positive integer `ID`. It is the only selector:
+Every row has one positive integer `ID`, which is the only selector:
 
 ```sh
-medsurface convert scans/ --volume 2 -o model.stl
-medsurface merge scans-a/ scans-b/ \
-  --fixed-volume 1 --moving-volume 3 -o merged.stl
+medsurface convert scans/ --volume 2 -o selected.nrrd
+medsurface extract scans/ --volume 2 -o selected.stl
+medsurface fuse scans-a/ scans-b/ \
+  --fixed-volume 1 --moving-volume 3 -o fused.nii.gz
 ```
 
-Selection stays automatic in the unambiguous cases:
+Selection without an ID is safe only in these cases:
 
-- A direct supported file or any catalog with exactly one usable volume is
-  selected automatically.
-- A directory whose usable entries are all DICOM with the same modality retains
-  the established DICOM ranking: usable stacks first, then smaller voxels,
-  axial plane, and finally slice count.
-- A DICOM-only catalog spanning multiple modalities has no implicit winner.
-  `list` explains the ambiguity and shows every modality; pass the intended ID.
-- A catalog with multiple usable entries that includes a file volume has no
-  implicit winner. Run `list` and pass its ID.
+- A catalog with exactly one usable candidate selects it.
+- A DICOM-only catalog whose usable entries share one modality uses the
+  established ranking: usable stacks, smaller voxels, axial plane, then slice
+  count.
+- A DICOM-only catalog spanning modalities requires an ID.
+- Any other catalog with multiple usable volumes requires an ID.
 
-To merge two volumes found under the same directory, repeat the path and choose
-two IDs:
+`list` prints a shell-safe `medsurface extract` hint for the automatic default,
+or a selector template when no default exists. IDs are deterministic for
+unchanged contents but local to one discovery result; run `list` again after
+files change. `list --json` reports the integer `id` and nests DICOM-specific
+fields under `dicom`.
+
+To fuse two volumes found under one directory, repeat the path and choose two
+different IDs:
 
 ```sh
-medsurface merge scans/ scans/ \
-  --fixed-volume 1 --moving-volume 2 -o merged.stl
+medsurface fuse scans/ scans/ \
+  --fixed-volume 1 --moving-volume 2 -o fused.mha
 ```
 
-`DICOM #` is metadata only because `SeriesNumber` need not be unique. A DICOM
-UID can also contain more than one orientation; discovery gives each orientation
-its own row. UIDs, descriptions, and filenames are never accepted as selectors.
+UIDs, `SeriesNumber`, descriptions, and paths are metadata, not selectors.
 
-IDs are deterministic for unchanged contents but local to one discovery result.
-Run `list` again after adding, removing, or replacing files instead of reusing an
-older ID. In `list --json`, the selector is integer `id`; DICOM-specific values
-remain nested under `dicom`.
+## Strict volume conversion
 
-## Choosing a preset
+`convert` changes storage format for exactly one selected image:
 
-A preset supplies the segmentation and mesh-finishing defaults. List the
-installed values at any time with `medsurface presets`.
+```sh
+medsurface convert INPUT -o OUTPUT \
+  [--volume ID] [--strip-metadata] \
+  [--allow-large-volume] [--json REPORT.json] [-q]
+```
+
+It preserves the image loaded by SimpleITK:
+
+- voxel values, without thresholding or casting;
+- scalar pixel type and component count;
+- image dimension and voxel dimensions;
+- spacing, origin, and direction.
+
+It does not resample, normalize, reorient, segment, or extract a surface.
+Conversion output is always one atomic file:
+
+| output format | suffixes          | compression |
+| ------------- | ----------------- | ----------- |
+| NIfTI         | `.nii`, `.nii.gz` | none, gzip  |
+| NRRD          | `.nrrd`           | gzip        |
+| MetaImage     | `.mha`            | zlib        |
+
+Detached `.nhdr` and `.mhd` files are accepted as inputs but never outputs,
+because a header and payload cannot be committed with one atomic replacement.
+Suffix matching is case-insensitive.
+
+By default, source metadata is written when the destination format can represent
+it. Metadata models differ: an entry supported by NRRD or MetaImage may have no
+NIfTI equivalent. Such loss produces a warning but does not weaken the image
+contract. `--strip-metadata` removes source metadata before writing while the
+writer still creates required format headers. DICOM conversion copies available
+metadata from the representative slice when preservation is requested.
+
+Publication is strict:
+
+1. The image is written to a temporary sibling using suffix-selected lossless
+   compression.
+2. The source pixel buffer is released before the temporary file is loaded.
+3. Readback must match the source voxel digest, pixel type, components,
+   dimensions, and physical geometry within `1e-5`.
+4. The destination is atomically replaced only after verification.
+
+If a target format cannot represent the core image contract, conversion fails,
+removes the temporary file, and leaves an existing destination unchanged. A
+same-format conversion is supported when input and output are different files;
+in-place conversion and aliases to any discovered input are rejected.
+
+Example conversions:
+
+```sh
+medsurface convert dicom-study/ -o study.nii.gz
+medsurface convert segmentation.nhdr -o segmentation.mha
+medsurface convert scan.nrrd -o anonymized.nii --strip-metadata
+```
+
+With `--json FILE`, the report records the output path, format, compression,
+dimensions, pixel type, components, spacing, origin, direction, duration,
+warnings, metadata policy, and selected-volume provenance.
+
+## Extracting an intensity surface
+
+`extract` segments one intensity volume and creates an STL, PLY, or OBJ mesh:
+
+```sh
+medsurface extract scans/ --preset bone -o skull.stl
+medsurface extract scans/ --preset auto -o uncalibrated.stl
+medsurface extract scans/ --threshold 250 -o bone-250hu.stl
+```
+
+### Choosing a preset
+
+A preset supplies segmentation and surface-finishing defaults. Run
+`medsurface presets` to inspect the installed values.
 
 | preset  | use it for                                              | threshold | median | closing | island floor | mask smoothing | pre-mesh smoothing | simplify error | post-mesh smoothing |
 | ------- | ------------------------------------------------------- | --------: | -----: | ------: | -----------: | -------------: | -----------------: | -------------: | ------------------: |
@@ -106,261 +183,221 @@ installed values at any time with `medsurface presets`.
 | `skin`  | Outer skin surface from CT                              |   −300 HU | 1.4 mm |  3.2 mm |      500 mm³ |            off |      25 iterations |        0.35 mm |       10 iterations |
 | `auto`  | MR, CBCT, ultrasound, or other uncalibrated intensities |      Otsu | 1.0 mm |  2.0 mm |       50 mm³ |            off |      20 iterations |        0.25 mm |       40 iterations |
 
-Numeric thresholds are inclusive lower bounds. `auto` calculates a
-format-neutral Otsu threshold from the volume instead of assuming calibrated
-Hounsfield units. The `bone`, `teeth`, and `skin` values are treated as HU only
-when a DICOM CT series has a complete, consistent rescale transform and either
-an explicit `HU` rescale type or original non-multienergy CT image metadata.
-Other inputs, derived CT without explicit units, inconsistent series, and
-ambiguous multienergy CT receive a warning. Use an intentional numeric
-`--threshold` or `--preset auto` when values are not calibrated HU.
+Numeric thresholds are inclusive lower bounds. `auto` calculates Otsu's
+threshold. HU presets are treated as calibrated HU only when a DICOM CT series
+has complete, consistent rescale evidence. Use an intentional `--threshold` or
+`--preset auto` for uncalibrated values.
 
-Every normal and labelmap conversion or mesh-producing merge exposes the same
-three independent smoothing controls. `--mask-smooth-mm` applies a Gaussian to the segmented
-occupancy mask before meshing. It uses physical millimetres and does not depend
-on triangle density, but it can change topology: boundaries can move, gaps can
-close, and thin structures can disappear. `--mesh-smooth-iters` applies
-fixed-force, volume-preserving MeshLib relaxation after meshing and before
-simplification. `--post-mesh-smooth-iters` applies the same guarded relaxation
-after simplification to soften facets created by triangle reduction. Both mesh
-passes preserve connectivity, protect local vertices against intersections and
-inconsistent winding, and retain their valid input surface if protection cannot
-produce a clean result. Setting any value to `0` disables only that stage.
+`--median-mm`, `--opening-mm`, `--closing-mm`, `--min-island-mm3`, and
+`--all-islands` control segmentation cleanup. Surface-specific controls are:
 
-`teeth` keeps every mask island and surface component that survives its size
-floor. The other presets keep only the largest component. Omitting
-`--components` preserves that preset-specific choice; `--components all` or
-`--components largest` overrides it explicitly. `--simplify-error-mm` sets
-MeshLib's estimated surface-deviation/QEM limit in model millimetres; it is not
-a certified Hausdorff bound. `0` disables simplification. The resulting triangle
-count is an outcome, not a target. Simplification protects small source-surface
-neighborhoods when collapsing them would create self-intersections. If no
-candidate can preserve topology and mesh validity, the valid higher-resolution
-surface is retained with a warning. The reported simplification error estimates
-only the simplification step; a later post-mesh pass reports its own RMS and
-maximum vertex displacement.
+- `--resample-mm` for the surface grid;
+- `--mask-smooth-mm` for physical Gaussian occupancy smoothing;
+- `--mesh-smooth-iters` and `--post-mesh-smooth-iters` for guarded MeshLib
+  relaxation before and after simplification;
+- `--simplify-error-mm` for MeshLib's estimated QEM deviation limit;
+- `--components all|largest` for output shells;
+- `--no-cap` to leave field-of-view openings uncapped.
 
-```sh
-medsurface convert scans/ --preset teeth -o teeth.stl
-medsurface convert scans/ --preset auto -o uncalibrated.stl
-medsurface convert scans/ --threshold 250 -o bone-250hu.stl
-```
+Set a numeric control to `0` to disable its stage. Mask smoothing can move
+boundaries, close gaps, join regions, or erase thin structures. Simplification's
+error is an estimate for that step, not a certified Hausdorff bound.
 
-For `merge`, thresholds belong to their input roles and may differ:
-
-```sh
-medsurface merge fixed.nii.gz moving.mha \
-  --fixed-threshold auto --moving-threshold 420 -o merged.stl
-```
-
-An explicit CLI value overrides the corresponding preset value. Run
-`medsurface convert --help` or `medsurface merge --help` for the complete set of
-overrides. Mesh output accepts the shared median, opening, closing, island and
-component selection, smoothing, and simplification controls. NIfTI merge output
-uses the segmentation and morphology controls but rejects surface-only options.
+The `teeth` preset keeps all surviving islands and surface components; `bone`,
+`skin`, and `auto` keep the largest by default. An explicit component option
+overrides the preset.
 
 ## Using an external labelmap
 
-Use `labelmap convert` when TotalSegmentator or another program has already
-segmented the image:
+Use `labelmap extract` when another program already segmented the image:
 
 ```sh
-medsurface labelmap convert segmentation.nii.gz -o surface.stl
+medsurface labelmap extract segmentation.nii.gz -o surface.stl
 ```
 
-This starts after segmentation. It loads the labelmap, treats zero as background
-and every nonzero value as foreground, then extracts, finishes, validates, and
-writes one surface mesh. It does not threshold image intensities, run Otsu,
-apply median/opening/closing filters, remove mask islands, or interpret label
-numbers. Separate nonzero regions are unioned before physical smoothing, so one
-multilabel file can produce one STL containing multiple surviving structures.
+The command requires one direct NIfTI, NRRD, or MetaImage file. DICOM,
+directories, volume selectors, presets, and structure-name selectors are absent.
+Voxel values must be finite, non-negative integers with at least one nonzero
+voxel. Integer-valued floating-point files are accepted; fractional probability
+maps are not. Every nonzero value becomes one foreground class, so a multilabel
+file can create one mesh with multiple structures.
 
-The input must be one direct NIfTI, NRRD, or MetaImage file. Its voxels must be
-finite, non-negative integers; integer-valued floating-point images are
-accepted, but probability maps and fractional labels are not. Every dimension
-must contain at least four voxels regardless of the smoothing values.
-Directories, DICOM, selectors, presets, and structure-name flags are
-deliberately absent.
-Labelmaps have independent surface defaults: native grid, a `0.8 mm` Gaussian
-sigma applied in physical space before meshing, 20 pre-simplification
-surface-relaxation iterations, a `0.25 mm` simplification limit, no
-post-simplification relaxation, and every surviving surface component retained.
-`--mask-smooth-mm 0` preserves the discrete mask topology;
-`--mesh-smooth-iters 0` disables pre-simplification relaxation;
-`--simplify-error-mm 0` disables triangle reduction; and
-`--post-mesh-smooth-iters 0` disables final relaxation.
-`--components largest` keeps only the largest extracted shell instead of the
-labelmap default, `all`.
+Labelmap extraction skips intensity thresholds, Otsu, morphology, and mask-island
+removal. Its independent surface defaults are native grid, `0.8 mm` mask
+smoothing, 20 pre-simplification relaxation iterations, a `0.25 mm`
+simplification limit, no post-simplification relaxation, and all surviving
+surface components. Use the same extraction-only surface options to override
+those defaults.
 
-Physical smoothing is intentionally geometry-changing. It reduces voxel-scale
-terracing consistently even when marching cubes creates millions of triangles,
-but it can round boundaries, close narrow gaps, merge nearby regions, or erase
-structures near the configured scale. Every smoothed labelmap command warns
-about this tradeoff. Use `--mask-smooth-mm 0 --mesh-smooth-iters 0
---simplify-error-mm 0 --post-mesh-smooth-iters 0` for the most literal
-full-density surface supported by medsurface.
-
-TotalSegmentator is not installed or run by medsurface. Its default output is a
-directory containing one binary `.nii.gz` file per structure; pass any one of
-those files directly. To put several selected structures in one mesh, ask
-TotalSegmentator for one multilabel file and select the structures there:
+For example, select several structures in one TotalSegmentator multilabel file,
+then extract them:
 
 ```sh
 TotalSegmentator -i scan.nii.gz -o selected.nii.gz \
   --ml --roi_subset skull vertebrae_C1
-medsurface labelmap convert selected.nii.gz -o selected.stl
+medsurface labelmap extract selected.nii.gz -o selected.stl
 ```
 
-All nonzero labels in `selected.nii.gz` become one mesh. Selecting every
-structure is the same workflow without `--roi_subset`, although a whole-body
-surface can be large and contain many disconnected components.
+TotalSegmentator is not installed or run by medsurface.
 
-Use `labelmap merge` only for matching segmentations from two acquisitions:
+## Binary fusion
+
+Fusion always publishes a scalar binary `uint8` labelmap. It never writes a
+mesh. Valid destinations are `.nii`, `.nii.gz`, `.nrrd`, and `.mha`.
+
+### Fuse intensity volumes
+
+`fuse` independently thresholds and cleans each selected intensity input before
+registration:
 
 ```sh
-medsurface labelmap merge fixed-selected.nii.gz moving-selected.nii.gz \
-  -o fused.stl
+medsurface fuse fixed.nii.gz moving.mha -o fused.nrrd \
+  --fixed-threshold auto --moving-threshold 420
 ```
 
-It rigidly registers the moving foreground to the fixed foreground, checks the
-registration, and unions the masks on an isotropic grid in the fixed labelmap's
-physical coordinate system. A mesh output applies the configured physical
-smoothing before surface extraction. Smoothing after the union attenuates both
-voxel terraces and small boundary disagreements between the masks.
+It accepts the preset's segmentation controls: threshold, median, opening,
+closing, island floor, and island policy. The preset's surface grid, mask
+smoothing, component selection, mesh smoothing, simplification, and capping
+settings are irrelevant and have no fusion flags.
 
-Use NIfTI output when the fused volume needs manual editing before meshing:
+### Fuse labelmaps
+
+`labelmap fuse` validates both masks, maps every nonzero value to foreground,
+then registers and unions them:
 
 ```sh
-medsurface labelmap merge fixed-selected.nii.gz moving-selected.nii.gz \
-  -o fused.nii.gz
-# Edit the volume and save it as fused-edited.nii.gz.
-medsurface labelmap convert fused-edited.nii.gz -o fused-edited.stl
+medsurface labelmap fuse fixed-selected.nii.gz moving-selected.nii.gz \
+  -o fused.mha
 ```
 
-The NIfTI branch thresholds fused occupancy at `0.5` and atomically publishes a
-`uint8` labelmap containing only background `0` and foreground `1`. It does not
-smooth or pad the mask and does not run marching cubes, component selection,
-simplification, surface relaxation, or mesh validation. Consequently,
-`--mask-smooth-mm`, `--mesh-smooth-iters`, `--simplify-error-mm`,
-`--post-mesh-smooth-iters`, and `--components` are usage errors with `.nii` or
-`.nii.gz` output. `--grid-mm`, `--force`, and `--allow-large-volume` remain
-applicable. The top-level `merge` command supports the same NIfTI branch after
-segmenting its two intensity inputs.
+Different positive IDs are equivalent. Source IDs, semantic names, and metadata
+are not preserved in the derived labelmap.
 
-Confirm that both inputs belong to the same subject and contain the same
-selected, non-deforming structures. `--force` bypasses only failed
-registration-quality gates. Do not use this command merely to combine separate
-structure files from one scan; create one multilabel file upstream instead.
+### Shared registration and grid
+
+Both commands:
+
+1. Rigidly register moving foreground to fixed foreground.
+2. Enforce shared-field volume, symmetric overlap, and Dice gates unless
+   `--force` is supplied.
+3. Antialias and linearly resample both masks onto an axis-aligned isotropic
+   `--grid-mm` lattice in the fixed input's physical coordinate system.
+4. Take the voxelwise maximum of the fractional occupancies and classify values
+   strictly greater than `0.5` as foreground `1`; all others are `0`.
+5. Verify and atomically publish the result through the same volume writer used
+   by strict conversion.
+
+The default grid spacing is `0.4 mm`. A coarser grid can erase structures; a
+finer grid has cubic memory cost. Fusion does not smooth, pad, run marching
+cubes, select surface components, simplify, cap, or validate a mesh.
+
+After success, the CLI prints a shell-safe extraction hint unless `--quiet`
+suppresses normal output. The complete workflow remains explicit:
+
+```sh
+medsurface fuse fixed-scan/ moving-scan/ -o fused.nii.gz
+# Inspect or edit fused.nii.gz.
+medsurface labelmap extract fused.nii.gz -o fused.stl
+```
+
+The labelmap path is identical:
+
+```sh
+medsurface labelmap fuse fixed-mask.nrrd moving-mask.mha -o fused.nrrd
+# Inspect or edit fused.nrrd.
+medsurface labelmap extract fused.nrrd -o fused.stl
+```
+
+The later extraction uses normal labelmap defaults. No intensity-preset surface
+settings are embedded in or transferred through the fused volume.
+
+With `--json FILE`, fusion reports output format/compression, scalar type,
+components, grid geometry, fixed/moving/fused foreground voxel counts and
+volumes, complete registration metrics and transform, warnings, segmentation
+settings, and fixed/moving provenance. It contains no mesh-quality or
+surface-finishing fields.
 
 ## Input requirements and limitations
 
-Supported file volumes are NIfTI (`.nii`, `.nii.gz`), NRRD (`.nrrd`, `.nhdr`),
-and MetaImage (`.mha`, `.mhd`). `.mha` stores header and voxels together;
-`.mhd` references a separate payload, so both files must remain together. NRRD
-has the equivalent single-file `.nrrd` and paired-header `.nhdr` forms. HDF5,
-headerless raw data, and `.bin` are not accepted because their geometry and
-voxel interpretation are not self-describing.
+Supported file inputs are NIfTI (`.nii`, `.nii.gz`), NRRD (`.nrrd`, `.nhdr`),
+and MetaImage (`.mha`, `.mhd`). Detached headers must retain every referenced
+payload. HDF5, headerless raw data, and `.bin` are not accepted as independent
+volumes because their geometry and voxel interpretation are not self-describing.
 
-File inputs must be real-valued, scalar, three-dimensional images with at least
-four voxels on each axis, finite origin/direction values, positive finite spacing,
-and a nonsingular direction matrix. Supported-format files that violate these
-constraints can still appear in `list` with a reason when their header is
-readable. A detached `.mhd` or `.nhdr` whose referenced payload is absent or
-unreadable is listed as unusable instead of being selected and failing later.
+Inputs must be real-valued, scalar, three-dimensional images with at least four
+voxels on each axis, finite origin and direction values, positive finite
+spacing, and a nonsingular direction matrix. A supported file with a readable
+but invalid header appears in `list` with its reason.
 
-Source volumes and planned conversion or merge grids above 500 million voxels
-are refused before their corresponding pixel read or allocation. This is a
-coarse emergency ceiling rather than a memory guarantee: pixel types and
-processing stages use different amounts of memory per voxel. Prefer resampling
-to a coarser spacing. Expert users can pass `--allow-large-volume` to any
-`convert` or `merge` command to bypass every voxel-count ceiling at the risk of
-swapping, an allocation failure, or an operating-system OOM termination.
+Source volumes and planned processing/fusion grids above 500 million voxels are
+refused before pixel reading or allocation. This is a coarse emergency ceiling,
+not a peak-memory estimate. Prefer a coarser upstream volume or fusion grid;
+expert users may pass `--allow-large-volume` at the risk of allocation failure.
 
-Classic single-frame DICOM stacks additionally have these limitations:
+Classic single-frame DICOM stacks have additional limitations:
 
-- Enhanced multi-frame DICOM objects and vendor mosaic formats are unsupported.
-- Compressed pixel data works only when the installed SimpleITK/GDCM build has a
-  codec for its transfer syntax; compressed inputs are not covered by this
-  project's tests.
-- Consistent oblique stacks are supported. Gantry tilt, nonparallel slices,
-  duplicate slice positions, missing geometry, and varying image dimensions are
-  not fully validated and should be treated as unsupported without independent
-  checks.
-- Labelled localizers and short stacks are rejected. Moderately irregular slice
-  spacing is warned about and regularized; severe inconsistency is rejected.
-- Pixel padding and `MONOCHROME1` have no project-specific handling and are
-  untested.
-- `FrameOfReferenceUID` is not used. `merge` always registers its second scan
-  instead of assuming that coordinates agree across series.
-- Through-plane resolution, orientation, and partial-volume effects limit what
-  thin anatomy can be inferred. A feature smaller than the sampling interval is
-  not necessarily absent, but its geometry cannot be recovered reliably.
+- Enhanced multi-frame objects and vendor mosaics are unsupported.
+- Compressed pixels require a codec in the installed SimpleITK/GDCM build.
+- Consistent oblique stacks are supported; gantry tilt, nonparallel slices,
+  duplicate positions, missing geometry, and varying dimensions are not fully
+  validated.
+- Localizers and short stacks are rejected. Moderate spacing irregularity is
+  warned about and regularized; severe inconsistency is rejected.
+- Pixel padding and `MONOCHROME1` have no project-specific handling.
+- `FrameOfReferenceUID` is not used. Fusion always registers moving foreground
+  rather than trusting cross-series coordinates.
+- Sampling interval and partial-volume effects limit recoverable thin anatomy.
 
-The [DICOM compatibility table](technical-reference.md#dicom-compatibility)
-gives the exact behavior for each known case.
+See the [DICOM compatibility table](technical-reference.md#dicom-compatibility)
+for exact behavior.
 
 ## Long-running commands
 
-`list`, both `convert` commands, both `merge` commands, `validate`, and `repair`
-show the current stage while they work. On an interactive terminal, an
-indeterminate spinner and elapsed time make activity visible without inventing
-a percentage that the processing libraries cannot measure. When output is
-redirected, the same stage changes are written as persistent plain-text lines
-without animation or ANSI control sequences.
+`list`, `convert`, `extract`, `fuse`, both labelmap commands, `validate`, and
+`repair` announce the current stage. Interactive terminals show an indeterminate
+spinner and elapsed time; redirected output receives persistent ANSI-free lines.
+No percentage is invented when processing libraries do not expose one.
 
-Use `--quiet` with either `convert`, either `merge`, or `repair` to suppress
-normal progress; warnings and failures remain visible. Warnings are printed
-when they become known, so identity, rigid-registration, structure-content, and
-unverified-HU warnings appear before loading and processing rather than after an
-output has been written. Machine-readable `list --json`, `validate --json`, and
-`repair --json` suppress progress so stdout contains only JSON.
+Use `--quiet` with processing commands to suppress normal progress. Warnings and
+errors remain visible. `list --json`, `validate --json`, and `repair --json`
+write machine-readable JSON to stdout. Conversion, extraction, and fusion use
+`--json FILE` for a separate report.
 
-Press `Ctrl+C` once to cancel a running command. `medsurface` clears the live
-progress display, cleans up its helper process, prints `Cancelled.`, and exits
-with status 130 without publishing an output. A native image or mesh operation
-may delay cancellation until it returns control to Python; repeated interrupts
-do not bypass cleanup.
+Press `Ctrl+C` once to cancel. Temporary files are cleaned before control returns
+to the terminal. Native image or mesh work may delay cancellation until control
+returns to Python.
 
-Numeric processing options reject non-finite and out-of-range values as usage
-errors. Unsupported output extensions and mesh-only options combined with
-NIfTI output are rejected before discovery or image processing. Grid and
-resampling allocations are also bounded before the image toolkit is asked to
-allocate them; increase the requested voxel spacing if the planned volume is
-too large.
+Numeric options reject non-finite or out-of-range values. Unsupported output
+extensions are rejected before discovery or pixel loading. Fusion commands do
+not expose surface-only options, so there is no output-dependent processing
+branch.
 
 ## Understanding validation
 
-Mesh-producing conversion, merging, and repair validate the in-memory surface,
-write a temporary file in the destination directory, validate that serialized
-file, and atomically publish it only when both checks pass. NIfTI merge output
-is likewise written to a temporary sibling and read back to confirm its 3-D
-`uint8` type, size, and physical geometry before publication. A failed
-operation leaves an existing destination unchanged. `validate` runs mesh checks
-without changing its input and rejects NIfTI input.
+Mesh extraction and repair validate both the in-memory surface and its serialized
+temporary file. A mesh is accepted only when MeshLib imports it as watertight,
+consistently wound, and enclosing a volume, with no holes, boundary edges,
+disoriented faces, or self-intersecting faces. Multiple closed components are
+allowed. Validation describes the MeshLib-imported representation.
 
-Both `convert` commands and both `merge` commands accept `--json FILE` and
-publish the report atomically. The report and primary output must be different
-files, and neither may overwrite a discovered image header, detached payload,
-or DICOM instance. NIfTI reports contain grid, voxel, foreground-volume, and
-registration data rather than mesh quality fields.
+Strict conversion and fusion use a different image contract: the temporary
+volume is read back and compared for voxel digest, scalar pixel type, component
+count, dimensions, and spacing/origin/direction within `1e-5`. Compression is
+also checked against the suffix. These checks establish faithful storage, not
+anatomical correctness.
 
-A report is valid only when MeshLib imports the mesh as watertight, consistently
-wound, and enclosing a volume, with no holes, boundary edges, disoriented faces,
-or self-intersecting faces. Multiple closed components are allowed. MeshLib may
-normalize unsupported raw face configurations while loading; the report describes
-the imported mesh rather than exposing separate raw non-manifold or degenerate
-face counters. A failed self-intersection measurement is invalid.
+Conversion, extraction, and fusion accept `--json FILE`; validation and repair
+offer plain `--json` on stdout. Reports are written to temporary siblings and
+atomically replaced. Output and report paths must differ and cannot overwrite
+any discovered input. Conversion and fusion make primary publication
+transactional with a requested report: report failure restores an existing
+primary output or removes a newly created one.
 
-Before writing, conversion and merging guard both mesh-relaxation passes and
-simplification against self-intersections and inconsistent winding. Relaxation
-runs every requested internal iteration; only vertices in unsafe neighborhoods
-retain their input positions, and the whole pass is discarded if local
-protection cannot make it clean. Simplification retries with unsafe source
-neighborhoods protected from collapse and retains the valid pre-simplification
-mesh if no safe compact result is possible. These safeguards are reported as
-warnings and recorded in JSON provenance when they are used. Occupancy-field
-smoothing happens before surface extraction and can change anatomy or topology
-even when the resulting mesh is structurally valid.
+Surface safeguards protect both relaxation passes and simplification against
+self-intersections and inconsistent winding. Unsafe local vertices remain at
+their valid input positions; a stage is discarded when local protection cannot
+produce a clean result. Occupancy smoothing occurs before extraction and can
+still change anatomy or topology even when the resulting mesh is valid.
 
-These checks establish mesh structure, not anatomical correctness,
-manufacturability, dimensional accuracy, or fitness for a clinical purpose.
+Structural and storage checks do not establish manufacturability, dimensional
+accuracy, anatomical truth, or fitness for a clinical purpose.

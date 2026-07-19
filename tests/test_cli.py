@@ -131,7 +131,7 @@ def _quality(*, valid: bool = True) -> dict:
     }
 
 
-def _convert_result(
+def _extract_result(
     output: str, *, warnings_: list[str] | None = None, quality: dict | None = None
 ):
     return SimpleNamespace(
@@ -149,56 +149,45 @@ def _convert_result(
     )
 
 
-def _merge_result(
-    output: str, *, warnings_: list[str] | None = None, quality: dict | None = None
-):
+def _conversion_result(output: str, *, warnings_: list[str] | None = None):
     return SimpleNamespace(
         output_path=output,
-        triangles=1400,
-        vertices=702,
-        bounds_mm=(0.0, 1.0, 0.0, 2.0, 0.0, 3.0),
-        grid_mm=0.8,
-        grid_size=(10, 20, 30),
-        volume_fixed_mm3=100.0,
-        volume_moving_mm3=110.0,
-        volume_union_mm3=150.0,
-        surface_components=2,
-        seconds=2.5,
+        format="NIfTI",
+        compression="gzip",
+        dimensions=(8, 9, 10),
+        pixel_type="16-bit signed integer",
+        components=1,
+        spacing=(0.7, 0.8, 0.9),
+        origin=(10.0, 20.0, 30.0),
+        direction=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+        seconds=1.5,
         warnings=warnings_ or [],
-        provenance={"fixed": {"format": "DICOM"}, "moving": {"format": "DICOM"}},
-        quality=_quality() if quality is None else quality,
+        metadata_policy="preserved-best-effort",
+        provenance={"input": {"format": "DICOM"}},
     )
 
 
-def _nifti_merge_result(output: str, *, warnings_: list[str] | None = None):
-    from medsurface import merge as merge_mod
-
-    registration = SimpleNamespace(
-        transform=[
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-        ],
-        rotation_deg=0.0,
-        inlier_rms_mm=0.1,
-        inlier_median_mm=0.1,
-        surface_overlap=0.95,
-        shared_fov_dice=0.9,
-        shared_fov_mm3=100_000.0,
-    )
-    return merge_mod.NiftiMergeResult(
+def _fusion_result(output: str, *, warnings_: list[str] | None = None):
+    return SimpleNamespace(
         output_path=output,
+        output_format="NRRD",
+        compression="gzip",
         grid_mm=0.8,
         grid_size=(10, 20, 30),
-        registration=registration,
+        grid_origin_mm=(1.0, 2.0, 3.0),
+        grid_direction=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+        foreground_fixed_voxels=195,
+        foreground_moving_voxels=215,
+        foreground_fused_voxels=293,
         volume_fixed_mm3=100.0,
         volume_moving_mm3=110.0,
-        volume_union_mm3=150.0,
-        foreground_voxels=293,
+        volume_fused_mm3=150.0,
         seconds=2.5,
         warnings=warnings_ or [],
-        provenance={"output": {"kind": "labelmap"}},
+        provenance={
+            "output": {"kind": "binary labelmap"},
+            "registration": {"surface_overlap": 0.95},
+        },
     )
 
 
@@ -211,12 +200,13 @@ from medsurface import cli
 
 heavy_modules = {
     "medsurface.labelmap",
-    "medsurface.merge",
+    "medsurface.fusion",
     "medsurface.pipeline",
     "medsurface.registration",
     "medsurface.repair",
     "medsurface.surface",
     "medsurface.validate",
+    "medsurface.volume",
     "meshlib",
 }
 assert heavy_modules.isdisjoint(sys.modules)
@@ -250,7 +240,8 @@ def test_root_command_without_arguments_is_lightweight_help():
         "list",
         "presets",
         "convert",
-        "merge",
+        "extract",
+        "fuse",
         "validate",
         "repair",
         "labelmap",
@@ -273,12 +264,13 @@ def test_version_is_lightweight_and_public():
         ["list", "--help"],
         ["presets", "--help"],
         ["convert", "--help"],
-        ["merge", "--help"],
+        ["extract", "--help"],
+        ["fuse", "--help"],
         ["validate", "--help"],
         ["repair", "--help"],
         ["labelmap", "--help"],
-        ["labelmap", "convert", "--help"],
-        ["labelmap", "merge", "--help"],
+        ["labelmap", "extract", "--help"],
+        ["labelmap", "fuse", "--help"],
     ],
 )
 def test_every_help_surface_is_lightweight(argv):
@@ -294,13 +286,10 @@ def test_every_help_surface_is_lightweight(argv):
 @pytest.mark.parametrize(
     "argv",
     [
-        ["convert", "INPUT", "-o", "out.stl", "--post-smooth-iters", "1"],
-        ["merge", "INPUT", "INPUT", "-o", "out.stl", "--post-smooth-iters", "1"],
-        ["labelmap", "convert", "MASK", "-o", "out.stl", "--post-smooth-iters", "1"],
+        ["extract", "INPUT", "-o", "out.stl", "--post-smooth-iters", "1"],
         [
             "labelmap",
-            "merge",
-            "MASK",
+            "extract",
             "MASK",
             "-o",
             "out.stl",
@@ -331,10 +320,8 @@ def test_post_smoothing_option_is_removed(tmp_path, argv):
 @pytest.mark.parametrize(
     "argv",
     [
-        ["convert", "INPUT", "-o", "out.stl"],
-        ["merge", "INPUT", "MOVING", "-o", "out.stl"],
-        ["labelmap", "convert", "INPUT", "-o", "out.stl"],
-        ["labelmap", "merge", "INPUT", "MOVING", "-o", "out.stl"],
+        ["extract", "INPUT", "-o", "out.stl"],
+        ["labelmap", "extract", "INPUT", "-o", "out.stl"],
     ],
 )
 def test_legacy_smoothing_options_are_removed(tmp_path, argv, option):
@@ -357,10 +344,8 @@ def test_legacy_smoothing_options_are_removed(tmp_path, argv, option):
 
 def test_surface_help_describes_both_independent_smoothing_stages():
     for command in (
-        ["convert", "--help"],
-        ["merge", "--help"],
-        ["labelmap", "convert", "--help"],
-        ["labelmap", "merge", "--help"],
+        ["extract", "--help"],
+        ["labelmap", "extract", "--help"],
     ):
         result = _run_cli_in_clean_interpreter(command)
         normalized = " ".join(result.stdout.replace("│", " ").split())
@@ -379,10 +364,8 @@ def test_surface_help_describes_both_independent_smoothing_stages():
 
 def test_component_help_is_available_on_every_surface_command():
     for command in (
-        ["convert", "--help"],
-        ["merge", "--help"],
-        ["labelmap", "convert", "--help"],
-        ["labelmap", "merge", "--help"],
+        ["extract", "--help"],
+        ["labelmap", "extract", "--help"],
     ):
         result = _run_cli_in_clean_interpreter(command)
         normalized = " ".join(result.stdout.replace("│", " ").split())
@@ -396,18 +379,8 @@ def test_component_help_is_available_on_every_surface_command():
 @pytest.mark.parametrize(
     "argv",
     [
-        ["convert", "INPUT", "-o", "out.stl", "--all-components"],
-        ["merge", "INPUT", "MOVING", "-o", "out.stl", "--all-components"],
-        ["labelmap", "convert", "INPUT", "-o", "out.stl", "--all-components"],
-        [
-            "labelmap",
-            "merge",
-            "INPUT",
-            "MOVING",
-            "-o",
-            "out.stl",
-            "--all-components",
-        ],
+        ["extract", "INPUT", "-o", "out.stl", "--all-components"],
+        ["labelmap", "extract", "INPUT", "-o", "out.stl", "--all-components"],
     ],
 )
 def test_all_components_option_is_removed(tmp_path, argv):
@@ -430,30 +403,11 @@ def test_all_components_option_is_removed(tmp_path, argv):
 @pytest.mark.parametrize(
     "argv",
     [
-        ["convert", "INPUT", "-o", "out.stl", "--components", "first"],
-        [
-            "merge",
-            "INPUT",
-            "MOVING",
-            "-o",
-            "out.stl",
-            "--components",
-            "first",
-        ],
+        ["extract", "INPUT", "-o", "out.stl", "--components", "first"],
         [
             "labelmap",
-            "convert",
+            "extract",
             "INPUT",
-            "-o",
-            "out.stl",
-            "--components",
-            "first",
-        ],
-        [
-            "labelmap",
-            "merge",
-            "INPUT",
-            "MOVING",
             "-o",
             "out.stl",
             "--components",
@@ -489,8 +443,8 @@ def test_invalid_component_choice_fails_before_discovery(tmp_path, monkeypatch, 
     assert "largest" in result.stderr
 
 
-def test_merge_help_describes_shared_processing_options():
-    result = _run_cli_in_clean_interpreter(["merge", "--help"])
+def test_fuse_help_describes_segmentation_options_without_surface_controls():
+    result = _run_cli_in_clean_interpreter(["fuse", "--help"])
 
     assert result.returncode == 0
     normalized = " ".join(result.stdout.replace("│", " ").split())
@@ -499,12 +453,53 @@ def test_merge_help_describes_shared_processing_options():
         ("--closing-mm", "Pore-sealing kernel"),
         ("--opening-mm", "Bridge-breaking kernel"),
         ("--min-island-mm3", "Drop blobs smaller"),
-        ("--mask-smooth-mm", "Gaussian sigma"),
-        ("--mesh-smooth-iters", "surface relaxation iterations"),
-        ("--post-mesh-smooth-", "after simplification"),
     ):
         assert option in normalized
         assert description_start in normalized
+    for option in (
+        "--components",
+        "--mask-smooth-mm",
+        "--mesh-smooth-iters",
+        "--simplify-error-mm",
+        "--post-mesh-smooth-iters",
+        "--no-cap",
+    ):
+        assert option not in normalized
+
+
+def test_strict_convert_help_exposes_only_storage_controls():
+    result = _run_cli_in_clean_interpreter(["convert", "--help"])
+
+    assert result.returncode == 0
+    normalized = " ".join(result.stdout.replace("│", " ").split())
+    for option in ("--volume", "--strip-metadata", "--allow-large-volume", "--json"):
+        assert option in normalized
+    for option in (
+        "--preset",
+        "--threshold",
+        "--median-mm",
+        "--components",
+        "--mask-smooth-mm",
+        "--mesh-smooth-iters",
+        "--simplify-error-mm",
+        "--no-cap",
+    ):
+        assert option not in normalized
+
+
+def test_legacy_command_names_are_absent():
+    root_help = _run_cli_in_clean_interpreter(["--help"])
+    labelmap_help = _run_cli_in_clean_interpreter(["labelmap", "--help"])
+
+    assert root_help.returncode == 0
+    assert labelmap_help.returncode == 0
+    assert " merge " not in " ".join(root_help.stdout.split())
+    assert " convert " not in " ".join(labelmap_help.stdout.split())
+    assert " merge " not in " ".join(labelmap_help.stdout.split())
+    for argv in (["merge"], ["labelmap", "convert"], ["labelmap", "merge"]):
+        result = _run_cli_in_clean_interpreter(argv)
+        assert result.returncode == 2
+        assert "No such command" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -514,12 +509,12 @@ def test_merge_help_describes_shared_processing_options():
         ["list"],
         ["presets", "unexpected"],
         ["convert", "scan"],
-        ["convert", "scan", "-o", "out.stl", "--preset", "unknown"],
-        ["merge"],
+        ["extract", "scan", "-o", "out.stl", "--preset", "unknown"],
+        ["fuse"],
         ["validate"],
         ["repair", "broken.stl"],
-        ["labelmap", "convert"],
-        ["labelmap", "merge"],
+        ["labelmap", "extract"],
+        ["labelmap", "fuse"],
     ],
 )
 def test_malformed_invocations_fail_before_heavy_imports(argv):
@@ -554,7 +549,7 @@ def test_registry_enums_match_presets_exactly():
 def test_removed_bone_detail_preset_is_rejected(tmp_path):
     result = runner.invoke(
         cli.app,
-        ["convert", str(tmp_path), "-o", "out.stl", "--preset", "bone-detail"],
+        ["extract", str(tmp_path), "-o", "out.stl", "--preset", "bone-detail"],
         prog_name="medsurface",
     )
 
@@ -676,7 +671,7 @@ def test_interactive_diagnostic_clears_live_progress_line():
     assert "voxels are strongly anisotropic" in text
 
 
-def _interruptible_convert_script(input_path: Path, output_path: Path) -> str:
+def _interruptible_extract_script(input_path: Path, output_path: Path) -> str:
     return f"""
 import time
 from types import SimpleNamespace
@@ -688,16 +683,16 @@ cli._discover = lambda _path: [chosen]
 catalog.select = lambda _found, _volume_id: chosen
 cli._protect_output_paths = lambda *_paths: None
 
-def fake_convert(**_kwargs):
+def fake_extract(**_kwargs):
     progress = cli._active_progress.get()
     renderer_pid = progress.renderer.pid if progress.renderer is not None else "none"
     print(f"READY renderer={{renderer_pid}}", flush=True)
     time.sleep(30)
 
-pipeline.convert = fake_convert
+pipeline.extract = fake_extract
 cli.app(
     prog_name="medsurface",
-    args=["convert", {str(input_path)!r}, "-o", {str(output_path)!r}],
+    args=["extract", {str(input_path)!r}, "-o", {str(output_path)!r}],
 )
 """
 
@@ -722,7 +717,7 @@ def test_ctrl_c_is_owned_by_parent_without_renderer_traceback(tmp_path):
         [
             sys.executable,
             "-c",
-            _interruptible_convert_script(tmp_path, output_path),
+            _interruptible_extract_script(tmp_path, output_path),
         ],
         stdin=slave,
         stdout=slave,
@@ -760,7 +755,7 @@ def test_ctrl_c_is_owned_by_parent_without_renderer_traceback(tmp_path):
 
 def test_quiet_ctrl_c_exits_cleanly_without_renderer(tmp_path):
     output_path = tmp_path / "cancelled-quiet.stl"
-    script = _interruptible_convert_script(tmp_path, output_path).replace(
+    script = _interruptible_extract_script(tmp_path, output_path).replace(
         '"-o",', '"--quiet", "-o",'
     )
     process = subprocess.Popen(
@@ -835,20 +830,20 @@ def test_repeated_ctrl_c_does_not_interrupt_cancellation_cleanup():
 @pytest.mark.parametrize(
     "argv",
     [
-        ["convert", ".", "-o", "out.stl", "--self-intersections"],
-        ["merge", ".", ".", "-o", "out.stl", "--self-intersections"],
+        ["extract", ".", "-o", "out.stl", "--self-intersections"],
+        ["fuse", ".", ".", "-o", "out.nrrd", "--self-intersections"],
         ["validate", __file__, "--self-intersections"],
         ["repair", __file__, "-o", "fixed.stl", "--self-intersections"],
-        ["convert", ".", "-o", "out.stl", "--target-faces", "100"],
-        ["merge", ".", ".", "-o", "out.stl", "--target-faces", "100"],
-        ["convert", ".", "-o", "out.stl", "--no-validate"],
-        ["merge", ".", ".", "-o", "out.stl", "--no-validate"],
-        ["convert", ".", "-o", "out.stl", "--passband", "0.1"],
-        ["merge", ".", ".", "-o", "out.stl", "--passband", "0.1"],
-        ["convert", ".", "-o", "out.stl", "--print-profile", "resin"],
-        ["merge", ".", ".", "-o", "out.stl", "--print-profile", "fdm"],
-        ["convert", ".", "-o", "out.stl", "--min-feature-mm", "0.6"],
-        ["merge", ".", ".", "-o", "out.stl", "--min-feature-mm", "1.2"],
+        ["extract", ".", "-o", "out.stl", "--target-faces", "100"],
+        ["fuse", ".", ".", "-o", "out.nrrd", "--target-faces", "100"],
+        ["extract", ".", "-o", "out.stl", "--no-validate"],
+        ["fuse", ".", ".", "-o", "out.nrrd", "--no-validate"],
+        ["extract", ".", "-o", "out.stl", "--passband", "0.1"],
+        ["fuse", ".", ".", "-o", "out.nrrd", "--passband", "0.1"],
+        ["extract", ".", "-o", "out.stl", "--print-profile", "resin"],
+        ["fuse", ".", ".", "-o", "out.nrrd", "--print-profile", "fdm"],
+        ["extract", ".", "-o", "out.stl", "--min-feature-mm", "0.6"],
+        ["fuse", ".", ".", "-o", "out.nrrd", "--min-feature-mm", "1.2"],
     ],
 )
 def test_removed_self_intersection_flag_is_a_usage_error(argv):
@@ -862,8 +857,9 @@ def test_removed_self_intersection_flag_is_a_usage_error(argv):
     "command, argv",
     [
         ("list", ["list", "missing"]),
-        ("convert", ["convert", "missing", "-o", "out.stl"]),
-        ("merge", ["merge", "missing", "also-missing", "-o", "out.stl"]),
+        ("convert", ["convert", "missing", "-o", "out.nrrd"]),
+        ("extract", ["extract", "missing", "-o", "out.stl"]),
+        ("fuse", ["fuse", "missing", "also-missing", "-o", "out.nrrd"]),
         ("validate", ["validate", "missing.stl"]),
         ("repair", ["repair", "missing.stl", "-o", "fixed.stl"]),
     ],
@@ -938,9 +934,9 @@ def test_list_command_hint_is_shell_quoted_without_hard_wrapping(tmp_path, monke
 
     assert result.exit_code == 0
     expected = _expected_shell_command(
-        ["medsurface", "convert", input_path, "-o", "out.stl"]
+        ["medsurface", "extract", input_path, "-o", "out.stl"]
     )
-    assert "Convert the default with:  " + expected in result.stdout
+    assert "Extract the default with:  " + expected in result.stdout
 
 
 def test_list_file_volume_omits_unavailable_optional_details():
@@ -1006,7 +1002,7 @@ def test_list_explains_why_mixed_dicom_modalities_have_no_default(
     assert "No automatic default" in result.stdout
     assert "multiple modalities: CT, MR" in result.stdout
     expected = _expected_shell_command(
-        ["medsurface", "convert", tmp_path, "--volume", "ID", "-o", "out.stl"]
+        ["medsurface", "extract", tmp_path, "--volume", "ID", "-o", "out.stl"]
     )
     assert "Choose a volume with:  " + expected in result.stdout
 
@@ -1105,7 +1101,63 @@ def test_presets_renders_tissue_table_without_ansi():
     assert "\x1b" not in result.stdout
 
 
-def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
+def test_convert_accepts_storage_flags_and_writes_json_file(tmp_path, monkeypatch):
+    chosen = _candidate()
+    captured = {}
+    output = tmp_path / "converted.nii.gz"
+    json_file = tmp_path / "conversion.json"
+    monkeypatch.setattr(cli, "_discover", lambda _root: [chosen])
+
+    from medsurface import volume
+
+    def fake_convert(**kwargs):
+        captured.update(kwargs)
+        return _conversion_result(str(output))
+
+    monkeypatch.setattr(volume, "convert", fake_convert)
+    result = runner.invoke(
+        cli.app,
+        [
+            "convert",
+            str(tmp_path),
+            "-o",
+            str(output),
+            "--volume",
+            "1",
+            "--strip-metadata",
+            "--allow-large-volume",
+            "--json",
+            str(json_file),
+            "-q",
+        ],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert captured["candidate"] is chosen
+    assert captured["strip_metadata"] is True
+    assert captured["allow_large_volume"] is True
+    payload = json.loads(json_file.read_text())
+    assert payload["result"] == {
+        "output": str(output),
+        "format": "NIfTI",
+        "compression": "gzip",
+        "dimensions": [8, 9, 10],
+        "pixel_type": "16-bit signed integer",
+        "components": 1,
+        "spacing_mm": [0.7, 0.8, 0.9],
+        "origin_mm": [10.0, 20.0, 30.0],
+        "direction": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        "seconds": 1.5,
+        "warnings": [],
+        "metadata_policy": "preserved-best-effort",
+    }
+    assert payload["provenance"]["input"]["format"] == "DICOM"
+
+
+def test_extract_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
     chosen = _candidate()
     captured = {}
     output = tmp_path / "surface.stl"
@@ -1114,15 +1166,15 @@ def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
 
     from medsurface import pipeline
 
-    def fake_convert(**kwargs):
+    def fake_extract(**kwargs):
         captured.update(kwargs)
-        return _convert_result(str(output))
+        return _extract_result(str(output))
 
-    monkeypatch.setattr(pipeline, "convert", fake_convert)
+    monkeypatch.setattr(pipeline, "extract", fake_extract)
     result = runner.invoke(
         cli.app,
         [
-            "convert",
+            "extract",
             str(tmp_path),
             "-o",
             str(output),
@@ -1184,7 +1236,7 @@ def test_convert_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
     assert payload["quality"]["valid"]
 
 
-def test_convert_defaults_quality_output_and_invalid_exit(tmp_path, monkeypatch):
+def test_extract_defaults_quality_output_and_invalid_exit(tmp_path, monkeypatch):
     chosen = _candidate()
     captured = {}
     output = tmp_path / "surface.stl"
@@ -1192,14 +1244,14 @@ def test_convert_defaults_quality_output_and_invalid_exit(tmp_path, monkeypatch)
 
     from medsurface import pipeline
 
-    def fake_convert(**kwargs):
+    def fake_extract(**kwargs):
         captured.update(kwargs)
-        return _convert_result(str(output), quality=_quality(valid=False))
+        return _extract_result(str(output), quality=_quality(valid=False))
 
-    monkeypatch.setattr(pipeline, "convert", fake_convert)
+    monkeypatch.setattr(pipeline, "extract", fake_extract)
     result = runner.invoke(
         cli.app,
-        ["convert", str(tmp_path), "-o", str(output)],
+        ["extract", str(tmp_path), "-o", str(output)],
         prog_name="medsurface",
     )
 
@@ -1215,7 +1267,7 @@ def test_convert_defaults_quality_output_and_invalid_exit(tmp_path, monkeypatch)
     assert "failed validation" in result.stderr
 
 
-def test_convert_omitted_components_preserves_teeth_preset_default(
+def test_extract_omitted_components_preserves_teeth_preset_default(
     tmp_path, monkeypatch
 ):
     chosen = _candidate()
@@ -1224,15 +1276,15 @@ def test_convert_omitted_components_preserves_teeth_preset_default(
 
     from medsurface import pipeline
 
-    def fake_convert(**kwargs):
+    def fake_extract(**kwargs):
         captured.update(kwargs)
-        return _convert_result("out.stl")
+        return _extract_result("out.stl")
 
-    monkeypatch.setattr(pipeline, "convert", fake_convert)
+    monkeypatch.setattr(pipeline, "extract", fake_extract)
 
     result = runner.invoke(
         cli.app,
-        ["convert", str(tmp_path), "-o", "out.stl", "--preset", "teeth", "-q"],
+        ["extract", str(tmp_path), "-o", "out.stl", "--preset", "teeth", "-q"],
         prog_name="medsurface",
     )
 
@@ -1259,7 +1311,7 @@ def test_valid_quality_output_omits_empty_problems_panel():
     assert "problems" not in rendered.casefold()
 
 
-def test_convert_without_selector_keeps_dicom_best_stack_selection(
+def test_extract_without_selector_keeps_dicom_best_stack_selection(
     tmp_path, monkeypatch
 ):
     coarse = _candidate(row_id=1, uid="1.2.3", description="coarse")
@@ -1274,14 +1326,14 @@ def test_convert_without_selector_keeps_dicom_best_stack_selection(
     captured = {}
     from medsurface import pipeline
 
-    def fake_convert(**kwargs):
+    def fake_extract(**kwargs):
         captured.update(kwargs)
-        return _convert_result("out.stl")
+        return _extract_result("out.stl")
 
-    monkeypatch.setattr(pipeline, "convert", fake_convert)
+    monkeypatch.setattr(pipeline, "extract", fake_extract)
     result = runner.invoke(
         cli.app,
-        ["convert", str(tmp_path), "-o", "out.stl", "-q"],
+        ["extract", str(tmp_path), "-o", "out.stl", "-q"],
         prog_name="medsurface",
     )
 
@@ -1289,7 +1341,7 @@ def test_convert_without_selector_keeps_dicom_best_stack_selection(
     assert captured["candidate"] is fine
 
 
-def test_invalid_threshold_is_exit_two_before_discovery(tmp_path, monkeypatch):
+def test_invalid_extract_threshold_is_exit_two_before_discovery(tmp_path, monkeypatch):
     monkeypatch.setattr(
         cli,
         "_discover",
@@ -1297,7 +1349,7 @@ def test_invalid_threshold_is_exit_two_before_discovery(tmp_path, monkeypatch):
     )
     result = runner.invoke(
         cli.app,
-        ["convert", str(tmp_path), "-o", "out.stl", "--threshold", "wat"],
+        ["extract", str(tmp_path), "-o", "out.stl", "--threshold", "wat"],
         prog_name="medsurface",
     )
 
@@ -1309,22 +1361,22 @@ def test_invalid_threshold_is_exit_two_before_discovery(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     "argv,option",
     [
-        (["convert", "INPUT", "-o", "out.stl", "--median-mm", "-1"], "--median-mm"),
+        (["extract", "INPUT", "-o", "out.stl", "--median-mm", "-1"], "--median-mm"),
         (
-            ["convert", "INPUT", "-o", "out.stl", "--resample-mm", "nan"],
+            ["extract", "INPUT", "-o", "out.stl", "--resample-mm", "nan"],
             "--resample-mm",
         ),
         (
-            ["convert", "INPUT", "-o", "out.stl", "--mask-smooth-mm", "-1"],
+            ["extract", "INPUT", "-o", "out.stl", "--mask-smooth-mm", "-1"],
             "--mask-smooth-mm",
         ),
         (
-            ["convert", "INPUT", "-o", "out.stl", "--mesh-smooth-iters", "-1"],
+            ["extract", "INPUT", "-o", "out.stl", "--mesh-smooth-iters", "-1"],
             "--mesh-smooth-iters",
         ),
         (
             [
-                "convert",
+                "extract",
                 "INPUT",
                 "-o",
                 "out.stl",
@@ -1333,13 +1385,13 @@ def test_invalid_threshold_is_exit_two_before_discovery(tmp_path, monkeypatch):
             ],
             "--post-mesh-smooth-iters",
         ),
-        (["merge", "INPUT", "MOVING", "-o", "out.stl", "--grid-mm", "0"], "--grid-mm"),
+        (["fuse", "INPUT", "MOVING", "-o", "out.nrrd", "--grid-mm", "0"], "--grid-mm"),
         (
-            ["merge", "INPUT", "MOVING", "-o", "out.stl", "--grid-mm", "inf"],
+            ["fuse", "INPUT", "MOVING", "-o", "out.nrrd", "--grid-mm", "inf"],
             "--grid-mm",
         ),
         (
-            ["merge", "INPUT", "MOVING", "-o", "out.stl", "--opening-mm", "-0.1"],
+            ["fuse", "INPUT", "MOVING", "-o", "out.nrrd", "--opening-mm", "-0.1"],
             "--opening-mm",
         ),
     ],
@@ -1372,7 +1424,10 @@ def test_invalid_processing_numbers_are_usage_errors_before_discovery(
     assert "Traceback" not in result.stderr
 
 
-def test_convert_rejects_output_extension_before_discovery(tmp_path, monkeypatch):
+@pytest.mark.parametrize("suffix", [".stl", ".dcm", ".nhdr", ".mhd", ".xyz"])
+def test_convert_rejects_non_atomic_volume_output_before_discovery(
+    tmp_path, monkeypatch, suffix
+):
     monkeypatch.setattr(
         cli,
         "_discover",
@@ -1381,15 +1436,18 @@ def test_convert_rejects_output_extension_before_discovery(tmp_path, monkeypatch
 
     result = runner.invoke(
         cli.app,
-        ["convert", str(tmp_path), "-o", str(tmp_path / "out.xyz")],
+        ["convert", str(tmp_path), "-o", str(tmp_path / ("out" + suffix))],
         prog_name="medsurface",
     )
 
     assert result.exit_code == 2
-    assert "unsupported output extension" in result.stderr
+    assert "unsupported volume output extension" in result.stderr
 
 
-def test_merge_rejects_output_extension_before_discovery(tmp_path, monkeypatch):
+@pytest.mark.parametrize("suffix", [".stl", ".dcm", ".nhdr", ".mhd", ".xyz"])
+def test_fuse_rejects_non_atomic_volume_output_before_discovery(
+    tmp_path, monkeypatch, suffix
+):
     moving = tmp_path / "moving"
     moving.mkdir()
     monkeypatch.setattr(
@@ -1400,12 +1458,12 @@ def test_merge_rejects_output_extension_before_discovery(tmp_path, monkeypatch):
 
     result = runner.invoke(
         cli.app,
-        ["merge", str(tmp_path), str(moving), "-o", str(tmp_path / "out.xyz")],
+        ["fuse", str(tmp_path), str(moving), "-o", str(tmp_path / ("out" + suffix))],
         prog_name="medsurface",
     )
 
     assert result.exit_code == 2
-    assert "unsupported output extension" in result.stderr
+    assert "unsupported volume output extension" in result.stderr
 
 
 def test_repair_rejects_output_extension_before_loading(tmp_path, monkeypatch):
@@ -1438,10 +1496,10 @@ def test_convert_rejects_report_aliases_before_processing(tmp_path, monkeypatch)
     alias.hardlink_to(source)
     candidate = _file_candidate(source)
     monkeypatch.setattr(cli, "_discover", lambda _root: [candidate])
-    from medsurface import pipeline
+    from medsurface import volume
 
     monkeypatch.setattr(
-        pipeline,
+        volume,
         "convert",
         lambda **_kwargs: pytest.fail(
             "conversion must not start for a colliding report path"
@@ -1450,7 +1508,7 @@ def test_convert_rejects_report_aliases_before_processing(tmp_path, monkeypatch)
 
     result = runner.invoke(
         cli.app,
-        ["convert", str(source), "-o", str(tmp_path / "out.stl"), "--json", str(alias)],
+        ["convert", str(source), "-o", str(tmp_path / "out.nii.gz"), "--json", str(alias)],
         prog_name="medsurface",
     )
 
@@ -1472,10 +1530,10 @@ def test_convert_rejects_report_overwriting_a_detached_payload(tmp_path, monkeyp
     payload = candidate.source.payload_paths[0]
     original = payload.read_bytes()
     monkeypatch.setattr(cli, "_discover", lambda _root: [candidate])
-    from medsurface import pipeline
+    from medsurface import volume
 
     monkeypatch.setattr(
-        pipeline,
+        volume,
         "convert",
         lambda **_kwargs: pytest.fail(
             "conversion must not start for a colliding payload"
@@ -1488,7 +1546,7 @@ def test_convert_rejects_report_overwriting_a_detached_payload(tmp_path, monkeyp
             "convert",
             str(source),
             "-o",
-            str(tmp_path / "out.stl"),
+            str(tmp_path / "out.nrrd"),
             "--json",
             str(payload),
         ],
@@ -1500,16 +1558,16 @@ def test_convert_rejects_report_overwriting_a_detached_payload(tmp_path, monkeyp
     assert payload.read_bytes() == original
 
 
-def test_convert_rejects_one_path_for_mesh_and_json_before_processing(
+def test_convert_rejects_one_path_for_volume_and_json_before_processing(
     tmp_path, monkeypatch
 ):
     chosen = _candidate()
-    destination = tmp_path / "out.stl"
+    destination = tmp_path / "out.nii.gz"
     monkeypatch.setattr(cli, "_discover", lambda _root: [chosen])
-    from medsurface import pipeline
+    from medsurface import volume
 
     monkeypatch.setattr(
-        pipeline,
+        volume,
         "convert",
         lambda **_kwargs: pytest.fail(
             "conversion must not start for colliding outputs"
@@ -1538,7 +1596,7 @@ def test_selection_error_is_exit_two(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_discover", lambda _root: [_candidate()])
     result = runner.invoke(
         cli.app,
-        ["convert", str(tmp_path), "-o", "out.stl", "--volume", "99"],
+        ["convert", str(tmp_path), "-o", "out.nii.gz", "--volume", "99"],
         prog_name="medsurface",
     )
 
@@ -1550,16 +1608,16 @@ def test_quiet_suppresses_progress_but_not_warnings(tmp_path, monkeypatch):
     chosen = _candidate()
     monkeypatch.setattr(cli, "_discover", lambda _root: [chosen])
 
-    from medsurface import pipeline
+    from medsurface import volume
 
     def fake_convert(**kwargs):
         kwargs["warn"]("sampling warning")
-        return _convert_result("out.stl", warnings_=["sampling warning"])
+        return _conversion_result("out.nii.gz", warnings_=["sampling warning"])
 
-    monkeypatch.setattr(pipeline, "convert", fake_convert)
+    monkeypatch.setattr(volume, "convert", fake_convert)
     result = runner.invoke(
         cli.app,
-        ["convert", str(tmp_path), "-o", "out.stl", "-q"],
+        ["convert", str(tmp_path), "-o", "out.nii.gz", "-q"],
         prog_name="medsurface",
     )
 
@@ -1569,7 +1627,7 @@ def test_quiet_suppresses_progress_but_not_warnings(tmp_path, monkeypatch):
     assert result.stderr.count("sampling warning") == 1
 
 
-def test_labelmap_convert_accepts_surface_flags_and_writes_json(tmp_path, monkeypatch):
+def test_labelmap_extract_accepts_surface_flags_and_writes_json(tmp_path, monkeypatch):
     source = tmp_path / "labels.nii.gz"
     source.write_bytes(b"labelmap")
     chosen = _file_candidate(source)
@@ -1582,20 +1640,20 @@ def test_labelmap_convert_accepts_surface_flags_and_writes_json(tmp_path, monkey
 
     from medsurface import labelmap as labelmap_mod
 
-    def fake_convert(**kwargs):
+    def fake_extract(**kwargs):
         captured.update(kwargs)
-        result = _convert_result(str(output))
+        result = _extract_result(str(output))
         result.provenance = {
             "input": {"input_kind": "labelmap", "foreground": "all nonzero voxels"}
         }
         return result
 
-    monkeypatch.setattr(labelmap_mod, "convert", fake_convert)
+    monkeypatch.setattr(labelmap_mod, "extract", fake_extract)
     result = runner.invoke(
         cli.app,
         [
             "labelmap",
-            "convert",
+            "extract",
             str(source),
             "-o",
             str(output),
@@ -1637,14 +1695,14 @@ def test_labelmap_convert_accepts_surface_flags_and_writes_json(tmp_path, monkey
     assert payload["quality"]["valid"]
 
 
-def test_labelmap_merge_accepts_fusion_flags_and_writes_json(tmp_path, monkeypatch):
+def test_labelmap_fuse_accepts_flags_and_writes_generic_json(tmp_path, monkeypatch):
     fixed_path = tmp_path / "fixed.nii.gz"
     moving_path = tmp_path / "moving.nii.gz"
     fixed_path.write_bytes(b"fixed")
     moving_path.write_bytes(b"moving")
     fixed = _file_candidate(fixed_path, row_id=1)
     moving = _file_candidate(moving_path, row_id=1)
-    output = tmp_path / "surface.stl"
+    output = tmp_path / "fused.nrrd"
     json_file = tmp_path / "result.json"
     captured = {}
 
@@ -1655,36 +1713,26 @@ def test_labelmap_merge_accepts_fusion_flags_and_writes_json(tmp_path, monkeypat
     monkeypatch.setattr(cli, "_select_labelmap", select)
     from medsurface import labelmap as labelmap_mod
 
-    def fake_merge(**kwargs):
+    def fake_fuse(**kwargs):
         captured.update(kwargs)
         kwargs["warn"]("rigid anatomy warning")
-        return _merge_result(
+        return _fusion_result(
             str(output),
             warnings_=["rigid anatomy warning"],
         )
 
-    monkeypatch.setattr(labelmap_mod, "merge", fake_merge)
+    monkeypatch.setattr(labelmap_mod, "fuse", fake_fuse)
     result = runner.invoke(
         cli.app,
         [
             "labelmap",
-            "merge",
+            "fuse",
             str(fixed_path),
             str(moving_path),
             "-o",
             str(output),
             "--grid-mm",
             "0.7",
-            "--mask-smooth-mm",
-            "0.9",
-            "--mesh-smooth-iters",
-            "17",
-            "--simplify-error-mm",
-            "0.19",
-            "--post-mesh-smooth-iters",
-            "19",
-            "--components",
-            "largest",
             "--force",
             "--allow-large-volume",
             "--json",
@@ -1700,27 +1748,29 @@ def test_labelmap_merge_accepts_fusion_flags_and_writes_json(tmp_path, monkeypat
     assert captured["fixed"] is fixed
     assert captured["moving"] is moving
     assert captured["grid_mm"] == pytest.approx(0.7)
-    assert captured["mask_smooth_mm"] == pytest.approx(0.9)
-    assert captured["surface_smooth_iters"] == 17
-    assert captured["post_surface_smooth_iters"] == 19
-    assert captured["keep_largest_component"] is True
     assert captured["force"]
     assert captured["allow_large_volume"]
     payload = json.loads(json_file.read_text())
     assert payload["result"]["grid_mm"] == pytest.approx(0.8)
-    assert payload["quality"]["valid"]
+    assert payload["result"]["format"] == "NRRD"
+    assert payload["result"]["compression"] == "gzip"
+    assert payload["result"]["foreground_fixed_voxels"] == 195
+    assert payload["result"]["foreground_moving_voxels"] == 215
+    assert payload["result"]["foreground_fused_voxels"] == 293
+    assert payload["result"]["grid_origin_mm"] == [1.0, 2.0, 3.0]
+    assert "quality" not in payload
+    assert "triangles" not in payload["result"]
+    assert "surface_components" not in payload["result"]
 
 
-def test_labelmap_merge_writes_nifti_result_and_volume_json(tmp_path, monkeypatch):
+def test_labelmap_fuse_prints_shell_safe_extract_hint(tmp_path, monkeypatch):
     fixed_path = tmp_path / "fixed.nii.gz"
     moving_path = tmp_path / "moving.nii.gz"
     fixed_path.write_bytes(b"fixed")
     moving_path.write_bytes(b"moving")
     fixed = _file_candidate(fixed_path, row_id=1)
     moving = _file_candidate(moving_path, row_id=1)
-    output = tmp_path / "merged.nii.gz"
-    json_file = tmp_path / "result.json"
-    captured = {}
+    output = tmp_path / "fused labelmap;$(safe).mha"
 
     monkeypatch.setattr(
         cli,
@@ -1731,41 +1781,31 @@ def test_labelmap_merge_writes_nifti_result_and_volume_json(tmp_path, monkeypatc
     )
     from medsurface import labelmap as labelmap_mod
 
-    def fake_merge(**kwargs):
-        captured.update(kwargs)
-        return _nifti_merge_result(str(output))
+    def fake_fuse(**_kwargs):
+        return _fusion_result(str(output))
 
-    monkeypatch.setattr(labelmap_mod, "merge", fake_merge)
+    monkeypatch.setattr(labelmap_mod, "fuse", fake_fuse)
     result = runner.invoke(
         cli.app,
         [
             "labelmap",
-            "merge",
+            "fuse",
             str(fixed_path),
             str(moving_path),
             "-o",
             str(output),
-            "--json",
-            str(json_file),
         ],
         prog_name="medsurface",
     )
 
     assert result.exit_code == 0, result.output
-    assert captured["mask_smooth_mm"] is None
-    assert captured["surface_smooth_iters"] is None
-    assert captured["simplify_error_mm"] is None
-    assert captured["post_surface_smooth_iters"] is None
-    assert captured["keep_largest_component"] is None
     assert "foreground" in result.stdout
     assert "Mesh quality" not in result.stdout
     assert "triangles" not in result.stdout
-    payload = json.loads(json_file.read_text())
-    assert payload["result"]["output_kind"] == "labelmap"
-    assert payload["result"]["pixel_type"] == "uint8"
-    assert payload["result"]["foreground_voxels"] == 293
-    assert "quality" not in payload
-    assert "triangles" not in payload["result"]
+    expected = _expected_shell_command(
+        ["medsurface", "labelmap", "extract", output, "-o", "MODEL.stl"]
+    )
+    assert "Extract a surface with:  " + expected in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -1774,7 +1814,7 @@ def test_labelmap_merge_writes_nifti_result_and_volume_json(tmp_path, monkeypatc
         (
             [
                 "labelmap",
-                "convert",
+                "extract",
                 "INPUT",
                 "-o",
                 "out.stl",
@@ -1786,11 +1826,11 @@ def test_labelmap_merge_writes_nifti_result_and_volume_json(tmp_path, monkeypatc
         (
             [
                 "labelmap",
-                "merge",
+                "fuse",
                 "INPUT",
                 "MOVING",
                 "-o",
-                "out.stl",
+                "out.nrrd",
                 "--mask-smooth-mm",
                 "nan",
             ],
@@ -1799,9 +1839,8 @@ def test_labelmap_merge_writes_nifti_result_and_volume_json(tmp_path, monkeypatc
         (
             [
                 "labelmap",
-                "merge",
+                "extract",
                 "INPUT",
-                "MOVING",
                 "-o",
                 "out.stl",
                 "--mesh-smooth-iters",
@@ -1812,7 +1851,7 @@ def test_labelmap_merge_writes_nifti_result_and_volume_json(tmp_path, monkeypatc
         (
             [
                 "labelmap",
-                "convert",
+                "extract",
                 "INPUT",
                 "-o",
                 "out.stl",
@@ -1822,7 +1861,7 @@ def test_labelmap_merge_writes_nifti_result_and_volume_json(tmp_path, monkeypatc
             "--post-mesh-smooth-iters",
         ),
         (
-            ["labelmap", "merge", "INPUT", "MOVING", "-o", "out.stl", "--grid-mm", "0"],
+            ["labelmap", "fuse", "INPUT", "MOVING", "-o", "out.nrrd", "--grid-mm", "0"],
             "--grid-mm",
         ),
     ],
@@ -1854,16 +1893,20 @@ def test_invalid_labelmap_processing_options_fail_before_discovery(
 @pytest.mark.parametrize(
     "command,option",
     [
-        ("merge", "--mask-smooth-mm"),
-        ("merge", "--mesh-smooth-iters"),
-        ("merge", "--simplify-error-mm"),
-        ("merge", "--post-mesh-smooth-iters"),
-        ("merge", "--components"),
-        ("labelmap merge", "--mask-smooth-mm"),
-        ("labelmap merge", "--components"),
+        ("fuse", "--mask-smooth-mm"),
+        ("fuse", "--mesh-smooth-iters"),
+        ("fuse", "--simplify-error-mm"),
+        ("fuse", "--post-mesh-smooth-iters"),
+        ("fuse", "--components"),
+        ("fuse", "--no-cap"),
+        ("labelmap fuse", "--mask-smooth-mm"),
+        ("labelmap fuse", "--mesh-smooth-iters"),
+        ("labelmap fuse", "--simplify-error-mm"),
+        ("labelmap fuse", "--components"),
+        ("labelmap fuse", "--no-cap"),
     ],
 )
-def test_nifti_merge_rejects_surface_options_before_discovery(
+def test_fusion_commands_reject_surface_options_before_discovery(
     tmp_path, monkeypatch, command, option
 ):
     moving = tmp_path / "moving.nii.gz"
@@ -1896,11 +1939,11 @@ def test_nifti_merge_rejects_surface_options_before_discovery(
 
     assert result.exit_code == 2
     assert option in result.stderr
-    assert "surface processing is skipped" in " ".join(result.stderr.split())
+    assert "No such option" in result.stderr
 
 
-@pytest.mark.parametrize("command", ["convert", "labelmap convert"])
-def test_convert_commands_reject_nifti_output_before_discovery(
+@pytest.mark.parametrize("command", ["extract", "labelmap extract"])
+def test_extract_commands_reject_volume_output_before_discovery(
     tmp_path, monkeypatch, command
 ):
     source = tmp_path / "input.nii.gz"
@@ -1947,7 +1990,7 @@ def test_convert_requires_id_for_multiple_dicom_modalities(tmp_path, monkeypatch
 
     result = runner.invoke(
         cli.app,
-        ["convert", str(tmp_path), "-o", str(tmp_path / "out.stl")],
+        ["convert", str(tmp_path), "-o", str(tmp_path / "out.nii.gz")],
         prog_name="medsurface",
     )
 
@@ -1956,7 +1999,7 @@ def test_convert_requires_id_for_multiple_dicom_modalities(tmp_path, monkeypatch
     assert "volume ID" in result.stderr
 
 
-def test_merge_identifies_the_input_with_ambiguous_dicom_modalities(
+def test_fuse_identifies_the_input_with_ambiguous_dicom_modalities(
     tmp_path, monkeypatch
 ):
     moving_dir = tmp_path / "moving"
@@ -1971,7 +2014,7 @@ def test_merge_identifies_the_input_with_ambiguous_dicom_modalities(
     monkeypatch.setattr(cli, "_discover", fake_discover)
     result = runner.invoke(
         cli.app,
-        ["merge", str(tmp_path), str(moving_dir), "-o", str(tmp_path / "out.stl")],
+        ["fuse", str(tmp_path), str(moving_dir), "-o", str(tmp_path / "out.nrrd")],
         prog_name="medsurface",
     )
 
@@ -1980,30 +2023,30 @@ def test_merge_identifies_the_input_with_ambiguous_dicom_modalities(
     assert "multiple modalities: CT, MR" in result.stderr
 
 
-def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypatch):
+def test_fuse_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypatch):
     directory_b = tmp_path / "moving"
     directory_b.mkdir()
     fixed = _candidate(uid="1.2.3", description="fixed")
     moving = _candidate(uid="1.2.4", description="moving")
     captured = {}
-    output = tmp_path / "merged.stl"
-    json_file = tmp_path / "merged.json"
+    output = tmp_path / "fused.mha"
+    json_file = tmp_path / "fused.json"
 
     def fake_discover(path: Path):
         return [moving] if path == directory_b else [fixed]
 
     monkeypatch.setattr(cli, "_discover", fake_discover)
-    from medsurface import merge as merge_mod
+    from medsurface import fusion
 
-    def fake_merge(**kwargs):
+    def fake_fuse(**kwargs):
         captured.update(kwargs)
-        return _merge_result(str(output))
+        return _fusion_result(str(output))
 
-    monkeypatch.setattr(merge_mod, "merge", fake_merge)
+    monkeypatch.setattr(fusion, "fuse", fake_fuse)
     result = runner.invoke(
         cli.app,
         [
-            "merge",
+            "fuse",
             str(tmp_path),
             str(directory_b),
             "-o",
@@ -2027,18 +2070,8 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
             "--min-island-mm3",
             "3.3",
             "--all-islands",
-            "--components",
-            "largest",
             "--grid-mm",
             "0.8",
-            "--mask-smooth-mm",
-            "0.4",
-            "--mesh-smooth-iters",
-            "17",
-            "--simplify-error-mm",
-            "0.2",
-            "--post-mesh-smooth-iters",
-            "19",
             "--force",
             "--allow-large-volume",
             "--json",
@@ -2054,40 +2087,37 @@ def test_merge_accepts_all_flags_and_safety_errors_exit_three(tmp_path, monkeypa
     assert captured["preset"].name == "teeth"
     assert captured["preset"].opening_mm == pytest.approx(1.7)
     assert not captured["preset"].keep_largest_island
-    assert captured["preset"].keep_largest_component
     assert captured["fixed_threshold"] == pytest.approx(250.0)
     assert captured["moving_threshold"] == "auto"
     assert captured["grid_mm"] == pytest.approx(0.8)
-    assert captured["mask_smooth_mm"] == pytest.approx(0.4)
-    assert captured["surface_smooth_iters"] == 17
-    assert captured["simplify_error_mm"] == pytest.approx(0.2)
-    assert captured["post_surface_smooth_iters"] == 19
     assert captured["force"]
     assert captured["allow_large_volume"]
     payload = json.loads(json_file.read_text())
     assert payload["result"]["grid_size"] == [10, 20, 30]
-    assert payload["result"]["surface_components"] == 2
+    assert payload["result"]["foreground_fused_voxels"] == 293
+    assert "quality" not in payload
+    assert "surface_components" not in payload["result"]
 
     def refuse(**_kwargs):
-        raise merge_mod.MergeError("registration gate refused the pair")
+        raise fusion.FusionError("registration gate refused the pair")
 
-    monkeypatch.setattr(merge_mod, "merge", refuse)
+    monkeypatch.setattr(fusion, "fuse", refuse)
     refused = runner.invoke(
         cli.app,
-        ["merge", str(tmp_path), str(directory_b), "-o", str(output)],
+        ["fuse", str(tmp_path), str(directory_b), "-o", str(output)],
         prog_name="medsurface",
     )
     assert refused.exit_code == 3
     assert "registration gate refused" in refused.stderr
 
 
-def test_merge_writes_nifti_result_without_mesh_fields(tmp_path, monkeypatch):
+def test_fuse_writes_generic_volume_result_without_mesh_fields(tmp_path, monkeypatch):
     moving_dir = tmp_path / "moving"
     moving_dir.mkdir()
     fixed = _candidate(uid="1.2.3", description="fixed")
     moving = _candidate(uid="1.2.4", description="moving")
-    output = tmp_path / "merged.nii"
-    json_file = tmp_path / "merged.json"
+    output = tmp_path / "fused.nii"
+    json_file = tmp_path / "fused.json"
     captured = {}
 
     monkeypatch.setattr(
@@ -2095,17 +2125,20 @@ def test_merge_writes_nifti_result_without_mesh_fields(tmp_path, monkeypatch):
         "_discover",
         lambda path: [moving] if path == moving_dir else [fixed],
     )
-    from medsurface import merge as merge_mod
+    from medsurface import fusion
 
-    def fake_merge(**kwargs):
+    def fake_fuse(**kwargs):
         captured.update(kwargs)
-        return _nifti_merge_result(str(output))
+        result = _fusion_result(str(output))
+        result.output_format = "NIfTI"
+        result.compression = "none"
+        return result
 
-    monkeypatch.setattr(merge_mod, "merge", fake_merge)
+    monkeypatch.setattr(fusion, "fuse", fake_fuse)
     result = runner.invoke(
         cli.app,
         [
-            "merge",
+            "fuse",
             str(tmp_path),
             str(moving_dir),
             "-o",
@@ -2122,20 +2155,19 @@ def test_merge_writes_nifti_result_without_mesh_fields(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["preset"].name == "bone"
-    assert captured["mask_smooth_mm"] is None
-    assert captured["surface_smooth_iters"] is None
-    assert captured["simplify_error_mm"] is None
-    assert captured["post_surface_smooth_iters"] is None
     assert "foreground" in result.stdout
     assert "Mesh quality" not in result.stdout
     payload = json.loads(json_file.read_text())
     assert payload["result"]["format"] == "NIfTI"
+    assert payload["result"]["compression"] == "none"
     assert payload["result"]["grid_size"] == [10, 20, 30]
     assert "quality" not in payload
     assert "surface_components" not in payload["result"]
+    assert "foreground_voxels" not in payload["result"]
+    assert "foreground_volume_mm3" not in payload["result"]
 
 
-def test_merge_omitted_components_preserves_teeth_preset_default(
+def test_fuse_does_not_override_surface_fields_on_the_segmentation_preset(
     tmp_path, monkeypatch
 ):
     moving_dir = tmp_path / "moving"
@@ -2148,22 +2180,22 @@ def test_merge_omitted_components_preserves_teeth_preset_default(
         return [moving] if path == moving_dir else [fixed]
 
     monkeypatch.setattr(cli, "_discover", fake_discover)
-    from medsurface import merge as merge_mod
+    from medsurface import fusion
 
-    def fake_merge(**kwargs):
+    def fake_fuse(**kwargs):
         captured.update(kwargs)
-        return _merge_result("out.stl")
+        return _fusion_result("out.nrrd")
 
-    monkeypatch.setattr(merge_mod, "merge", fake_merge)
+    monkeypatch.setattr(fusion, "fuse", fake_fuse)
 
     result = runner.invoke(
         cli.app,
         [
-            "merge",
+            "fuse",
             str(tmp_path),
             str(moving_dir),
             "-o",
-            "out.stl",
+            "out.nrrd",
             "--preset",
             "teeth",
             "-q",
@@ -2176,7 +2208,7 @@ def test_merge_omitted_components_preserves_teeth_preset_default(
     assert captured["preset"].keep_largest_component is False
 
 
-def test_merge_rejects_json_overwriting_a_dicom_instance(tmp_path, monkeypatch):
+def test_fuse_rejects_json_overwriting_a_dicom_instance(tmp_path, monkeypatch):
     moving_dir = tmp_path / "moving"
     moving_dir.mkdir()
     dicom_instance = tmp_path / "slice-001.dcm"
@@ -2191,24 +2223,24 @@ def test_merge_rejects_json_overwriting_a_dicom_instance(tmp_path, monkeypatch):
         "_discover",
         lambda path: [moving] if path == moving_dir else [fixed],
     )
-    from medsurface import merge as merge_mod
+    from medsurface import fusion
 
     monkeypatch.setattr(
-        merge_mod,
-        "merge",
+        fusion,
+        "fuse",
         lambda **_kwargs: pytest.fail(
-            "merge must not start for a colliding report path"
+            "fusion must not start for a colliding report path"
         ),
     )
 
     result = runner.invoke(
         cli.app,
         [
-            "merge",
+            "fuse",
             str(tmp_path),
             str(moving_dir),
             "-o",
-            str(tmp_path / "out.stl"),
+            str(tmp_path / "out.nrrd"),
             "--json",
             str(dicom_instance),
         ],
@@ -2236,7 +2268,66 @@ def test_json_file_is_published_atomically(tmp_path, monkeypatch):
     assert not list(tmp_path.glob(".report.json.*"))
 
 
-def test_merge_without_selectors_ranks_each_dicom_directory(tmp_path, monkeypatch):
+@pytest.mark.parametrize("hard_links_available", [True, False])
+def test_report_failure_restores_the_existing_volume_output(
+    tmp_path, monkeypatch, hard_links_available
+):
+    chosen = _candidate()
+    output = tmp_path / "converted.nii.gz"
+    report = tmp_path / "report.json"
+    output.write_bytes(b"original volume")
+    report.write_bytes(b"original report")
+    monkeypatch.setattr(cli, "_discover", lambda _root: [chosen])
+    if not hard_links_available:
+        monkeypatch.setattr(
+            cli.os,
+            "link",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("hard links unavailable")
+            ),
+        )
+
+    from medsurface import volume
+
+    def fake_convert(**kwargs):
+        destination = Path(kwargs["output_path"])
+        assert destination.read_bytes() == b"original volume"
+        temporary = destination.with_name(".new-volume.nii.gz")
+        temporary.write_bytes(b"new volume")
+        os.replace(temporary, destination)
+        return _conversion_result(kwargs["output_path"])
+
+    monkeypatch.setattr(volume, "convert", fake_convert)
+    monkeypatch.setattr(
+        cli,
+        "_write_json_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("simulated report failure")
+        ),
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "convert",
+            str(tmp_path),
+            "-o",
+            str(output),
+            "--json",
+            str(report),
+            "-q",
+        ],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 1
+    assert "simulated report failure" in result.stderr
+    assert output.read_bytes() == b"original volume"
+    assert report.read_bytes() == b"original report"
+    assert not list(tmp_path.glob(".converted.nii.gz.rollback.*"))
+
+
+def test_fuse_without_selectors_ranks_each_dicom_directory(tmp_path, monkeypatch):
     moving_dir = tmp_path / "moving"
     moving_dir.mkdir()
     fixed_coarse = _candidate(row_id=1, uid="1.2.1", description="fixed coarse")
@@ -2260,16 +2351,16 @@ def test_merge_without_selectors_ranks_each_dicom_directory(tmp_path, monkeypatc
 
     monkeypatch.setattr(cli, "_discover", fake_discover)
     captured = {}
-    from medsurface import merge as merge_mod
+    from medsurface import fusion
 
-    def fake_merge(**kwargs):
+    def fake_fuse(**kwargs):
         captured.update(kwargs)
-        return _merge_result("merged.stl")
+        return _fusion_result("fused.nrrd")
 
-    monkeypatch.setattr(merge_mod, "merge", fake_merge)
+    monkeypatch.setattr(fusion, "fuse", fake_fuse)
     result = runner.invoke(
         cli.app,
-        ["merge", str(tmp_path), str(moving_dir), "-o", "merged.stl", "-q"],
+        ["fuse", str(tmp_path), str(moving_dir), "-o", "fused.nrrd", "-q"],
         prog_name="medsurface",
     )
 
