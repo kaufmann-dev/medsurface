@@ -14,7 +14,7 @@ DICOM series, NIfTI, NRRD, and MetaImage inputs are supported.
 
 ## Install
 
-Python 3.10 or newer and [uv](https://docs.astral.sh/uv/) are required.
+Python 3.11 or newer and [uv](https://docs.astral.sh/uv/) are required.
 
 ```sh
 uv tool install .

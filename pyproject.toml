@@ -7,7 +7,7 @@ name = "medsurface"
 version = "0.1.0"
 description = "Convert medical volumes, fuse binary labelmaps, and extract surface meshes"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "David Kaufmann", email = "david@kaufmann.dev" }]
@@ -52,7 +52,7 @@ packages = ["src/medsurface"]
 testpaths = ["tests"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 files = ["src/medsurface"]
 check_untyped_defs = true
 ignore_missing_imports = true
@@ -60,7 +60,7 @@ no_implicit_optional = true
 warn_unused_configs = true
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]
