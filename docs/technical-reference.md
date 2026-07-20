@@ -420,7 +420,7 @@ destination is preserved.
 
 The repository uses uv 0.11.28 for dependency resolution, environments, command
 execution, and CI. Typer 0.21 defines the CLI and Rich 14 renders terminal
-output. `uv.lock` covers Python 3.10–3.13; local development defaults to Python
+output. `uv.lock` covers Python 3.11–3.14; local development defaults to Python
 3.12.
 
 ```sh
@@ -434,7 +434,7 @@ uv build
 Hatchling is the PEP 517 backend. MeshLib is pinned to `3.1.3.297` for consistent
 collision and simplification behavior; no OpenGL system dependency is required.
 CI runs linting, source type checks, package builds, an installed-command smoke
-test, and the full suite on Python 3.10 through 3.13.
+test, and the full suite on Python 3.11 through 3.14.
 
 ## Verification
 
