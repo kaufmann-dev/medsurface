@@ -9,11 +9,12 @@ from typing import Any, Callable
 
 import SimpleITK as sitk
 
+from . import destep as destep_mod
 from . import segment, surface
 from . import volume as volume_mod
 from .catalog import VolumeCandidate
-from .defaults import SURFACE_RELAX_FORCE
-from .presets import Preset
+from .defaults import DESTEP_CLAMP_WARNING_FRACTION, SURFACE_RELAX_FORCE
+from .presets import DestepSettings, Preset, validate_destep
 from .presets import validate as validate_preset
 
 Logger = Callable[[str], None]
@@ -55,6 +56,7 @@ class SurfaceSettings:
     simplify_error_mm: float
     post_surface_smooth_iters: int
     keep_largest_component: bool
+    destep: DestepSettings | None = None
 
 
 @dataclass
@@ -84,6 +86,7 @@ def surface_settings(
             if keep_largest_component is None
             else keep_largest_component
         ),
+        destep=preset.destep,
     )
 
 
@@ -106,6 +109,8 @@ def validate_surface_settings(settings: SurfaceSettings) -> None:
         or settings.post_surface_smooth_iters < 0
     ):
         raise ValueError("post_surface_smooth_iters must be a non-negative integer")
+    if settings.destep is not None:
+        validate_destep(settings.destep)
 
 
 def mask_smoothing_warning(mask_smooth_mm: float) -> str | None:
@@ -116,6 +121,31 @@ def mask_smoothing_warning(mask_smooth_mm: float) -> str | None:
         "mask smoothing uses a Gaussian sigma of %.2f mm before meshing; "
         "it can round boundaries, merge narrow gaps, or erase structures near "
         "this scale. Use --mask-smooth-mm 0 to disable it" % mask_smooth_mm
+    )
+
+
+def destep_warning(destep: DestepSettings | None) -> str | None:
+    """Explain that stair-step fairing deliberately moves anatomy."""
+    if destep is None:
+        return None
+    return (
+        "destep fairing (%s region, %d iterations) moves the surface up to %.2f mm; "
+        "it can flatten shallow anatomy such as sutures in the faired region"
+        % (destep.region, destep.iterations, destep.max_displacement_mm)
+    )
+
+
+def _destep_clamp_warning(stats: Any) -> str | None:
+    """Flag fairing that mostly ran into its displacement clamp."""
+    if not stats.safeguard.accepted:
+        return None
+    if stats.clamped_vertex_fraction < DESTEP_CLAMP_WARNING_FRACTION:
+        return None
+    return (
+        "destep fairing reached the %.2f mm displacement limit on %.1f%% of "
+        "vertices, which can leave clamp seams; lower --destep-iters or raise "
+        "--destep-max-mm"
+        % (stats.max_displacement_mm, 100.0 * stats.clamped_vertex_fraction)
     )
 
 
@@ -164,6 +194,7 @@ def finish_surface(
     keep_largest_component: bool,
     step: StepRunner,
     log: Logger,
+    destep: DestepSettings | None = None,
 ) -> SurfaceFinish:
     """Shared, intersection-safe finishing for intensity and labelmap extraction."""
     warnings = []
@@ -267,6 +298,31 @@ def finish_surface(
         _smoothing_warnings("post-simplification relaxation", post_smoothing)
     )
 
+    destep_stats = None
+    if destep is not None:
+        settings = destep
+        poly, destep_stats = step(
+            "destep fairing",
+            lambda: destep_mod.destep_safely(poly, settings),
+        )
+        log(
+            "  destep region %s: faired %.1f%%, frozen %.1f%%; displacement "
+            "rms %.4f mm, p95 %.4f mm, max %.4f mm; volume %+.2f%%"
+            % (
+                destep_stats.region,
+                100.0 * destep_stats.faired_vertex_fraction,
+                100.0 * destep_stats.frozen_vertex_fraction,
+                destep_stats.safeguard.rms_displacement_mm,
+                destep_stats.p95_displacement_mm,
+                destep_stats.safeguard.max_displacement_mm,
+                destep_stats.volume_change_percent,
+            )
+        )
+        warnings.extend(_smoothing_warnings("destep fairing", destep_stats.safeguard))
+        clamp_warning = _destep_clamp_warning(destep_stats)
+        if clamp_warning:
+            warnings.append(clamp_warning)
+
     return SurfaceFinish(
         poly=poly,
         surface_components=surface_components,
@@ -275,6 +331,7 @@ def finish_surface(
             "pre_smoothing": asdict(pre_smoothing),
             "decimation": asdict(decimation),
             "post_smoothing": asdict(post_smoothing),
+            "destep": asdict(destep_stats) if destep_stats is not None else None,
         },
     )
 
@@ -364,6 +421,7 @@ def mesh_binary_mask(
         keep_largest_component=settings.keep_largest_component,
         step=step,
         log=log,
+        destep=settings.destep,
     )
     for message in finished.warnings:
         warn(message)
@@ -499,9 +557,12 @@ def extract(
             add_warning(message)
 
     add_warnings(threshold_warnings(candidate, preset, threshold))
-    smoothing_message = mask_smoothing_warning(preset.mask_smooth_mm)
-    if smoothing_message:
-        add_warning(smoothing_message)
+    for message in (
+        mask_smoothing_warning(preset.mask_smooth_mm),
+        destep_warning(preset.destep),
+    ):
+        if message:
+            add_warning(message)
     vol = step(
         "load volume",
         lambda: volume_mod.load(candidate, allow_large_volume=allow_large_volume),

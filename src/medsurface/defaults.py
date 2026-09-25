@@ -37,3 +37,43 @@ SUPPORTED_MESH_EXTENSIONS = (".stl", ".ply", ".obj")
 #: Detached NRRD and MetaImage headers remain input-only because they cannot be
 #: published with one atomic filesystem replacement.
 SUPPORTED_VOLUME_EXTENSIONS = (".nii", ".nii.gz", ".nrrd", ".mha")
+
+#: Taubin fairing iterations for optional stair-step removal. 600 cleared broad
+#: 8-16 mm slice-terrace ripples from a simplified skull dome while a fixed
+#: displacement clamp kept the change sub-millimetre.
+DEFAULT_DESTEP_ITERS = 600
+
+#: Largest per-vertex displacement, in model mm, that stair-step fairing may
+#: introduce. It bounds anatomical change wherever the fairing runs.
+DEFAULT_DESTEP_MAX_MM = 1.0
+
+#: Taubin lambda/mu pair. The negative mu step re-inflates what lambda shrinks,
+#: so repeated passes remove ripples without steadily shrinking the surface.
+DESTEP_LAMBDA = 0.5
+DESTEP_MU = -0.53
+
+#: Faces whose normal rotates past this dot product during fairing are treated
+#: as folded; their vertices and one surrounding ring return to their input.
+DESTEP_UNFOLD_DOT = 0.2
+
+#: Share of vertices at the displacement clamp above which the result warns.
+#: Taubin's slight low-frequency gain accumulates with iterations, so many
+#: clamped vertices usually mean too many iterations for the triangle size.
+DESTEP_CLAMP_WARNING_FRACTION = 0.10
+
+#: Automatic region detection measures curvature on a fully faired copy of the
+#: surface, where slice terraces are gone but anatomy remains. Broad surfaces
+#: such as a skull dome have curvature radii of tens of millimetres; teeth,
+#: rims, and thin bone edges are a few millimetres. Vertices whose local
+#: curvature radius is at or below the detail radius are frozen, those at or
+#: above the full radius are fully faired, with a cosine ramp between.
+DESTEP_AUTO_DETAIL_RADIUS_MM = 3.0
+DESTEP_AUTO_FULL_RADIUS_MM = 6.0
+
+#: Neighbour-averaging passes that turn per-edge curvature into a local
+#: estimate, so one sharp edge marks its whole feature rather than one vertex.
+DESTEP_AUTO_SPREAD_PASSES = 20
+
+#: Topological rings added around automatically detected detail before the mask
+#: is blended, so the fairing transition stays outside the protected region.
+DESTEP_AUTO_GUARD_RINGS = 4
