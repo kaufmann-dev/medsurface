@@ -332,11 +332,17 @@ uniform-Laplacian steps for `--destep-iters` iterations, each scaled by a
 per-vertex weight, so weight-zero vertices stay bit-identical. `band` weights
 follow a cosine ramp between `--destep-frozen-mm` and `--destep-full-mm` on
 one axis and must reach the surface. `all` uses weight one. `auto` fairs an
-unmasked copy, estimates curvature there as the largest normal change per
-millimetre along each vertex's edges, averages it over 20 neighbour passes, and
-converts it to a radius. Radii at or below `3 mm` are frozen, radii at or above
-`6 mm` are fully faired, and a four-ring guard band plus blending keeps the
-transition outside frozen detail. Displacements are clamped to `--destep-max-mm`.
+unmasked copy, averages its vertex normals over five neighbour passes, and
+takes each vertex's largest normal change per millimetre along its edges as
+its curvature. Radii below `4 mm` are detail. Connected detail smaller than
+`20 mm²` is an isolated speck and is faired, because freezing it would pin the
+surrounding ripples. Other detail is frozen and returns to full fairing over
+`1–4 mm` of geodesic edge-path distance. Detail clusters of at least `100 mm²`
+also freeze everything within `10 mm` and fully fair beyond `20 mm`, so smooth
+patches between facial features stay unchanged. The constants were tuned on a
+fused CT skull labelmap, where `auto` matched a manually banded result on the
+outer vault while leaving the orbital rims, face, and dentition untouched.
+Displacements are clamped to `--destep-max-mm`.
 Faces whose normal rotates past a dot product of `0.2` return, with one ring,
 to their input positions. The relaxation safeguard then protects any remaining
 self-intersections or disoriented faces, or keeps the unfaired surface.

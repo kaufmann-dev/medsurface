@@ -61,19 +61,30 @@ DESTEP_UNFOLD_DOT = 0.2
 #: clamped vertices usually mean too many iterations for the triangle size.
 DESTEP_CLAMP_WARNING_FRACTION = 0.10
 
-#: Automatic region detection measures curvature on a fully faired copy of the
-#: surface, where slice terraces are gone but anatomy remains. Broad surfaces
-#: such as a skull dome have curvature radii of tens of millimetres; teeth,
-#: rims, and thin bone edges are a few millimetres. Vertices whose local
-#: curvature radius is at or below the detail radius are frozen, those at or
-#: above the full radius are fully faired, with a cosine ramp between.
-DESTEP_AUTO_DETAIL_RADIUS_MM = 3.0
-DESTEP_AUTO_FULL_RADIUS_MM = 6.0
+#: Automatic region detection estimates curvature on a fully faired copy of the
+#: surface, where slice terraces are gone but anatomy remains. Normals are first
+#: averaged over this many neighbour passes to suppress tessellation noise.
+DESTEP_AUTO_NORMAL_PASSES = 5
 
-#: Neighbour-averaging passes that turn per-edge curvature into a local
-#: estimate, so one sharp edge marks its whole feature rather than one vertex.
-DESTEP_AUTO_SPREAD_PASSES = 20
+#: Vertices whose faired curvature radius is below this are anatomical detail.
+#: On a CT skull this marks teeth, orbital and nasal rims, mandible and
+#: zygomatic edges, and processes, while the vault stays clear.
+DESTEP_AUTO_DETAIL_RADIUS_MM = 4.0
 
-#: Topological rings added around automatically detected detail before the mask
-#: is blended, so the fairing transition stays outside the protected region.
-DESTEP_AUTO_GUARD_RINGS = 4
+#: Connected detail smaller than this surface area is an isolated speck. It is
+#: faired with its surroundings, because freezing it would pin the ripples
+#: around it; on a CT skull these specks covered the vault.
+DESTEP_AUTO_SPECK_AREA_MM2 = 20.0
+
+#: Remaining detail is frozen and blends back to full fairing across this
+#: geodesic distance.
+DESTEP_AUTO_GUARD_FROZEN_MM = 1.0
+DESTEP_AUTO_GUARD_FULL_MM = 4.0
+
+#: Detail clusters at least this large, such as the face and dentition, also
+#: freeze their surroundings up to the frozen distance and fully fair beyond
+#: the full distance. This keeps small smooth patches between facial features
+#: unchanged while the open vault is faired, matching a manually banded skull.
+DESTEP_AUTO_FEATURE_AREA_MM2 = 100.0
+DESTEP_AUTO_FEATURE_FROZEN_MM = 10.0
+DESTEP_AUTO_FEATURE_FULL_MM = 20.0

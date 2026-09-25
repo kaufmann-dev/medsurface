@@ -19,14 +19,18 @@ RIPPLE_AMPLITUDE = 0.4
 SPACING = 0.6
 HALF = RADIUS + 10.0
 FIN_X = (-12.0, -4.0, 4.0, 12.0)
+BUMP_CENTER = np.array([0.0, 8.0, RADIUS - 0.5])
 
 
-def _rippled_labelmap() -> sitk.Image:
+def _rippled_labelmap(bump_radius: float = 0.0) -> sitk.Image:
     """A sphere with broad z ripples and four thin, tall fins below it."""
     axis = np.arange(int(2 * HALF / SPACING)) * SPACING - HALF
     z, y, x = np.meshgrid(axis, axis, axis, indexing="ij")
     radius = RADIUS + RIPPLE_AMPLITUDE * np.sin(2 * np.pi * z / RIPPLE_MM)
     mask = np.sqrt(x**2 + y**2 + z**2) <= radius
+    if bump_radius:
+        bx, by, bz = BUMP_CENTER
+        mask |= np.sqrt((x - bx) ** 2 + (y - by) ** 2 + (z - bz) ** 2) <= bump_radius
     for center in FIN_X:
         mask |= (
             (np.abs(x - center) < 0.8)
@@ -40,9 +44,8 @@ def _rippled_labelmap() -> sitk.Image:
     return image
 
 
-@pytest.fixture(scope="module")
-def rippled():
-    grid = segment.smooth_occupancy(segment.pad(_rippled_labelmap(), 1), 0.5)
+def _finished_mesh(image: sitk.Image):
+    grid = segment.smooth_occupancy(segment.pad(image, 1), 0.5)
     mesh = surface.transform(
         surface.marching_cubes(grid, segment.ISO_OCCUPANCY),
         surface.index_to_physical(grid),
@@ -56,13 +59,19 @@ def rippled():
         step=lambda _message, function: function(),
         log=lambda _message: None,
     )
-    vertices = surface.to_arrays(finished.poly)[0]
+    return finished.poly
+
+
+@pytest.fixture(scope="module")
+def rippled():
+    poly = _finished_mesh(_rippled_labelmap())
+    vertices = surface.to_arrays(poly)[0]
     radius = np.linalg.norm(vertices, axis=1)
     dome = vertices[:, 2] > 10.0
     fins = (vertices[:, 2] < -RADIUS + 15.0) & (np.abs(vertices[:, 1]) < 6.5)
     fins &= radius > RADIUS + 1.0
     assert dome.sum() > 500 and fins.sum() > 50
-    return finished.poly, vertices, dome, fins
+    return poly, vertices, dome, fins
 
 
 def _ripple_amplitude(vertices: np.ndarray, selected: np.ndarray) -> float:
@@ -110,6 +119,23 @@ def test_auto_freezes_thin_detail_and_fairs_broad_surfaces(rippled):
     assert _ripple_amplitude(after, dome) < 0.8 * _ripple_amplitude(before, dome)
     assert stats.faired_vertex_fraction > 0.5
     assert stats.frozen_vertex_fraction > 0
+
+
+def test_auto_fairs_isolated_specks_instead_of_pinning_ripples(monkeypatch):
+    poly = _finished_mesh(_rippled_labelmap(bump_radius=1.5))
+    vertices, faces = surface.to_arrays(poly)
+    adjacent = destep.adjacency(len(vertices), faces)
+    average = destep.neighbour_average(adjacent)
+    surface_top = BUMP_CENTER.copy()
+    surface_top[2] = np.sqrt(RADIUS**2 - np.sum(BUMP_CENTER[:2] ** 2))
+    near_bump = np.linalg.norm(vertices - surface_top, axis=1) < 4.0
+
+    weights = destep.auto_weights(vertices, faces, adjacent, average, 600)
+    assert weights[near_bump].min() == 1.0
+
+    monkeypatch.setattr(destep, "DESTEP_AUTO_SPECK_AREA_MM2", 0.0)
+    weights = destep.auto_weights(vertices, faces, adjacent, average, 600)
+    assert weights[near_bump].min() == 0.0
 
 
 def test_all_fairs_every_region_within_the_displacement_limit(rippled):

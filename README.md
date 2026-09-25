@@ -126,7 +126,7 @@ medsurface labelmap extract skull.nrrd -o skull.stl \
 ```
 
 `auto` fairs broad surfaces and freezes tightly curved detail such as teeth,
-`band` ramps from a frozen coordinate to a fully faired one, and `all` fairs
+together with its surroundings, `band` ramps from a frozen coordinate to a fully faired one, and `all` fairs
 every vertex. Each vertex moves at most `--destep-max-mm` (1 mm by default).
 See [Reducing stair-step ripples][destep].
 
