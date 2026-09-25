@@ -255,11 +255,11 @@ medsurface labelmap extract skull.nrrd -o skull.stl --destep auto
 
 Choose the faired region:
 
-| region | faired vertices                                                        |
-| ------ | ---------------------------------------------------------------------- |
-| `auto` | Broad surfaces; tightly curved detail such as teeth and rims stays put |
-| `band` | A coordinate band you choose along one model axis                      |
-| `all`  | Every vertex, including detail                                         |
+| region | faired vertices                                                                   |
+| ------ | --------------------------------------------------------------------------------- |
+| `auto` | Broad surfaces; detail such as teeth and rims, and the area around it, stays put  |
+| `band` | A coordinate band you choose along one model axis                                 |
+| `all`  | Every vertex, including detail                                                    |
 
 `band` needs `--destep-full-mm` and `--destep-frozen-mm`, in model millimetres
 along `--destep-axis` (default `z`). Vertices at or beyond the frozen
@@ -285,9 +285,11 @@ until vertices meet the displacement limit; the command warns when more than
 
 Fairing deliberately changes the faired anatomy. It flattens shallow features
 such as sutures along with the ripples, and `all` also rounds teeth and edges up
-to the displacement limit. `auto` is a curvature heuristic: check the faired
-and frozen percentages it logs, and use `band` when it protects too much or too
-little. Fairing that would fold or intersect the surface is reverted locally;
+to the displacement limit. `auto` is a curvature heuristic. It freezes tightly
+curved detail, keeps the surroundings of large detail such as the face frozen
+for about 10 mm, and fairs broad surfaces such as the cranial vault. Tiny
+isolated bumps are faired with their surroundings. Check the faired and frozen
+percentages it logs, and use `band` when it protects too much or too little. Fairing that would fold or intersect the surface is reverted locally;
 if no clean result is possible, the unfaired surface is kept with a warning.
 
 ## Binary fusion

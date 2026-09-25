@@ -20,13 +20,18 @@ from dataclasses import dataclass
 import meshlib.mrmeshpy as mrmeshpy
 import numpy as np
 from scipy import sparse
+from scipy.sparse import csgraph
 
 from . import surface
 from .defaults import (
     DESTEP_AUTO_DETAIL_RADIUS_MM,
-    DESTEP_AUTO_FULL_RADIUS_MM,
-    DESTEP_AUTO_GUARD_RINGS,
-    DESTEP_AUTO_SPREAD_PASSES,
+    DESTEP_AUTO_FEATURE_AREA_MM2,
+    DESTEP_AUTO_FEATURE_FROZEN_MM,
+    DESTEP_AUTO_FEATURE_FULL_MM,
+    DESTEP_AUTO_GUARD_FROZEN_MM,
+    DESTEP_AUTO_GUARD_FULL_MM,
+    DESTEP_AUTO_NORMAL_PASSES,
+    DESTEP_AUTO_SPECK_AREA_MM2,
     DESTEP_LAMBDA,
     DESTEP_MU,
     DESTEP_UNFOLD_DOT,
@@ -127,6 +132,54 @@ def _dilate(selected: np.ndarray, adjacent: sparse.csr_matrix, rings: int) -> np
     return grown
 
 
+def _vertex_areas(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    """One third of each incident triangle's area per vertex."""
+    areas = np.linalg.norm(_face_cross(vertices, faces), axis=1) / 6.0
+    result = np.zeros(len(vertices))
+    for corner in range(3):
+        np.add.at(result, faces[:, corner], areas)
+    return result
+
+
+def _geodesic_distance(
+    adjacent: sparse.csr_matrix,
+    vertices: np.ndarray,
+    sources: np.ndarray,
+    limit: float,
+) -> np.ndarray:
+    """Edge-path distance in mm from the nearest source, infinite beyond limit."""
+    if not sources.any():
+        return np.full(len(vertices), np.inf)
+    edges = adjacent.tocoo()
+    lengths = np.linalg.norm(vertices[edges.row] - vertices[edges.col], axis=1)
+    graph = sparse.csr_matrix(
+        (np.maximum(lengths, 1e-12), (edges.row, edges.col)), shape=adjacent.shape
+    )
+    distance = csgraph.dijkstra(
+        graph, indices=np.flatnonzero(sources), min_only=True, limit=limit
+    )
+    return np.asarray(distance)
+
+
+def _cluster_areas(
+    adjacent: sparse.csr_matrix, selected: np.ndarray, areas: np.ndarray
+) -> np.ndarray:
+    """Surface area of each selected vertex's connected selected cluster."""
+    index = np.flatnonzero(selected)
+    result = np.zeros(len(selected))
+    if not len(index):
+        return result
+    _count, labels = csgraph.connected_components(
+        adjacent[index][:, index], directed=False
+    )
+    result[index] = np.bincount(labels, areas[index])[labels]
+    return result
+
+
+def _distance_ramp(distance: np.ndarray, frozen: float, full: float) -> np.ndarray:
+    return _cosine_ramp((distance - frozen) / (full - frozen))
+
+
 def auto_weights(
     vertices: np.ndarray,
     faces: np.ndarray,
@@ -134,43 +187,62 @@ def auto_weights(
     average: sparse.csr_matrix,
     iterations: int,
 ) -> np.ndarray:
-    """Fair broad surfaces and freeze tightly curved detail.
+    """Fair broad surfaces and freeze anatomical detail and its surroundings.
 
     Curvature is estimated on an unmasked faired copy, where terraces no longer
-    create artificial edges. Each vertex takes the largest normal change per
-    millimetre along its edges, which also catches rims and saddles that mean
-    curvature misses, and the estimate is averaged over its neighbourhood.
+    create artificial edges. Each vertex takes the largest change of smoothed
+    normals per millimetre along its edges, which also catches rims and saddles
+    that mean curvature misses. Tightly curved vertices are detail: isolated
+    specks are faired, remaining detail is frozen with a short geodesic guard,
+    and large clusters such as the face also freeze their neighbourhood.
     """
     faired = masked_taubin(vertices, average, np.ones(len(vertices)), iterations)
     normals = surface.vertex_normals_from_arrays(faired, faces)
+    for _ in range(DESTEP_AUTO_NORMAL_PASSES):
+        normals = 0.5 * (normals + average @ normals)
+        lengths = np.linalg.norm(normals, axis=1)
+        normals[lengths > 0] /= lengths[lengths > 0, None]
     edges = adjacent.tocoo()
-    lengths = np.linalg.norm(faired[edges.row] - faired[edges.col], axis=1)
     edge_curvature = np.linalg.norm(
         normals[edges.row] - normals[edges.col], axis=1
-    ) / np.maximum(lengths, 1e-12)
+    ) / np.maximum(np.linalg.norm(faired[edges.row] - faired[edges.col], axis=1), 1e-12)
     curvature = np.zeros(len(vertices))
     np.maximum.at(curvature, edges.row, edge_curvature)
-    for _ in range(DESTEP_AUTO_SPREAD_PASSES):
-        curvature = 0.5 * (curvature + average @ curvature)
-    radius = 1.0 / np.maximum(curvature, 1e-12)
 
-    weights = _cosine_ramp(
-        (radius - DESTEP_AUTO_DETAIL_RADIUS_MM)
-        / (DESTEP_AUTO_FULL_RADIUS_MM - DESTEP_AUTO_DETAIL_RADIUS_MM)
+    detail = curvature > 1.0 / DESTEP_AUTO_DETAIL_RADIUS_MM
+    cluster_area = _cluster_areas(adjacent, detail, _vertex_areas(vertices, faces))
+    detail &= cluster_area >= DESTEP_AUTO_SPECK_AREA_MM2
+    features = detail & (cluster_area >= DESTEP_AUTO_FEATURE_AREA_MM2)
+
+    weights = np.minimum(
+        _distance_ramp(
+            _geodesic_distance(
+                adjacent, vertices, detail, DESTEP_AUTO_GUARD_FULL_MM
+            ),
+            DESTEP_AUTO_GUARD_FROZEN_MM,
+            DESTEP_AUTO_GUARD_FULL_MM,
+        ),
+        _distance_ramp(
+            _geodesic_distance(
+                adjacent, vertices, features, DESTEP_AUTO_FEATURE_FULL_MM
+            ),
+            DESTEP_AUTO_FEATURE_FROZEN_MM,
+            DESTEP_AUTO_FEATURE_FULL_MM,
+        ),
     )
-    detail = radius <= DESTEP_AUTO_DETAIL_RADIUS_MM
-    weights[_dilate(detail, adjacent, DESTEP_AUTO_GUARD_RINGS)] = 0.0
-    for _ in range(DESTEP_AUTO_GUARD_RINGS):
-        weights = 0.5 * (weights + average @ weights)
     weights[detail] = 0.0
     return weights
 
 
-def _unit_face_normals(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
+def _face_cross(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
     triangles = vertices[faces]
-    normals = np.cross(
+    return np.cross(
         triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]
     )
+
+
+def _unit_face_normals(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    normals = _face_cross(vertices, faces)
     lengths = np.linalg.norm(normals, axis=1)
     normals[lengths > 0] /= lengths[lengths > 0, None]
     return normals
