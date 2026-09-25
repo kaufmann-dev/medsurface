@@ -20,6 +20,7 @@ from .defaults import (
     DEFAULT_LABELMAP_SURFACE_SMOOTH_ITERS,
 )
 from .outputs import volume_output
+from .presets import DestepSettings
 
 Logger = Callable[[str], None]
 
@@ -66,6 +67,7 @@ def resolve_surface_settings(
     simplify_error_mm: float | None = None,
     post_surface_smooth_iters: int | None = None,
     keep_largest_component: bool | None = None,
+    destep: DestepSettings | None = None,
 ) -> pipeline.SurfaceSettings:
     base = default_surface_settings()
     settings = replace(
@@ -92,6 +94,7 @@ def resolve_surface_settings(
             if keep_largest_component is None
             else keep_largest_component
         ),
+        destep=destep,
     )
     pipeline.validate_surface_settings(settings)
     return settings
@@ -157,6 +160,7 @@ def extract(
     simplify_error_mm: float | None = None,
     post_surface_smooth_iters: int | None = None,
     keep_largest_component: bool | None = None,
+    destep: DestepSettings | None = None,
     cap_field_of_view: bool = True,
     allow_large_volume: bool = False,
     log: Logger | None = None,
@@ -169,6 +173,7 @@ def extract(
         simplify_error_mm=simplify_error_mm,
         post_surface_smooth_iters=post_surface_smooth_iters,
         keep_largest_component=keep_largest_component,
+        destep=destep,
     )
     surface.validate_output_path(output_path)
     started = time.time()
@@ -191,9 +196,12 @@ def extract(
         if warn:
             warn(message)
 
-    smoothing_message = pipeline.mask_smoothing_warning(settings.mask_smooth_mm)
-    if smoothing_message:
-        add_warning(smoothing_message)
+    for message in (
+        pipeline.mask_smoothing_warning(settings.mask_smooth_mm),
+        pipeline.destep_warning(settings.destep),
+    ):
+        if message:
+            add_warning(message)
 
     loaded = step(
         "load labelmap",

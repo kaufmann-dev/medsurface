@@ -49,12 +49,127 @@ class ComponentChoice(str, Enum):
     LARGEST = "largest"
 
 
+class DestepChoice(str, Enum):
+    """Stair-step fairing regions accepted by ``--destep``."""
+
+    AUTO = "auto"
+    ALL = "all"
+    BAND = "band"
+
+
+class AxisChoice(str, Enum):
+    """Model axes accepted by ``--destep-axis``."""
+
+    X = "x"
+    Y = "y"
+    Z = "z"
+
+
 def _keep_largest_component(
     components: ComponentChoice | None,
 ) -> bool | None:
     if components is None:
         return None
     return components is ComponentChoice.LARGEST
+
+
+_DESTEP_OPTION = typer.Option(
+    None,
+    "--destep",
+    help="Final masked fairing that removes broad stair-step ripples: auto-detected "
+    "smooth regions, all vertices, or an axis band (default: off).",
+)
+_DESTEP_AXIS_OPTION = typer.Option(
+    None, "--destep-axis", help="Axis of the --destep band mask (default: z)."
+)
+_DESTEP_FULL_OPTION = typer.Option(
+    None,
+    "--destep-full-mm",
+    help="Model coordinate in mm at and beyond which the band is fully faired.",
+)
+_DESTEP_FROZEN_OPTION = typer.Option(
+    None,
+    "--destep-frozen-mm",
+    help="Model coordinate in mm at and beyond which the band never moves.",
+)
+_DESTEP_ITERS_OPTION = typer.Option(
+    None,
+    "--destep-iters",
+    help="Taubin fairing iterations for --destep (default: %d)."
+    % defaults.DEFAULT_DESTEP_ITERS,
+)
+_DESTEP_MAX_OPTION = typer.Option(
+    None,
+    "--destep-max-mm",
+    help="Largest per-vertex displacement --destep may introduce (default: %.1f mm)."
+    % defaults.DEFAULT_DESTEP_MAX_MM,
+)
+
+
+def _destep_settings(
+    region: DestepChoice | None,
+    axis: AxisChoice | None,
+    full_mm: float | None,
+    frozen_mm: float | None,
+    iterations: int | None,
+    max_mm: float | None,
+) -> presets_mod.DestepSettings | None:
+    """Translate stair-step options into settings or exit with a usage error."""
+    band_options = [
+        name
+        for name, value in (
+            ("--destep-axis", axis),
+            ("--destep-full-mm", full_mm),
+            ("--destep-frozen-mm", frozen_mm),
+        )
+        if value is not None
+    ]
+    tuning_options = [
+        name
+        for name, value in (
+            ("--destep-iters", iterations),
+            ("--destep-max-mm", max_mm),
+        )
+        if value is not None
+    ]
+
+    def require(options: list[str], requirement: str) -> None:
+        verb = "requires" if len(options) == 1 else "require"
+        _error("%s %s %s" % (", ".join(options), verb, requirement))
+        raise typer.Exit(2)
+
+    if region is None:
+        if band_options or tuning_options:
+            require(band_options + tuning_options, "--destep")
+        return None
+    if region is not DestepChoice.BAND and band_options:
+        require(band_options, "--destep band")
+    if region is DestepChoice.BAND:
+        if full_mm is None or frozen_mm is None:
+            _error("--destep band requires --destep-full-mm and --destep-frozen-mm")
+            raise typer.Exit(2)
+        if not (math.isfinite(full_mm) and math.isfinite(frozen_mm)):
+            _error("--destep-full-mm and --destep-frozen-mm must be finite")
+            raise typer.Exit(2)
+        if full_mm == frozen_mm:
+            _error("--destep-full-mm and --destep-frozen-mm must differ")
+            raise typer.Exit(2)
+    if iterations is not None and iterations < 1:
+        _error("--destep-iters must be at least 1")
+        raise typer.Exit(2)
+    _validate_processing_numbers(nonnegative=[], positive=(("--destep-max-mm", max_mm),))
+    return presets_mod.DestepSettings(
+        region=region.value,
+        iterations=(
+            defaults.DEFAULT_DESTEP_ITERS if iterations is None else iterations
+        ),
+        max_displacement_mm=(
+            defaults.DEFAULT_DESTEP_MAX_MM if max_mm is None else float(max_mm)
+        ),
+        axis=axis.value if axis is not None else "z",
+        full_mm=full_mm,
+        frozen_mm=frozen_mm,
+    )
 
 
 stdout_console = Console(highlight=False, markup=False)
@@ -1091,6 +1206,12 @@ def extract(
         "--post-mesh-smooth-iters",
         help="Final topology-preserving surface relaxation iterations after simplification (0 = off).",
     ),
+    destep: DestepChoice | None = _DESTEP_OPTION,
+    destep_axis: AxisChoice | None = _DESTEP_AXIS_OPTION,
+    destep_full_mm: float | None = _DESTEP_FULL_OPTION,
+    destep_frozen_mm: float | None = _DESTEP_FROZEN_OPTION,
+    destep_iters: int | None = _DESTEP_ITERS_OPTION,
+    destep_max_mm: float | None = _DESTEP_MAX_OPTION,
     no_cap: bool = typer.Option(
         False, "--no-cap", help="Do not close anatomy at the field-of-view boundary."
     ),
@@ -1121,6 +1242,14 @@ def extract(
             ("--simplify-error-mm", simplify_error_mm),
             ("--post-mesh-smooth-iters", post_surface_smooth_iters),
         ],
+    )
+    destep_settings = _destep_settings(
+        destep,
+        destep_axis,
+        destep_full_mm,
+        destep_frozen_mm,
+        destep_iters,
+        destep_max_mm,
     )
     emitted_warnings: list[str] = []
 
@@ -1161,6 +1290,7 @@ def extract(
             post_surface_smooth_iters=post_surface_smooth_iters,
             keep_largest_island=False if all_islands else None,
             keep_largest_component=_keep_largest_component(components),
+            destep=destep_settings,
         )
         progress.update("Loading surface extraction engine ...")
         from . import pipeline
@@ -1260,6 +1390,12 @@ def extract_labelmap(
         "--post-mesh-smooth-iters",
         help="Final topology-preserving surface relaxation iterations after simplification (0 = off).",
     ),
+    destep: DestepChoice | None = _DESTEP_OPTION,
+    destep_axis: AxisChoice | None = _DESTEP_AXIS_OPTION,
+    destep_full_mm: float | None = _DESTEP_FULL_OPTION,
+    destep_frozen_mm: float | None = _DESTEP_FROZEN_OPTION,
+    destep_iters: int | None = _DESTEP_ITERS_OPTION,
+    destep_max_mm: float | None = _DESTEP_MAX_OPTION,
     components: ComponentChoice = typer.Option(
         ComponentChoice.ALL,
         "--components",
@@ -1291,6 +1427,14 @@ def extract_labelmap(
             ("--post-mesh-smooth-iters", post_surface_smooth_iters),
         ],
     )
+    destep_settings = _destep_settings(
+        destep,
+        destep_axis,
+        destep_full_mm,
+        destep_frozen_mm,
+        destep_iters,
+        destep_max_mm,
+    )
     emitted_warnings: list[str] = []
 
     def emit_warning(message: str) -> None:
@@ -1319,6 +1463,7 @@ def extract_labelmap(
                 simplify_error_mm=simplify_error_mm,
                 post_surface_smooth_iters=post_surface_smooth_iters,
                 keep_largest_component=_keep_largest_component(components),
+                destep=destep_settings,
                 cap_field_of_view=not no_cap,
                 allow_large_volume=allow_large_volume,
                 log=progress.log,

@@ -171,7 +171,13 @@ def test_default_labelmap_finishing_uses_no_post_simplification_relaxation(tmp_p
     assert finishing["decimation"]["simplify_error_mm"] == pytest.approx(0.25)
     assert finishing["decimation"]["error_introduced_mm"] <= 0.25
     assert finishing["post_smoothing"]["requested_iterations"] == 0
-    assert set(finishing) == {"pre_smoothing", "decimation", "post_smoothing"}
+    assert set(finishing) == {
+        "pre_smoothing",
+        "decimation",
+        "post_smoothing",
+        "destep",
+    }
+    assert finishing["destep"] is None
     assert any("Gaussian sigma of 0.80 mm" in warning for warning in result.warnings)
 
 

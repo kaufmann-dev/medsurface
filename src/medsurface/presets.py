@@ -6,7 +6,56 @@ import math
 from dataclasses import dataclass, replace
 from typing import Union
 
+from .defaults import DEFAULT_DESTEP_ITERS, DEFAULT_DESTEP_MAX_MM
+
 Threshold = Union[float, str]  # a number (intensity) or the string "auto"
+
+#: Regions accepted by stair-step fairing.
+DESTEP_REGIONS = ("auto", "all", "band")
+DESTEP_AXES = ("x", "y", "z")
+
+
+@dataclass(frozen=True)
+class DestepSettings:
+    """Optional masked Taubin fairing that removes broad stair-step ripples."""
+
+    #: ``auto`` detects ripple zones, ``all`` fairs every vertex, and ``band``
+    #: ramps from frozen to fully faired along one axis.
+    region: str
+    iterations: int = DEFAULT_DESTEP_ITERS
+    max_displacement_mm: float = DEFAULT_DESTEP_MAX_MM
+    #: Band mask only. Coordinates are model millimetres; their order sets the
+    #: faired side.
+    axis: str = "z"
+    full_mm: float | None = None
+    frozen_mm: float | None = None
+
+
+def validate_destep(settings: DestepSettings) -> None:
+    """Reject stair-step fairing settings before mesh processing begins."""
+    if settings.region not in DESTEP_REGIONS:
+        raise ValueError(
+            "destep region must be one of %s" % ", ".join(DESTEP_REGIONS)
+        )
+    if not isinstance(settings.iterations, int) or settings.iterations < 1:
+        raise ValueError("destep iterations must be a positive integer")
+    if (
+        not math.isfinite(settings.max_displacement_mm)
+        or settings.max_displacement_mm <= 0
+    ):
+        raise ValueError("destep maximum displacement must be finite and positive")
+    if settings.axis not in DESTEP_AXES:
+        raise ValueError("destep axis must be one of %s" % ", ".join(DESTEP_AXES))
+    full, frozen = settings.full_mm, settings.frozen_mm
+    if settings.region == "band":
+        if full is None or frozen is None:
+            raise ValueError("destep band requires both full and frozen coordinates")
+        if not (math.isfinite(full) and math.isfinite(frozen)):
+            raise ValueError("destep band coordinates must be finite")
+        if full == frozen:
+            raise ValueError("destep band full and frozen coordinates must differ")
+    elif full is not None or frozen is not None:
+        raise ValueError("destep full and frozen coordinates require the band region")
 
 
 @dataclass(frozen=True)
@@ -40,6 +89,8 @@ class Preset:
     #: Final topology-preserving relaxation iterations after simplification.
     post_surface_smooth_iters: int = 0
     keep_largest_component: bool = True
+    #: Optional final stair-step fairing. No preset enables it.
+    destep: DestepSettings | None = None
 
 
 PRESETS: dict[str, Preset] = {
@@ -130,6 +181,8 @@ def validate(preset: Preset) -> None:
         or preset.post_surface_smooth_iters < 0
     ):
         raise ValueError("post_surface_smooth_iters must be a non-negative integer")
+    if preset.destep is not None:
+        validate_destep(preset.destep)
 
 
 def validate_segmentation(preset: Preset) -> None:
