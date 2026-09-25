@@ -326,6 +326,32 @@ non-manifold edges, and contain no self-intersections or disoriented faces.
 Unsafe source neighborhoods are protected and decimation retries up to eight
 times. If no candidate passes, the valid pre-decimation surface is retained.
 
+`--destep auto|all|band` adds optional final masked Taubin fairing after
+post-simplification relaxation. It runs alternating `λ 0.5` and `μ −0.53`
+uniform-Laplacian steps for `--destep-iters` iterations, each scaled by a
+per-vertex weight, so weight-zero vertices stay bit-identical. `band` weights
+follow a cosine ramp between `--destep-frozen-mm` and `--destep-full-mm` on
+one axis and must reach the surface. `all` uses weight one. `auto` fairs an
+unmasked copy, averages its vertex normals over five neighbour passes, and
+takes each vertex's largest normal change per millimetre along its edges as
+its curvature. Radii below `4 mm` are detail. Connected detail smaller than
+`20 mm²` is an isolated speck and is faired, because freezing it would pin the
+surrounding ripples. Other detail is frozen and returns to full fairing over
+`1–4 mm` of geodesic edge-path distance. Detail clusters of at least `100 mm²`
+also freeze everything within `10 mm` and fully fair beyond `20 mm`, so smooth
+patches between facial features stay unchanged. The constants were tuned on a
+fused CT skull labelmap, where `auto` matched a manually banded result on the
+outer vault while leaving the orbital rims, face, and dentition untouched.
+Displacements are clamped to `--destep-max-mm`.
+Faces whose normal rotates past a dot product of `0.2` return, with one ring,
+to their input positions. The relaxation safeguard then protects any remaining
+self-intersections or disoriented faces, or keeps the unfaired surface.
+Provenance `surface_finishing.destep` records region, iterations, faired and
+frozen fractions, clamped and unfolded vertices, displacement, volume change,
+and the safeguard result; it is `null` when fairing is off. The method follows
+a masked-fairing experiment on a CT skull dome, where 600 iterations cleared
+8–16 mm ripples with at most 1 mm displacement.
+
 `--components all|largest` applies only to extraction. Omitted intensity
 extraction follows the preset: bone, skin, and auto retain the largest shell;
 teeth retains all. Labelmap extraction defaults to all. Fusion has no mask

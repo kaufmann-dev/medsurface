@@ -499,6 +499,11 @@ def decimate(mesh: mrmeshpy.Mesh, simplify_error_mm: float) -> mrmeshpy.Mesh:
 def vertex_normals(mesh: mrmeshpy.Mesh) -> tuple[np.ndarray, np.ndarray]:
     """Return packed vertices and area-weighted unit vertex normals."""
     vertices, faces = to_arrays(mesh)
+    return vertices, vertex_normals_from_arrays(vertices, faces)
+
+
+def vertex_normals_from_arrays(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    """Return area-weighted unit vertex normals for indexed triangles."""
     triangles = vertices[faces]
     face_normals = np.cross(
         triangles[:, 1] - triangles[:, 0],
@@ -509,7 +514,7 @@ def vertex_normals(mesh: mrmeshpy.Mesh) -> tuple[np.ndarray, np.ndarray]:
         np.add.at(normals, faces[:, corner], face_normals)
     lengths = np.linalg.norm(normals, axis=1)
     normals[lengths > 0] /= lengths[lengths > 0, None]
-    return vertices, normals
+    return normals
 
 
 def validate_output_path(path: str) -> None:

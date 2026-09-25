@@ -197,6 +197,7 @@ has complete, consistent rescale evidence. Use an intentional `--threshold` or
   relaxation before and after simplification;
 - `--simplify-error-mm` for MeshLib's estimated QEM deviation limit;
 - `--components all|largest` for output shells;
+- `--destep auto|all|band` for optional final stair-step fairing;
 - `--no-cap` to leave field-of-view openings uncapped.
 
 Set a numeric control to `0` to disable its stage. Mask smoothing can move
@@ -239,6 +240,57 @@ medsurface labelmap extract selected.nii.gz -o selected.stl
 ```
 
 TotalSegmentator is not installed or run by medsurface.
+
+## Reducing stair-step ripples
+
+Slice terraces from CT or MR can remain visible as broad, shallow ripples on
+smooth anatomy even after mask smoothing and mesh relaxation. Those stages are
+too local for ripples several millimetres long, and stronger global smoothing
+erases thin anatomy. `--destep` adds one final, optional fairing stage to
+`extract` and `labelmap extract`. It is off unless requested:
+
+```sh
+medsurface labelmap extract skull.nrrd -o skull.stl --destep auto
+```
+
+Choose the faired region:
+
+| region | faired vertices                                                                   |
+| ------ | --------------------------------------------------------------------------------- |
+| `auto` | Broad surfaces; detail such as teeth and rims, and the area around it, stays put  |
+| `band` | A coordinate band you choose along one model axis                                 |
+| `all`  | Every vertex, including detail                                                    |
+
+`band` needs `--destep-full-mm` and `--destep-frozen-mm`, in model millimetres
+along `--destep-axis` (default `z`). Vertices at or beyond the frozen
+coordinate never move, those at or beyond the full coordinate are fully faired,
+and a smooth ramp joins them. Their order selects the faired side. To choose
+values, read the surface's `bbox_min` and `bbox_max` from
+`medsurface validate model.stl --json`, then place the ramp with margin between
+the rippled area and the detail you must keep:
+
+```sh
+medsurface extract scans/ -o skull.stl --destep band \
+  --destep-axis z --destep-full-mm -555 --destep-frozen-mm -600
+```
+
+`--destep-iters` (default 600) sets how far the fairing reaches and
+`--destep-max-mm` (default 1 mm) limits every vertex's displacement. Raise the
+iterations until the bands clear, and inspect the result with smooth shading
+and low-angle light; soft lighting and decimated previews hide the bands. The
+reach is measured in triangles, not millimetres, so meshes with smaller
+triangles need more iterations. Too many iterations slowly inflate the surface
+until vertices meet the displacement limit; the command warns when more than
+10% of vertices reach it.
+
+Fairing deliberately changes the faired anatomy. It flattens shallow features
+such as sutures along with the ripples, and `all` also rounds teeth and edges up
+to the displacement limit. `auto` is a curvature heuristic. It freezes tightly
+curved detail, keeps the surroundings of large detail such as the face frozen
+for about 10 mm, and fairs broad surfaces such as the cranial vault. Tiny
+isolated bumps are faired with their surroundings. Check the faired and frozen
+percentages it logs, and use `band` when it protects too much or too little. Fairing that would fold or intersect the surface is reverted locally;
+if no clean result is possible, the unfaired surface is kept with a warning.
 
 ## Binary fusion
 

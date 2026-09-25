@@ -1226,6 +1226,7 @@ def test_extract_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
     assert captured["preset"].surface_smooth_iters == 17
     assert captured["preset"].simplify_error_mm == pytest.approx(0.18)
     assert captured["preset"].post_surface_smooth_iters == 19
+    assert captured["preset"].destep is None
     assert not captured["preset"].keep_largest_island
     assert not captured["preset"].keep_largest_component
     assert captured["threshold"] == "auto"
@@ -1234,6 +1235,154 @@ def test_extract_accepts_all_flags_and_writes_json_file(tmp_path, monkeypatch):
     payload = json.loads(json_file.read_text())
     assert payload["result"]["output"] == str(output)
     assert payload["quality"]["valid"]
+
+
+def test_extract_forwards_destep_band_settings(tmp_path, monkeypatch):
+    chosen = _candidate()
+    captured = {}
+    output = tmp_path / "surface.stl"
+    monkeypatch.setattr(cli, "_discover", lambda _root: [chosen])
+
+    from medsurface import pipeline
+    from medsurface.presets import DestepSettings
+
+    def fake_extract(**kwargs):
+        captured.update(kwargs)
+        return _extract_result(str(output))
+
+    monkeypatch.setattr(pipeline, "extract", fake_extract)
+    result = runner.invoke(
+        cli.app,
+        [
+            "extract",
+            str(tmp_path),
+            "-o",
+            str(output),
+            "--destep",
+            "band",
+            "--destep-axis",
+            "y",
+            "--destep-full-mm",
+            "-555",
+            "--destep-frozen-mm",
+            "-600",
+            "--destep-iters",
+            "300",
+            "--destep-max-mm",
+            "0.6",
+            "-q",
+        ],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["preset"].destep == DestepSettings(
+        region="band",
+        iterations=300,
+        max_displacement_mm=0.6,
+        axis="y",
+        full_mm=-555.0,
+        frozen_mm=-600.0,
+    )
+
+
+def test_labelmap_extract_forwards_destep_defaults(tmp_path, monkeypatch):
+    source = tmp_path / "labels.nii.gz"
+    source.write_bytes(b"labelmap")
+    chosen = _file_candidate(source)
+    output = tmp_path / "surface.stl"
+    captured = {}
+    monkeypatch.setattr(
+        cli, "_select_labelmap", lambda _path, _role=None: (chosen, [chosen])
+    )
+
+    from medsurface import defaults
+    from medsurface import labelmap as labelmap_mod
+    from medsurface.presets import DestepSettings
+
+    def fake_extract(**kwargs):
+        captured.update(kwargs)
+        return _extract_result(str(output))
+
+    monkeypatch.setattr(labelmap_mod, "extract", fake_extract)
+    result = runner.invoke(
+        cli.app,
+        ["labelmap", "extract", str(source), "-o", str(output), "--destep", "auto"],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["destep"] == DestepSettings(
+        region="auto",
+        iterations=defaults.DEFAULT_DESTEP_ITERS,
+        max_displacement_mm=defaults.DEFAULT_DESTEP_MAX_MM,
+    )
+
+
+@pytest.mark.parametrize("command", [["extract"], ["labelmap", "extract"]])
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (["--destep-iters", "100"], "--destep-iters requires --destep"),
+        (["--destep-full-mm", "1"], "--destep-full-mm requires --destep"),
+        (
+            ["--destep", "auto", "--destep-axis", "x"],
+            "--destep-axis requires --destep band",
+        ),
+        (
+            ["--destep", "band", "--destep-full-mm", "1"],
+            "--destep band requires --destep-full-mm and --destep-frozen-mm",
+        ),
+        (
+            [
+                "--destep",
+                "band",
+                "--destep-full-mm",
+                "1",
+                "--destep-frozen-mm",
+                "1",
+            ],
+            "must differ",
+        ),
+        (
+            ["--destep-axis", "x", "--destep-max-mm", "1"],
+            "--destep-axis, --destep-max-mm require --destep",
+        ),
+        (["--destep", "all", "--destep-iters", "0"], "--destep-iters must be at least 1"),
+        (
+            ["--destep", "all", "--destep-max-mm", "0"],
+            "--destep-max-mm must be finite and greater than zero",
+        ),
+        (
+            ["--destep", "all", "--destep-max-mm", "nan"],
+            "--destep-max-mm must be finite and greater than zero",
+        ),
+    ],
+)
+def test_destep_option_errors_are_usage_errors(
+    tmp_path, monkeypatch, command, arguments, message
+):
+    source = tmp_path / "labels.nii.gz"
+    source.write_bytes(b"labelmap")
+    monkeypatch.setattr(
+        cli,
+        "_discover",
+        lambda _root: pytest.fail("destep options must be checked before discovery"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_select_labelmap",
+        lambda *_args: pytest.fail("destep options must be checked before discovery"),
+    )
+
+    result = runner.invoke(
+        cli.app,
+        [*command, str(source), "-o", str(tmp_path / "out.stl"), *arguments],
+        prog_name="medsurface",
+    )
+
+    assert result.exit_code == 2
+    assert message in result.stderr
 
 
 def test_extract_defaults_quality_output_and_invalid_exit(tmp_path, monkeypatch):
@@ -1687,6 +1836,7 @@ def test_labelmap_extract_accepts_surface_flags_and_writes_json(tmp_path, monkey
     assert captured["surface_smooth_iters"] == 17
     assert captured["simplify_error_mm"] == pytest.approx(0.18)
     assert captured["post_surface_smooth_iters"] == 19
+    assert captured["destep"] is None
     assert captured["keep_largest_component"] is True
     assert not captured["cap_field_of_view"]
     assert captured["allow_large_volume"]

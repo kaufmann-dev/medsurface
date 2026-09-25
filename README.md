@@ -110,8 +110,25 @@ medsurface extract scan.mha --preset auto -o automatic.stl
 ```
 
 Surface controls such as `--mask-smooth-mm`, `--mesh-smooth-iters`,
-`--simplify-error-mm`, `--post-mesh-smooth-iters`, and `--components` belong to
-`extract` commands only.
+`--simplify-error-mm`, `--post-mesh-smooth-iters`, `--components`, and
+`--destep` belong to `extract` commands only.
+
+### Remove broad stair-step ripples
+
+CT slice terraces can survive as shallow ripples on smooth anatomy such as a
+skull dome. Optional final fairing removes them while leaving frozen regions
+untouched:
+
+```sh
+medsurface extract scans/ -o skull.stl --destep auto
+medsurface labelmap extract skull.nrrd -o skull.stl \
+  --destep band --destep-axis z --destep-full-mm -555 --destep-frozen-mm -600
+```
+
+`auto` fairs broad surfaces and freezes tightly curved detail such as teeth,
+together with its surroundings, `band` ramps from a frozen coordinate to a fully faired one, and `all` fairs
+every vertex. Each vertex moves at most `--destep-max-mm` (1 mm by default).
+See [Reducing stair-step ripples][destep].
 
 ### Fuse intensity volumes, then extract
 
@@ -185,3 +202,4 @@ explanation][validation].
 [safety]: https://github.com/kaufmann-dev/medsurface/blob/main/docs/user-guide.md#safety-and-privacy
 [input-limitations]: https://github.com/kaufmann-dev/medsurface/blob/main/docs/user-guide.md#input-requirements-and-limitations
 [validation]: https://github.com/kaufmann-dev/medsurface/blob/main/docs/user-guide.md#understanding-validation
+[destep]: https://github.com/kaufmann-dev/medsurface/blob/main/docs/user-guide.md#reducing-stair-step-ripples
