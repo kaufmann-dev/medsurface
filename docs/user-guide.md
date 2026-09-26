@@ -85,8 +85,8 @@ Selection without an ID is safe only in these cases:
 `list` prints a shell-safe `medsurface extract` hint for the automatic default,
 or a selector template when no default exists. IDs are deterministic for
 unchanged contents but local to one discovery result; run `list` again after
-files change. `list --json` reports the integer `id` and nests DICOM-specific
-fields under `dicom`.
+files change. `list --json FILE` writes the integer `id` of every volume and
+nests DICOM-specific fields under `dicom`.
 
 To fuse two volumes found under one directory, repeat the path and choose two
 different IDs:
@@ -305,7 +305,7 @@ along `--destep-axis` (default `z`). Vertices at or beyond the frozen
 coordinate never move, those at or beyond the full coordinate are fully faired,
 and a smooth ramp joins them. Their order selects the faired side. To choose
 values, read the surface's `bbox_min` and `bbox_max` from
-`medsurface validate model.stl --json`, then place the ramp with margin between
+`medsurface validate model.stl --json quality.json`, then place the ramp with margin between
 the rippled area and the detail you must keep:
 
 ```sh
@@ -382,13 +382,13 @@ medsurface labelmap extract body.nii.gz --split parts/ -o parts/body.stl
   A voxel keeps the label with the highest occupancy when that occupancy is
   above `0.5`. For a single label this is the ordinary union; where two labels
   touch, the boundary is split by their occupancies.
-- Without `--grid-mm`, the grid uses the finest input spacing. Memory stays at
-  two grid-sized arrays however many labels and inputs are fused.
+- The grid spacing is `--grid-mm` (default `0.4 mm`). Memory stays at two
+  grid-sized arrays however many labels and inputs are fused.
 - The output is `uint8`, or `uint16`/`uint32` when label IDs need it. NIfTI
   outputs carry the input label table (and `--label-names`) so `--split`
   names its files.
 - Without `--preserve-labels`, every selected label is foreground `1` and the
-  output is a binary union on a `0.4 mm` grid unless `--grid-mm` is given.
+  output is a binary union.
 
 ### Shared registration and grid
 
@@ -477,17 +477,17 @@ for exact behavior.
 spinner and elapsed time; redirected output receives persistent ANSI-free lines.
 No percentage is invented when processing libraries do not expose one.
 
-Use `--quiet` with processing commands to suppress normal progress. Warnings and
-errors remain visible.
+Use `--quiet` with any command except `presets` to suppress normal output.
+Warnings and errors remain visible.
 
-Programs driving `labelmap extract` or `labelmap fuse` can pass
-`--progress json` to receive JSON lines on stderr instead of the human display:
-`stage_start`/`stage_end` (with `seconds`), `label_start`/`label_end`/
-`label_failed` (with the label ID, position, and total), `combined_start`/
-`combined_end`, `status`, `warning`, and `error` events. The human summary on
-stdout is unchanged and can still be suppressed with `--quiet`. `list --json`, `validate --json`, and `repair --json`
-write machine-readable JSON to stdout. Conversion, extraction, and fusion use
-`--json FILE` for a separate report.
+Programs driving the CLI can pass `--progress json` to any command except
+`presets` to receive JSON lines on stderr instead of the human display:
+`status`, `stage_start`/`stage_end` (with `seconds`), `warning`, and `error`
+events, plus `label_start`/`label_end`/`label_failed` (with the label ID,
+position, and total) and `combined_start`/`combined_end` from the labelmap
+commands. The human summary on stdout is unchanged and can still be suppressed
+with `--quiet`. Every command that reports results takes `--json FILE` and
+writes the report to that file.
 
 Press `Ctrl+C` once to cancel. Temporary files are cleaned before control returns
 to the terminal. Native image or mesh work may delay cancellation until control
@@ -512,10 +512,10 @@ count, dimensions, and spacing/origin/direction within `1e-5`. Compression is
 also checked against the suffix. These checks establish faithful storage, not
 anatomical correctness.
 
-Conversion, extraction, and fusion accept `--json FILE`; validation and repair
-offer plain `--json` on stdout. Reports are written to temporary siblings and
+`list`, `convert`, `extract`, `fuse`, `validate`, `repair`, and the labelmap
+commands accept `--json FILE`. Reports are written to temporary siblings and
 atomically replaced. Output and report paths must differ and cannot overwrite
-any discovered input. Conversion and fusion make primary publication
+any discovered input. Conversion, fusion, and repair make primary publication
 transactional with a requested report: report failure restores an existing
 primary output or removes a newly created one.
 

@@ -189,7 +189,7 @@ medsurface labelmap fuse head.nii.gz neck.nii.gz chest.nii.gz \
 
 Per-label files are named from the label table TotalSegmentator embeds in NIfTI
 files, or from `--label-names names.json`. Programs can add `--progress json`
-for JSON-lines progress on stderr. See [Using an external
+to any command for JSON-lines progress on stderr. See [Using an external
 labelmap][labelmap-guide].
 
 ## Validate and repair

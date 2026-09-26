@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import typer
+from click.core import ParameterSource
 from rich import box
 from rich.console import Console, Group
 from rich.panel import Panel
@@ -77,10 +78,11 @@ _DESTEP_OPTION = typer.Option(
     None,
     "--destep",
     help="Final masked fairing that removes broad stair-step ripples: auto-detected "
-    "smooth regions, all vertices, or an axis band (default: off).",
+    "smooth regions, all vertices, or an axis band.",
+    show_default="off",
 )
 _DESTEP_AXIS_OPTION = typer.Option(
-    None, "--destep-axis", help="Axis of the --destep band mask (default: z)."
+    AxisChoice.Z, "--destep-axis", help="Axis of the --destep band mask."
 )
 _DESTEP_FULL_OPTION = typer.Option(
     None,
@@ -93,44 +95,48 @@ _DESTEP_FROZEN_OPTION = typer.Option(
     help="Model coordinate in mm at and beyond which the band never moves.",
 )
 _DESTEP_ITERS_OPTION = typer.Option(
-    None,
+    defaults.DEFAULT_DESTEP_ITERS,
     "--destep-iters",
-    help="Taubin fairing iterations for --destep (default: %d)."
-    % defaults.DEFAULT_DESTEP_ITERS,
+    help="Taubin fairing iterations for --destep.",
 )
 _DESTEP_MAX_OPTION = typer.Option(
-    None,
+    defaults.DEFAULT_DESTEP_MAX_MM,
     "--destep-max-mm",
-    help="Largest per-vertex displacement --destep may introduce (default: %.1f mm)."
-    % defaults.DEFAULT_DESTEP_MAX_MM,
+    help="Largest per-vertex displacement in mm that --destep may introduce.",
 )
+
+
+def _given(ctx: typer.Context, parameter: str) -> bool:
+    """Whether the user passed an option rather than relying on its default."""
+    return ctx.get_parameter_source(parameter) is not ParameterSource.DEFAULT
 
 
 def _destep_settings(
+    ctx: typer.Context,
     region: DestepChoice | None,
-    axis: AxisChoice | None,
+    axis: AxisChoice,
     full_mm: float | None,
     frozen_mm: float | None,
-    iterations: int | None,
-    max_mm: float | None,
+    iterations: int,
+    max_mm: float,
 ) -> presets_mod.DestepSettings | None:
     """Translate stair-step options into settings or exit with a usage error."""
     band_options = [
         name
-        for name, value in (
-            ("--destep-axis", axis),
-            ("--destep-full-mm", full_mm),
-            ("--destep-frozen-mm", frozen_mm),
+        for name, given in (
+            ("--destep-axis", _given(ctx, "destep_axis")),
+            ("--destep-full-mm", full_mm is not None),
+            ("--destep-frozen-mm", frozen_mm is not None),
         )
-        if value is not None
+        if given
     ]
     tuning_options = [
         name
-        for name, value in (
-            ("--destep-iters", iterations),
-            ("--destep-max-mm", max_mm),
+        for name, parameter in (
+            ("--destep-iters", "destep_iters"),
+            ("--destep-max-mm", "destep_max_mm"),
         )
-        if value is not None
+        if _given(ctx, parameter)
     ]
 
     def require(options: list[str], requirement: str) -> None:
@@ -154,19 +160,15 @@ def _destep_settings(
         if full_mm == frozen_mm:
             _error("--destep-full-mm and --destep-frozen-mm must differ")
             raise typer.Exit(2)
-    if iterations is not None and iterations < 1:
+    if iterations < 1:
         _error("--destep-iters must be at least 1")
         raise typer.Exit(2)
     _validate_processing_numbers(nonnegative=[], positive=(("--destep-max-mm", max_mm),))
     return presets_mod.DestepSettings(
         region=region.value,
-        iterations=(
-            defaults.DEFAULT_DESTEP_ITERS if iterations is None else iterations
-        ),
-        max_displacement_mm=(
-            defaults.DEFAULT_DESTEP_MAX_MM if max_mm is None else float(max_mm)
-        ),
-        axis=axis.value if axis is not None else "z",
+        iterations=iterations,
+        max_displacement_mm=float(max_mm),
+        axis=axis.value,
         full_mm=full_mm,
         frozen_mm=frozen_mm,
     )
@@ -177,7 +179,7 @@ stderr_console = Console(stderr=True, highlight=False, markup=False)
 
 app = typer.Typer(
     add_completion=False,
-    help="Convert volumes, fuse binary labelmaps, and extract surface meshes.",
+    help="Convert volumes, fuse scans or labelmaps, and extract surface meshes.",
     invoke_without_command=True,
     no_args_is_help=False,
     pretty_exceptions_show_locals=False,
@@ -211,7 +213,7 @@ def root(
         help="Show version and exit.",
     ),
 ) -> None:
-    """Convert volumes, fuse binary labelmaps, and extract surface meshes."""
+    """Convert volumes, fuse scans or labelmaps, and extract surface meshes."""
     if ctx.invoked_subcommand is None:
         stdout_console.print(ctx.get_help())
 
@@ -410,6 +412,57 @@ def _error(message: object) -> None:
         progress.diagnostic("error", message)
     else:
         _print_diagnostic(stderr_console, "error", message)
+
+
+class ProgressChoice(str, Enum):
+    """Progress formats accepted by ``--progress``."""
+
+    HUMAN = "human"
+    JSON = "json"
+
+
+_PROGRESS_OPTION = typer.Option(
+    ProgressChoice.HUMAN,
+    "--progress",
+    help="Progress format: human-readable stages, or JSON lines on stderr for "
+    "other programs (status, stage, label, warning, and error events).",
+)
+
+
+class _JsonProgress(_ProgressDisplay):
+    """JSON-lines progress on stderr for programs driving the CLI."""
+
+    def __init__(self, initial: str) -> None:
+        super().__init__(False, initial)
+
+    def __enter__(self):
+        super().__enter__()
+        self.update(self.initial)
+        return self
+
+    @staticmethod
+    def emit(event: dict[str, Any]) -> None:
+        sys.stderr.write(json.dumps(event, default=str) + "\n")
+        sys.stderr.flush()
+
+    def update(self, message: str) -> None:
+        self.emit({"event": "status", "message": str(message).strip()})
+
+    def log(self, message: str) -> None:
+        return None
+
+    def diagnostic(self, kind: str, message: object) -> None:
+        self.emit({"event": kind, "message": str(message)})
+
+
+def _progress_display(choice: ProgressChoice, quiet: bool, initial: str) -> _ProgressDisplay:
+    if choice is ProgressChoice.JSON:
+        return _JsonProgress(initial)
+    return _ProgressDisplay(not quiet, initial)
+
+
+def _progress_sink(progress: _ProgressDisplay):
+    return progress.emit if isinstance(progress, _JsonProgress) else None
 
 
 def _quality_status(report: dict[str, Any] | None) -> int:
@@ -859,23 +912,32 @@ def list_volumes(
         readable=True,
         help="Volume file or directory tree containing supported volumes.",
     ),
-    json_output: bool = typer.Option(
-        False,
-        "--json",
-        help="Write one plain JSON array to stdout.",
+    json_file: Path | None = typer.Option(
+        None, "--json", help="Write the volume list to this JSON file."
+    ),
+    progress_format: ProgressChoice = _PROGRESS_OPTION,
+    quiet: bool = typer.Option(
+        False, "-q", "--quiet", help="Suppress the volume table and progress output."
     ),
 ) -> None:
     """Show every supported volume under an input path."""
-    with _ProgressDisplay(not json_output, "Discovering volumes ..."):
+    progress = _progress_display(progress_format, quiet, "Discovering volumes ...")
+    with progress:
         found = _discover(input_path)
-    if not found:
-        _error("no supported volumes found under %s" % input_path)
-        raise typer.Exit(1)
+        if not found:
+            _error("no supported volumes found under %s" % input_path)
+            raise typer.Exit(1)
+        if json_file is not None:
+            try:
+                _protect_output_paths(found, json_file, None)
+            except ValueError as exc:
+                _error(exc)
+                raise typer.Exit(2) from None
 
     from . import catalog
 
     recommended = catalog.recommended(found)
-    if json_output:
+    if json_file is not None:
         payload = [
             {
                 "id": candidate.id,
@@ -917,7 +979,12 @@ def list_volumes(
             }
             for candidate in found
         ]
-        print(json.dumps(payload, indent=2))
+        try:
+            _write_json_file(json_file, payload)
+        except OSError as exc:
+            _error("cannot write JSON report %s: %s" % (json_file, exc))
+            raise typer.Exit(1) from None
+    if quiet:
         return
 
     stdout_console.print(_volume_table(found, recommended))
@@ -950,6 +1017,8 @@ def list_volumes(
                 "out.stl",
             ],
         )
+    if json_file is not None:
+        _success("wrote %s" % json_file)
 
 
 @app.command()
@@ -1028,6 +1097,7 @@ def convert(
         "--volume",
         min=1,
         help="Integer volume ID displayed by 'medsurface list'.",
+        show_default="automatic",
     ),
     strip_metadata: bool = typer.Option(
         False,
@@ -1042,6 +1112,7 @@ def convert(
     json_file: Path | None = typer.Option(
         None, "--json", help="Write results and provenance to this JSON file."
     ),
+    progress_format: ProgressChoice = _PROGRESS_OPTION,
     quiet: bool = typer.Option(
         False, "-q", "--quiet", help="Suppress normal progress output."
     ),
@@ -1054,7 +1125,7 @@ def convert(
         emitted_warnings.append(message)
         _warn(message)
 
-    progress = _ProgressDisplay(not quiet, "Discovering volumes ...")
+    progress = _progress_display(progress_format, quiet, "Discovering volumes ...")
     with progress:
         found = _discover(input_path)
         if not found:
@@ -1090,6 +1161,7 @@ def convert(
                     allow_large_volume=allow_large_volume,
                     log=progress.log,
                     warn=emit_warning,
+                    progress=_progress_sink(progress),
                 )
                 if json_file is not None:
                     payload = {
@@ -1138,6 +1210,7 @@ def convert(
 
 @app.command()
 def extract(
+    ctx: typer.Context,
     input_path: Path = typer.Argument(
         ...,
         exists=True,
@@ -1154,24 +1227,30 @@ def extract(
         "--volume",
         min=1,
         help="Integer volume ID displayed by 'medsurface list'.",
+        show_default="automatic",
     ),
     preset: PresetChoice = typer.Option(PresetChoice.BONE, "--preset"),
     threshold: str | None = typer.Option(
         None,
         "--threshold",
         help="Intensity (HU for CT) or 'auto' for Otsu.",
+        show_default="preset",
     ),
     median_mm: float | None = typer.Option(
-        None, "--median-mm", help="Despeckle kernel extent, mm."
+        None, "--median-mm", help="Despeckle kernel extent, mm.",
+        show_default="preset",
     ),
     closing_mm: float | None = typer.Option(
-        None, "--closing-mm", help="Pore-sealing kernel extent, mm."
+        None, "--closing-mm", help="Pore-sealing kernel extent, mm.",
+        show_default="preset",
     ),
     opening_mm: float | None = typer.Option(
-        None, "--opening-mm", help="Bridge-breaking kernel extent, mm."
+        None, "--opening-mm", help="Bridge-breaking kernel extent, mm.",
+        show_default="preset",
     ),
     min_island_mm3: float | None = typer.Option(
-        None, "--min-island-mm3", help="Drop blobs smaller than this."
+        None, "--min-island-mm3", help="Drop blobs smaller than this.",
+        show_default="preset",
     ),
     all_islands: bool = typer.Option(
         False, "--all-islands", help="Keep every labelmap island."
@@ -1179,39 +1258,45 @@ def extract(
     components: ComponentChoice | None = typer.Option(
         None,
         "--components",
-        help="Surface components to keep (default: preset).",
+        help="Surface components to keep.",
+        show_default="preset",
     ),
     resample_mm: float | None = typer.Option(
         None,
         "--resample-mm",
         help="Isotropic surface-grid voxel size in mm (0 = native).",
+        show_default="preset",
     ),
     mask_smooth_mm: float | None = typer.Option(
         None,
         "--mask-smooth-mm",
         help="Gaussian sigma in physical mm applied to the segmented mask before meshing (0 = off).",
+        show_default="preset",
     ),
     surface_smooth_iters: int | None = typer.Option(
         None,
         "--mesh-smooth-iters",
         help="Topology-preserving surface relaxation iterations after meshing (0 = off).",
+        show_default="preset",
     ),
     simplify_error_mm: float | None = typer.Option(
         None,
         "--simplify-error-mm",
         help="MeshLib estimated surface-deviation/QEM limit in model mm, not a certified Hausdorff bound (0 = off).",
+        show_default="preset",
     ),
     post_surface_smooth_iters: int | None = typer.Option(
         None,
         "--post-mesh-smooth-iters",
         help="Final topology-preserving surface relaxation iterations after simplification (0 = off).",
+        show_default="preset",
     ),
     destep: DestepChoice | None = _DESTEP_OPTION,
-    destep_axis: AxisChoice | None = _DESTEP_AXIS_OPTION,
+    destep_axis: AxisChoice = _DESTEP_AXIS_OPTION,
     destep_full_mm: float | None = _DESTEP_FULL_OPTION,
     destep_frozen_mm: float | None = _DESTEP_FROZEN_OPTION,
-    destep_iters: int | None = _DESTEP_ITERS_OPTION,
-    destep_max_mm: float | None = _DESTEP_MAX_OPTION,
+    destep_iters: int = _DESTEP_ITERS_OPTION,
+    destep_max_mm: float = _DESTEP_MAX_OPTION,
     no_cap: bool = typer.Option(
         False, "--no-cap", help="Do not close anatomy at the field-of-view boundary."
     ),
@@ -1223,6 +1308,7 @@ def extract(
     json_file: Path | None = typer.Option(
         None, "--json", help="Write results and provenance to this JSON file."
     ),
+    progress_format: ProgressChoice = _PROGRESS_OPTION,
     quiet: bool = typer.Option(
         False, "-q", "--quiet", help="Suppress normal progress output."
     ),
@@ -1244,6 +1330,7 @@ def extract(
         ],
     )
     destep_settings = _destep_settings(
+        ctx,
         destep,
         destep_axis,
         destep_full_mm,
@@ -1257,7 +1344,7 @@ def extract(
         emitted_warnings.append(message)
         _warn(message)
 
-    progress = _ProgressDisplay(not quiet, "Discovering volumes ...")
+    progress = _progress_display(progress_format, quiet, "Discovering volumes ...")
     with progress:
         found = _discover(input_path)
         if not found:
@@ -1305,6 +1392,7 @@ def extract(
                 allow_large_volume=allow_large_volume,
                 log=progress.log,
                 warn=emit_warning,
+                progress=_progress_sink(progress),
             )
         except ValueError as exc:
             _error(exc)
@@ -1391,54 +1479,9 @@ def _load_label_names(path: Path | None) -> dict[int, str] | None:
         raise typer.Exit(2) from None
 
 
-class ProgressChoice(str, Enum):
-    """Progress formats accepted by ``--progress``."""
-
-    HUMAN = "human"
-    JSON = "json"
-
-
-_PROGRESS_OPTION = typer.Option(
-    ProgressChoice.HUMAN,
-    "--progress",
-    help="Progress format: human-readable stages, or JSON lines on stderr for "
-    "other programs (stage, label, warning, and error events).",
-)
-
-
-class _JsonProgress(_ProgressDisplay):
-    """JSON-lines progress on stderr for programs driving the CLI."""
-
-    def __init__(self) -> None:
-        super().__init__(False, "")
-
-    @staticmethod
-    def emit(event: dict[str, Any]) -> None:
-        sys.stderr.write(json.dumps(event, default=str) + "\n")
-        sys.stderr.flush()
-
-    def update(self, message: str) -> None:
-        self.emit({"event": "status", "message": str(message).strip()})
-
-    def log(self, message: str) -> None:
-        return None
-
-    def diagnostic(self, kind: str, message: object) -> None:
-        self.emit({"event": kind, "message": str(message)})
-
-
-def _progress_display(choice: ProgressChoice, quiet: bool, initial: str) -> _ProgressDisplay:
-    if choice is ProgressChoice.JSON:
-        return _JsonProgress()
-    return _ProgressDisplay(not quiet, initial)
-
-
-def _progress_sink(progress: _ProgressDisplay):
-    return progress.emit if isinstance(progress, _JsonProgress) else None
-
-
 @labelmap_app.command("extract")
 def extract_labelmap(
+    ctx: typer.Context,
     input_path: Path = typer.Argument(
         ...,
         exists=True,
@@ -1457,7 +1500,8 @@ def extract_labelmap(
     labels: str | None = typer.Option(
         None,
         "--labels",
-        help="Only use these label IDs, e.g. 3,7,12 or 10-14 (default: every nonzero label).",
+        help="Only use these label IDs, e.g. 3,7,12 or 10-14.",
+        show_default="every nonzero label",
     ),
     split: Path | None = typer.Option(
         None,
@@ -1472,11 +1516,11 @@ def extract_labelmap(
         exists=True,
         dir_okay=False,
         readable=True,
-        help='JSON object {"5": "liver"} naming --split files (default: the '
-        "label table embedded in a NIfTI input, if any).",
+        help='JSON object {"5": "liver"} naming --split files.',
+        show_default="label table embedded in a NIfTI input",
     ),
-    resample_mm: float | None = typer.Option(
-        None,
+    resample_mm: float = typer.Option(
+        0.0,
         "--resample-mm",
         help="Isotropic surface-grid voxel size in mm (0 = native).",
     ),
@@ -1490,8 +1534,8 @@ def extract_labelmap(
         "--mesh-smooth-iters",
         help="Topology-preserving surface relaxation iterations after meshing (0 = off).",
     ),
-    simplify_error_mm: float | None = typer.Option(
-        None,
+    simplify_error_mm: float = typer.Option(
+        defaults.DEFAULT_LABELMAP_SIMPLIFY_ERROR_MM,
         "--simplify-error-mm",
         help="MeshLib estimated surface-deviation/QEM limit in model mm (0 = off).",
     ),
@@ -1501,11 +1545,11 @@ def extract_labelmap(
         help="Final topology-preserving surface relaxation iterations after simplification (0 = off).",
     ),
     destep: DestepChoice | None = _DESTEP_OPTION,
-    destep_axis: AxisChoice | None = _DESTEP_AXIS_OPTION,
+    destep_axis: AxisChoice = _DESTEP_AXIS_OPTION,
     destep_full_mm: float | None = _DESTEP_FULL_OPTION,
     destep_frozen_mm: float | None = _DESTEP_FROZEN_OPTION,
-    destep_iters: int | None = _DESTEP_ITERS_OPTION,
-    destep_max_mm: float | None = _DESTEP_MAX_OPTION,
+    destep_iters: int = _DESTEP_ITERS_OPTION,
+    destep_max_mm: float = _DESTEP_MAX_OPTION,
     components: ComponentChoice = typer.Option(
         ComponentChoice.ALL,
         "--components",
@@ -1548,6 +1592,7 @@ def extract_labelmap(
         ],
     )
     destep_settings = _destep_settings(
+        ctx,
         destep,
         destep_axis,
         destep_full_mm,
@@ -1834,7 +1879,8 @@ def fuse_labelmaps(
     labels: str | None = typer.Option(
         None,
         "--labels",
-        help="Only fuse these label IDs, e.g. 3,7,12 or 10-14 (default: every nonzero label).",
+        help="Only fuse these label IDs, e.g. 3,7,12 or 10-14.",
+        show_default="every nonzero label",
     ),
     label_names: Path | None = typer.Option(
         None,
@@ -1843,13 +1889,13 @@ def fuse_labelmaps(
         dir_okay=False,
         readable=True,
         help='JSON object {"5": "liver"} of names embedded in a NIfTI output '
-        "with --preserve-labels (default: names embedded in the inputs).",
+        "with --preserve-labels.",
+        show_default="label tables embedded in the inputs",
     ),
-    grid_mm: float | None = typer.Option(
-        None,
+    grid_mm: float = typer.Option(
+        defaults.DEFAULT_FUSION_GRID_MM,
         "--grid-mm",
-        help="Isotropic fused-grid voxel size in mm (default: %.1f for a binary union, "
-        "the finest input spacing with --preserve-labels)." % defaults.DEFAULT_FUSION_GRID_MM,
+        help="Isotropic fused-grid voxel size in mm.",
     ),
     force: bool = typer.Option(
         False, "--force", help="Override registration-quality gates."
@@ -2005,35 +2051,43 @@ def fuse(
         "--fixed-volume",
         min=1,
         help="Integer fixed-volume ID displayed by 'medsurface list'.",
+        show_default="automatic",
     ),
     moving_volume: int | None = typer.Option(
         None,
         "--moving-volume",
         min=1,
         help="Integer moving-volume ID displayed by 'medsurface list'.",
+        show_default="automatic",
     ),
     preset: PresetChoice = typer.Option(PresetChoice.BONE, "--preset"),
     fixed_threshold: str | None = typer.Option(
         None,
         "--fixed-threshold",
         help="Fixed stored intensity or 'auto' for Otsu.",
+        show_default="preset",
     ),
     moving_threshold: str | None = typer.Option(
         None,
         "--moving-threshold",
         help="Moving stored intensity or 'auto' for Otsu.",
+        show_default="preset",
     ),
     median_mm: float | None = typer.Option(
-        None, "--median-mm", help="Despeckle kernel extent, mm."
+        None, "--median-mm", help="Despeckle kernel extent, mm.",
+        show_default="preset",
     ),
     closing_mm: float | None = typer.Option(
-        None, "--closing-mm", help="Pore-sealing kernel extent, mm."
+        None, "--closing-mm", help="Pore-sealing kernel extent, mm.",
+        show_default="preset",
     ),
     opening_mm: float | None = typer.Option(
-        None, "--opening-mm", help="Bridge-breaking kernel extent, mm."
+        None, "--opening-mm", help="Bridge-breaking kernel extent, mm.",
+        show_default="preset",
     ),
     min_island_mm3: float | None = typer.Option(
-        None, "--min-island-mm3", help="Drop blobs smaller than this."
+        None, "--min-island-mm3", help="Drop blobs smaller than this.",
+        show_default="preset",
     ),
     all_islands: bool = typer.Option(
         False, "--all-islands", help="Keep every labelmap island."
@@ -2056,6 +2110,7 @@ def fuse(
     json_file: Path | None = typer.Option(
         None, "--json", help="Write results and provenance to this JSON file."
     ),
+    progress_format: ProgressChoice = _PROGRESS_OPTION,
     quiet: bool = typer.Option(
         False, "-q", "--quiet", help="Suppress normal progress output."
     ),
@@ -2079,7 +2134,7 @@ def fuse(
         emitted_warnings.append(message)
         _warn(message)
 
-    progress = _ProgressDisplay(not quiet, "Discovering fixed volumes ...")
+    progress = _progress_display(progress_format, quiet, "Discovering fixed volumes ...")
     with progress:
         fixed_found = _discover(fixed_input)
         if fixed_input.resolve() == moving_input.resolve():
@@ -2140,6 +2195,7 @@ def fuse(
                     allow_large_volume=allow_large_volume,
                     log=progress.log,
                     warn=emit_warning,
+                    progress=_progress_sink(progress),
                 )
                 if json_file is not None:
                     payload = {
@@ -2179,13 +2235,23 @@ def validate(
         readable=True,
         help="Mesh file to inspect.",
     ),
-    json_output: bool = typer.Option(
-        False, "--json", help="Write one plain JSON object to stdout."
+    json_file: Path | None = typer.Option(
+        None, "--json", help="Write the quality report to this JSON file."
+    ),
+    progress_format: ProgressChoice = _PROGRESS_OPTION,
+    quiet: bool = typer.Option(
+        False, "-q", "--quiet", help="Suppress the quality report and progress output."
     ),
 ) -> None:
     """Report mesh quality without changing the file."""
     _validate_mesh_input(mesh)
-    progress = _ProgressDisplay(not json_output, "Loading validation engine ...")
+    if json_file is not None:
+        from .paths import same_file
+
+        if same_file(json_file, mesh):
+            _error("JSON report must not overwrite input file %s" % mesh)
+            raise typer.Exit(2)
+    progress = _progress_display(progress_format, quiet, "Loading validation engine ...")
     with progress:
         from . import validate as validate_mod
 
@@ -2195,11 +2261,18 @@ def validate(
         except (OSError, RuntimeError, ValueError) as exc:
             _error("cannot validate %s: %s" % (mesh, exc))
             raise typer.Exit(1) from None
-    if json_output:
-        print(json.dumps(report, indent=2))
-    else:
+        if json_file is not None:
+            progress.update("Writing JSON report ...")
+            try:
+                _write_json_file(json_file, report)
+            except OSError as exc:
+                _error("cannot write JSON report %s: %s" % (json_file, exc))
+                raise typer.Exit(1) from None
+    if not quiet:
         stdout_console.print(_plain(mesh, "bold"))
         _print_quality(report)
+        if json_file is not None:
+            _success("wrote %s" % json_file)
     _exit_for_quality(report)
 
 
@@ -2214,9 +2287,10 @@ def repair(
         help="Mesh file to repair.",
     ),
     output: Path = typer.Option(..., "-o", "--output", help="New repaired mesh file."),
-    json_output: bool = typer.Option(
-        False, "--json", help="Write one plain JSON object to stdout."
+    json_file: Path | None = typer.Option(
+        None, "--json", help="Write repair statistics and quality to this JSON file."
     ),
+    progress_format: ProgressChoice = _PROGRESS_OPTION,
     quiet: bool = typer.Option(
         False, "-q", "--quiet", help="Suppress normal progress output."
     ),
@@ -2224,29 +2298,53 @@ def repair(
     """Make a non-watertight mesh watertight."""
     _validate_mesh_input(mesh)
     _validate_mesh_output(output)
-    progress = _ProgressDisplay(
-        not quiet and not json_output,
-        "Loading repair engine ...",
-    )
+    from .paths import protect_outputs
+
+    try:
+        protect_outputs([mesh], output, json_file)
+    except ValueError as exc:
+        _error(exc)
+        raise typer.Exit(2) from None
+    progress = _progress_display(progress_format, quiet, "Loading repair engine ...")
     with progress:
         from . import repair as repair_mod
 
-        progress.update("Loading mesh for repair ...")
+        transaction = (
+            _restore_output_on_failure(output)
+            if json_file is not None
+            else nullcontext()
+        )
         try:
-            result = repair_mod.repair(str(mesh), str(output), log=progress.log)
+            with transaction:
+                result = repair_mod.repair(
+                    str(mesh),
+                    str(output),
+                    log=progress.log,
+                    progress=_progress_sink(progress),
+                )
+                if json_file is not None:
+                    progress.update("Writing JSON report ...")
+                    try:
+                        _write_json_file(
+                            json_file,
+                            {
+                                "output": str(output),
+                                "repair": result.stats,
+                                "quality": result.quality,
+                            },
+                        )
+                    except OSError as exc:
+                        _error("cannot write JSON report %s: %s" % (json_file, exc))
+                        raise typer.Exit(1) from None
+        except typer.Exit:
+            raise
         except (OSError, RuntimeError, ValueError) as exc:
             _error("cannot repair %s: %s" % (mesh, exc))
             raise typer.Exit(1) from None
 
-        stats = result.stats
-        report = result.quality
-
-    if json_output:
-        print(
-            json.dumps(
-                {"output": str(output), "repair": stats, "quality": report}, indent=2
-            )
-        )
-    elif not quiet:
+    report = result.quality
+    if not quiet:
         _success("wrote %s" % output)
         _print_quality(report)
+        if json_file is not None:
+            _success("wrote %s" % json_file)

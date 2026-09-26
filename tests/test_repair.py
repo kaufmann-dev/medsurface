@@ -82,20 +82,22 @@ def test_repair_announces_mesh_loading_before_it_starts(monkeypatch):
         repair.repair("input.stl", "output.stl", log=messages.append)
 
 
-def test_repair_json_mode_writes_only_json(tmp_path):
+def test_repair_json_report_is_written_to_a_file(tmp_path):
     vertices, faces = box()
     source = tmp_path / "open.stl"
     output = tmp_path / "fixed.stl"
     write(source, (vertices, faces[2:]))
 
+    report = tmp_path / "repair.json"
     result = CliRunner().invoke(
         cli.app,
-        ["repair", str(source), "-o", str(output), "--json"],
+        ["repair", str(source), "-o", str(output), "--json", str(report), "-q"],
         prog_name="medsurface",
     )
     assert result.exit_code == 0
-    payload = json.loads(result.stdout)
+    payload = json.loads(report.read_text())
 
+    assert result.stdout == ""
     assert result.stderr == ""
     assert payload["output"] == str(output)
     assert payload["repair"]["holes_filled"] > 0

@@ -19,6 +19,7 @@ from .defaults import DEFAULT_FUSION_GRID_MM, MAX_VOXELS
 from .outputs import volume_output
 from .presets import Preset, validate_segmentation
 from .registration import RegistrationResult
+from .stages import ProgressSink, stage_runner
 
 Logger = Callable[[str], None]
 
@@ -336,6 +337,7 @@ def fuse_masks(
     allow_large_volume: bool = False,
     log: Logger | None = None,
     warn: Logger | None = None,
+    progress: ProgressSink | None = None,
 ) -> FusionResult:
     """Register, union, quantize, and publish two binary foreground masks."""
     output = volume_output(output_path)
@@ -349,12 +351,7 @@ def fuse_masks(
         if log:
             log(message)
 
-    def step(message: str, function):
-        say("%s ..." % message)
-        before = time.time()
-        value = function()
-        say("  %-36s %6.1fs" % (message, time.time() - before))
-        return value
+    step = stage_runner(say, progress, 36)
 
     warnings: list[str] = []
 
@@ -363,16 +360,19 @@ def fuse_masks(
         if warn:
             warn(message)
 
-    say("registering ...")
-    try:
-        registered = registration.rigid_register(
-            fixed_mask,
-            moving_mask,
-            log=lambda message: say("  " + message),
-        )
-    except registration.RegistrationError as exc:
-        raise FusionError(str(exc)) from None
-    check_registration(registered, force=force)
+    def register() -> RegistrationResult:
+        try:
+            registered = registration.rigid_register(
+                fixed_mask,
+                moving_mask,
+                log=lambda message: say("  " + message),
+            )
+        except registration.RegistrationError as exc:
+            raise FusionError(str(exc)) from None
+        check_registration(registered, force=force)
+        return registered
+
+    registered = step("register moving to fixed", register)
     for line in registered.summary().splitlines():
         say("  " + line.strip())
 
@@ -528,6 +528,7 @@ def fuse(
     allow_large_volume: bool = False,
     log: Logger | None = None,
     warn: Logger | None = None,
+    progress: ProgressSink | None = None,
 ) -> FusionResult:
     """Segment two intensity volumes independently and fuse their foreground."""
     volume_output(output_path)
@@ -548,12 +549,7 @@ def fuse(
         if log:
             log(message)
 
-    def step(message: str, function):
-        say("%s ..." % message)
-        before = time.time()
-        value = function()
-        say("  %-36s %6.1fs" % (message, time.time() - before))
-        return value
+    step = stage_runner(say, progress, 36)
 
     warnings: list[str] = []
 
@@ -628,6 +624,7 @@ def fuse(
         allow_large_volume=allow_large_volume,
         log=say,
         warn=warn,
+        progress=progress,
     )
     result.seconds = time.time() - started
     result.warnings = warnings + result.warnings

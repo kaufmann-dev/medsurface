@@ -16,6 +16,7 @@ import SimpleITK as sitk
 from .catalog import DicomSource, FileSource, VolumeCandidate, validate_image
 from .defaults import MAX_VOXELS, MIN_VOLUME_AXIS_VOXELS
 from .outputs import VolumeOutput, volume_output
+from .stages import ProgressSink, stage_runner
 
 
 @dataclass
@@ -480,6 +481,7 @@ def convert(
     allow_large_volume: bool = False,
     log: Callable[[str], None] | None = None,
     warn: Callable[[str], None] | None = None,
+    progress: ProgressSink | None = None,
 ) -> ConversionResult:
     """Preserve one selected image while changing only its storage format."""
     output = volume_output(output_path)
@@ -491,12 +493,7 @@ def convert(
         if log:
             log(message)
 
-    def step(message: str, function):
-        say("%s ..." % message)
-        before = time.time()
-        value = function()
-        say("  %-34s %6.1fs" % (message, time.time() - before))
-        return value
+    step = stage_runner(say, progress, 34)
 
     warnings: list[str] = []
 
