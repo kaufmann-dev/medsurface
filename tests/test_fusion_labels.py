@@ -200,18 +200,10 @@ def test_cli_fuses_three_inputs_with_preserved_labels(tmp_path):
     assert len(payload["provenance"]["registrations"]) == 2
 
 
-def test_cli_two_inputs_without_flags_keep_the_binary_contract(tmp_path, monkeypatch):
+def test_cli_two_inputs_without_flags_write_a_binary_union(tmp_path):
     body = _body()
     _write(tmp_path / "a.nii.gz", body[0:64], 0)
     _write(tmp_path / "b.nii.gz", body[24:96], 24)
-    called: dict = {}
-    original = labelmap.fuse
-
-    def spy(**kwargs):
-        called.update(kwargs)
-        return original(**kwargs)
-
-    monkeypatch.setattr(labelmap, "fuse", spy)
     result = runner.invoke(
         cli.app,
         [
@@ -227,7 +219,6 @@ def test_cli_two_inputs_without_flags_keep_the_binary_contract(tmp_path, monkeyp
         prog_name="medsurface",
     )
     assert result.exit_code == 0, result.output
-    assert called["grid_mm"] == pytest.approx(1.0)
     stored = sitk.GetArrayFromImage(sitk.ReadImage(str(tmp_path / "binary.nrrd")))
     assert set(np.unique(stored)) == {0, 1}
 
@@ -256,5 +247,5 @@ def test_cli_json_progress_streams_fusion_events(tmp_path):
     assert result.exit_code == 0, result.output
     events = [json.loads(line) for line in result.stderr.splitlines() if line.strip()]
     stages = {event.get("stage") for event in events if event["event"] == "stage_end"}
-    assert "registering" in stages
+    assert "register moving 1 to fixed" in stages
     assert any(event["event"] == "warning" for event in events)

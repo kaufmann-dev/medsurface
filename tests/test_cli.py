@@ -191,6 +191,25 @@ def _fusion_result(output: str, *, warnings_: list[str] | None = None):
     )
 
 
+def _label_fusion_result(output: str, *, warnings_: list[str] | None = None):
+    return SimpleNamespace(
+        output_path=output,
+        output_format="NRRD",
+        compression="gzip",
+        pixel_type="uint8",
+        preserve_labels=False,
+        grid_mm=0.8,
+        grid_size=(10, 20, 30),
+        grid_origin_mm=(1.0, 2.0, 3.0),
+        grid_direction=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+        labels={1: {"name": None, "voxels": 293, "volume_mm3": 150.0}},
+        volume_fused_mm3=150.0,
+        seconds=2.5,
+        warnings=warnings_ or [],
+        provenance={"output": {"kind": "binary labelmap"}},
+    )
+
+
 def _run_cli_in_clean_interpreter(argv):
     code = """
 import json
@@ -1863,15 +1882,15 @@ def test_labelmap_fuse_accepts_flags_and_writes_generic_json(tmp_path, monkeypat
     monkeypatch.setattr(cli, "_select_labelmap", select)
     from medsurface import labelmap as labelmap_mod
 
-    def fake_fuse(**kwargs):
-        captured.update(kwargs)
+    def fake_fuse(fixed_candidate, movings, output_path, **kwargs):
+        captured.update(kwargs, fixed=fixed_candidate, movings=movings)
         kwargs["warn"]("rigid anatomy warning")
-        return _fusion_result(
-            str(output),
+        return _label_fusion_result(
+            output_path,
             warnings_=["rigid anatomy warning"],
         )
 
-    monkeypatch.setattr(labelmap_mod, "fuse", fake_fuse)
+    monkeypatch.setattr(labelmap_mod, "fuse_labels", fake_fuse)
     result = runner.invoke(
         cli.app,
         [
@@ -1896,7 +1915,8 @@ def test_labelmap_fuse_accepts_flags_and_writes_generic_json(tmp_path, monkeypat
     assert result.stdout == ""
     assert result.stderr.count("rigid anatomy warning") == 1
     assert captured["fixed"] is fixed
-    assert captured["moving"] is moving
+    assert captured["movings"] == [moving]
+    assert not captured["preserve_labels"]
     assert captured["grid_mm"] == pytest.approx(0.7)
     assert captured["force"]
     assert captured["allow_large_volume"]
@@ -1904,9 +1924,10 @@ def test_labelmap_fuse_accepts_flags_and_writes_generic_json(tmp_path, monkeypat
     assert payload["result"]["grid_mm"] == pytest.approx(0.8)
     assert payload["result"]["format"] == "NRRD"
     assert payload["result"]["compression"] == "gzip"
-    assert payload["result"]["foreground_fixed_voxels"] == 195
-    assert payload["result"]["foreground_moving_voxels"] == 215
-    assert payload["result"]["foreground_fused_voxels"] == 293
+    assert payload["result"]["labels"] == {
+        "1": {"name": None, "voxels": 293, "volume_mm3": 150.0}
+    }
+    assert payload["result"]["volume_fused_mm3"] == pytest.approx(150.0)
     assert payload["result"]["grid_origin_mm"] == [1.0, 2.0, 3.0]
     assert "quality" not in payload
     assert "triangles" not in payload["result"]
@@ -1931,10 +1952,10 @@ def test_labelmap_fuse_prints_shell_safe_extract_hint(tmp_path, monkeypatch):
     )
     from medsurface import labelmap as labelmap_mod
 
-    def fake_fuse(**_kwargs):
-        return _fusion_result(str(output))
+    def fake_fuse(_fixed, _movings, output_path, **_kwargs):
+        return _label_fusion_result(output_path)
 
-    monkeypatch.setattr(labelmap_mod, "fuse", fake_fuse)
+    monkeypatch.setattr(labelmap_mod, "fuse_labels", fake_fuse)
     result = runner.invoke(
         cli.app,
         [
@@ -1949,7 +1970,7 @@ def test_labelmap_fuse_prints_shell_safe_extract_hint(tmp_path, monkeypatch):
     )
 
     assert result.exit_code == 0, result.output
-    assert "foreground" in result.stdout
+    assert "1 label(s)" in result.stdout
     assert "Mesh quality" not in result.stdout
     assert "triangles" not in result.stdout
     expected = _expected_shell_command(

@@ -387,9 +387,8 @@ medsurface labelmap extract body.nii.gz --split parts/ -o parts/body.stl
 - The output is `uint8`, or `uint16`/`uint32` when label IDs need it. NIfTI
   outputs carry the input label table (and `--label-names`) so `--split`
   names its files.
-- More than one moving labelmap without `--preserve-labels`, or `--labels`,
-  writes a binary union through the same path. Two inputs without either flag
-  keep the original binary behaviour exactly.
+- Without `--preserve-labels`, every selected label is foreground `1` and the
+  output is a binary union on a `0.4 mm` grid unless `--grid-mm` is given.
 
 ### Shared registration and grid
 
@@ -429,10 +428,12 @@ medsurface labelmap extract fused.nrrd -o fused.stl
 The later extraction uses normal labelmap defaults. No intensity-preset surface
 settings are embedded in or transferred through the fused volume.
 
-With `--json FILE`, fusion reports output format/compression, scalar type,
+With `--json FILE`, `fuse` reports output format/compression, scalar type,
 components, grid geometry, fixed/moving/fused foreground voxel counts and
 volumes, complete registration metrics and transform, warnings, segmentation
-settings, and fixed/moving provenance. It contains no mesh-quality or
+settings, and fixed/moving provenance. `labelmap fuse` reports the same output
+and grid fields, per-label voxel counts and volumes, one registration per
+moving input, and per-input provenance. Neither contains mesh-quality or
 surface-finishing fields.
 
 ## Input requirements and limitations
