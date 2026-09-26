@@ -248,8 +248,10 @@ to its bounding box plus `ceil((3·mask_smooth_mm + 2·resample_mm + 2·spacing)
 spacing) + 1` voxels per axis, clamped to the image. The margin keeps the
 smoothed occupancy field and resampling support unchanged, and guarantees that a
 label that does not touch the image boundary does not touch the crop boundary,
-so field-of-view capping behaves exactly as for the uncropped image. The crop
-then follows the normal `pipeline.mesh_binary_mask` path. Settings may be one
+so field-of-view capping behaves exactly as for the uncropped image. Without
+resampling the surface therefore matches an uncropped extraction; with
+`resample_mm` the isotropic lattice starts at the crop origin, so it can shift
+by up to one resampled voxel. The crop then follows the normal `pipeline.mesh_binary_mask` path. Settings may be one
 `SurfaceSettings` or a callable per label. The optional combined mesh is
 extracted from the union of the selected labels cropped to their joint bounding
 box; concatenating per-label meshes would not form a valid closed surface.
@@ -445,13 +447,16 @@ given. A grid coarser than the finest input voxel emits a feature-loss warning.
 `labelmap.fuse_labels` (CLI: `labelmap fuse`) registers every moving input to the fixed input independently,
 using each input's union mask and the gates above. `fusion.common_grid_many`
 plans one grid over every transformed input. `fusion.fuse_label_fields` then
-streams label by label: crop the label's bounding box plus the antialiasing
-margin, antialias for the grid, linearly resample with the input's inverse
-transform onto the sub-grid it covers, and update a running per-voxel best
-occupancy and best label. A voxel keeps its best label when the occupancy is
-strictly above `0.5`. Memory is one `float32` and one `uint32` grid regardless of
-label or input count. In binary mode every selected label of an input is one
-group labelled `1`.
+streams each input: crop a bounding box plus the antialiasing margin, antialias
+for the grid, and linearly resample with the input's inverse transform onto the
+sub-grid it covers. The union of the input's selected labels updates a running
+per-voxel maximum union occupancy; a voxel is foreground when that maximum is
+strictly above `0.5`, exactly as in binary fusion. With preserved labels each
+label is then resampled on its own to update a running best occupancy and best
+label, which only decides the label of a foreground voxel, so touching labels
+never open cracks where no single label exceeds `0.5`. Memory is one `float32`
+grid for a binary union and two `float32` plus one `uint32` grid with labels,
+regardless of label or input count.
 
 The published volume is `uint8`, `uint16`, or `uint32` depending on the largest
 label, with identity direction and no copied metadata. NIfTI outputs receive a
