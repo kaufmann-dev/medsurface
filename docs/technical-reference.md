@@ -79,7 +79,11 @@ Report families are operation-specific:
   labels, and per-label statistics.
 
 `--progress json` on every command except `presets` replaces the human progress
-display with JSON lines on stderr. Library callers receive the same stage events
+display with JSON lines on stderr. The `_machine_readable` command decorator
+forces quiet stdout, routes every `_warn`/`_error` diagnostic through JSON even
+outside the progress display, and ends the run with a `result` event holding the
+exit code and the report recorded by `_publish_report` (`null` if none was
+produced). Library callers receive the same stage events
 through the `progress` callback of `volume.convert`, `pipeline.extract`,
 `fusion.fuse`, `fusion.fuse_masks`, `repair.repair`, `labelmap.extract`,
 `labelmap.extract_labels`, and `labelmap.fuse_labels`; `stages.stage_runner`
@@ -248,10 +252,11 @@ to its bounding box plus `ceil((3·mask_smooth_mm + 2·resample_mm + 2·spacing)
 spacing) + 1` voxels per axis, clamped to the image. The margin keeps the
 smoothed occupancy field and resampling support unchanged, and guarantees that a
 label that does not touch the image boundary does not touch the crop boundary,
-so field-of-view capping behaves exactly as for the uncropped image. Without
-resampling the surface therefore matches an uncropped extraction; with
-`resample_mm` the isotropic lattice starts at the crop origin, so it can shift
-by up to one resampled voxel. The crop then follows the normal `pipeline.mesh_binary_mask` path. Settings may be one
+so field-of-view capping behaves exactly as for the uncropped image. With
+`resample_mm`, `segment.resample_isotropic` receives the uncropped image origin
+as `lattice_origin`, so the crop samples exactly the uncropped isotropic
+lattice. The surface therefore matches an uncropped extraction. The crop then
+follows the normal `pipeline.mesh_binary_mask` path. Settings may be one
 `SurfaceSettings` or a callable per label. The optional combined mesh is
 extracted from the union of the selected labels cropped to their joint bounding
 box; concatenating per-label meshes would not form a valid closed surface.

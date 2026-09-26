@@ -233,3 +233,29 @@ def test_resample_override_reaches_the_large_grid_allocation(monkeypatch):
             0.001,
             allow_large_volume=True,
         )
+
+
+def test_cropped_resampling_samples_the_uncropped_lattice():
+    values = np.zeros((30, 34, 38), dtype=np.uint8)
+    values[9:21, 11:24, 12:27] = 1
+    image = sitk.GetImageFromArray(values)
+    image.SetSpacing((0.315, 0.315, 0.8))
+    image.SetOrigin((-12.5, 40.25, 3.0))
+    image.SetDirection((0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0))
+    cropped = sitk.RegionOfInterest(image, [30, 26, 22], [3, 5, 4])
+
+    full = segment.resample_isotropic(image, 0.5, pad_border=False)
+    part = segment.resample_isotropic(
+        cropped, 0.5, pad_border=False, lattice_origin=image.GetOrigin()
+    )
+
+    index = full.TransformPhysicalPointToContinuousIndex(part.GetOrigin())
+    assert np.allclose(index, np.round(index), atol=1e-6)
+    start = [int(round(value)) for value in index]
+    size = part.GetSize()
+    expected = sitk.GetArrayViewFromImage(full)[
+        start[2] : start[2] + size[2],
+        start[1] : start[1] + size[1],
+        start[0] : start[0] + size[0],
+    ]
+    np.testing.assert_allclose(sitk.GetArrayViewFromImage(part), expected, atol=1e-3)

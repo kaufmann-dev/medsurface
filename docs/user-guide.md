@@ -272,10 +272,9 @@ medsurface labelmap extract segmentations.nii.gz --labels 25-50,91 \
   format of the per-label files. Without `-o` the files are `.stl`.
 - Each label is cropped to its bounding box plus a margin covering mask
   smoothing and resampling, which runs much faster than separate `--labels ID`
-  extractions. At native resolution the surface matches a separate extraction;
-  with `--resample-mm` it can differ by up to one resampled voxel, and
-  simplification may pick different triangles within its error limit. A label
-  that reaches the image boundary is capped exactly as it would be uncropped.
+  extractions. The surface matches a separate extraction; only simplification
+  may pick different triangles within its error limit. A label that reaches the
+  image boundary is capped exactly as it would be uncropped.
 - Selected labels without voxels are skipped with a warning. A label that fails
   is reported and does not stop the others; the command then exits `1`.
 - The JSON report lists every mesh with its quality report, the combined mesh,
@@ -487,9 +486,14 @@ Programs driving the CLI can pass `--progress json` to any command except
 `status`, `stage_start`/`stage_end` (with `seconds`), `warning`, and `error`
 events, plus `label_start`/`label_end`/`label_failed` (with the label ID,
 position, and total) and `combined_start`/`combined_end` from the labelmap
-commands. The human summary on stdout is unchanged and can still be suppressed
-with `--quiet`. Every command that reports results takes `--json FILE` and
-writes the report to that file.
+commands. Every warning and error the command reports is an event, including
+option errors found before processing starts, and stdout stays empty. The
+stream always ends with one `{"event": "result", "exit_code": N, "result": ...}`
+event whose `result` is the same report `--json FILE` writes, or `null` when the
+command failed before producing one. Errors from the argument parser itself,
+such as an unknown option, are printed as plain text with exit code `2`. Every
+command that reports results takes `--json FILE` and writes the report to that
+file.
 
 Press `Ctrl+C` once to cancel. Temporary files are cleaned before control returns
 to the terminal. Native image or mesh work may delay cancellation until control

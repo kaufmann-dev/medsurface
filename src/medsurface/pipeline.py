@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import asdict, dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import SimpleITK as sitk
 
@@ -347,8 +347,12 @@ def mesh_binary_mask(
     step: StepRunner,
     log: Logger,
     warn: Logger,
+    lattice_origin: Sequence[float] | None = None,
 ) -> MaskSurfaceResult:
-    """Extract, finish, validate, and publish one already-binary mask."""
+    """Extract, finish, validate, and publish one already-binary mask.
+
+    ``lattice_origin`` anchors resampling to an uncropped source's lattice.
+    """
     validate_surface_settings(settings)
     surface.validate_output_path(output_path)
 
@@ -387,6 +391,7 @@ def mesh_binary_mask(
                 log,
                 pad_border=settings.mask_smooth_mm <= 0 and cap_field_of_view,
                 allow_large_volume=allow_large_volume,
+                lattice_origin=lattice_origin,
             ),
         )
         isovalue = segment.ISO_OCCUPANCY

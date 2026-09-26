@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import Sequence
 
 import numpy as np
 import SimpleITK as sitk
@@ -256,8 +257,12 @@ def resample_isotropic(
     pad_border: bool = True,
     *,
     allow_large_volume: bool = False,
+    lattice_origin: Sequence[float] | None = None,
 ) -> sitk.Image:
     """Resample the mask onto an isotropic grid as a fractional-occupancy field.
+
+    The lattice starts at the mask's origin, or at ``lattice_origin`` when a
+    cropped mask must sample the same points as its uncropped source image.
 
     Resampling can reduce triangle count but can erase thin structures and change
     components, cavities, tunnels, or genus. Padding usually enables a closed
@@ -271,9 +276,17 @@ def resample_isotropic(
     if not math.isfinite(mm) or mm <= 0:
         raise ValueError("resample spacing must be finite and greater than zero")
 
+    extent = np.asarray(binary.GetSize()) * np.asarray(binary.GetSpacing())
+    direction = np.asarray(binary.GetDirection()).reshape(3, 3)
+    anchor = np.asarray(
+        binary.GetOrigin() if lattice_origin is None else lattice_origin, dtype=float
+    )
+    # Offset of the mask origin from the lattice anchor along the image axes.
+    offset = direction.T @ (np.asarray(binary.GetOrigin()) - anchor)
+    first = np.floor(offset / mm + 1e-6)
     size = [
-        max(1, int(math.ceil(n * s / mm)))
-        for n, s in zip(binary.GetSize(), binary.GetSpacing())
+        max(1, int(math.ceil((offset[axis] + extent[axis]) / mm)) - int(first[axis]))
+        for axis in range(3)
     ]
     voxels = math.prod(size)
     if voxels > MAX_VOXELS and not allow_large_volume:
@@ -287,7 +300,7 @@ def resample_isotropic(
     r = sitk.ResampleImageFilter()
     r.SetOutputSpacing((mm, mm, mm))
     r.SetSize(size)
-    r.SetOutputOrigin(field.GetOrigin())
+    r.SetOutputOrigin(tuple(float(value) for value in anchor + direction @ (first * mm)))
     r.SetOutputDirection(field.GetDirection())
     r.SetInterpolator(sitk.sitkLinear)
     r.SetDefaultPixelValue(0.0)  # outside
