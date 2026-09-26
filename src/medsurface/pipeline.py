@@ -16,6 +16,7 @@ from .catalog import VolumeCandidate
 from .defaults import DESTEP_CLAMP_WARNING_FRACTION, SURFACE_RELAX_FORCE
 from .presets import DestepSettings, Preset, validate_destep
 from .presets import validate as validate_preset
+from .stages import ProgressSink, stage_runner
 
 Logger = Callable[[str], None]
 StepRunner = Callable[[str, Callable[[], Any]], Any]
@@ -529,6 +530,7 @@ def extract(
     allow_large_volume: bool = False,
     log: Logger | None = None,
     warn: Logger | None = None,
+    progress: ProgressSink | None = None,
 ) -> Result:
     validate_preset(preset)
     surface.validate_output_path(output_path)
@@ -538,12 +540,7 @@ def extract(
         if log:
             log(msg)
 
-    def step(msg: str, fn):
-        say("%s ..." % msg)
-        t = time.time()
-        out = fn()
-        say("  %-34s %6.1fs" % (msg, time.time() - t))
-        return out
+    step = stage_runner(say, progress, 34)
 
     warnings: list[str] = []
 

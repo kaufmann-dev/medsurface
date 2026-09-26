@@ -12,6 +12,9 @@ DEFAULT_LABELMAP_MASK_SMOOTH_MM = 0.8
 #: Fixed-force topology-preserving cleanup for external labelmap surfaces.
 DEFAULT_LABELMAP_SURFACE_SMOOTH_ITERS = 20
 
+#: Default MeshLib surface-deviation limit for external labelmap surfaces.
+DEFAULT_LABELMAP_SIMPLIFY_ERROR_MM = 0.25
+
 #: External labelmaps are already regularized in physical space before meshing,
 #: so their default finishing pass does not need additional post-simplification
 #: relaxation. Users can enable it explicitly for unusually faceted outputs.

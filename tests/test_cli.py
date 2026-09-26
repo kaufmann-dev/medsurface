@@ -891,7 +891,7 @@ def test_required_inputs_use_typer_path_validation(command, argv):
     assert command in result.stderr
 
 
-def test_list_json_uses_unique_id_and_plain_stdout(tmp_path, monkeypatch):
+def test_list_json_writes_unique_ids_to_a_file(tmp_path, monkeypatch):
     found = [
         _candidate(
             description="[bold red]literal[/bold red]",
@@ -900,12 +900,15 @@ def test_list_json_uses_unique_id_and_plain_stdout(tmp_path, monkeypatch):
     ]
     monkeypatch.setattr(cli, "_discover", lambda _root: found)
 
+    report = tmp_path / "volumes.json"
     result = runner.invoke(
-        cli.app, ["list", str(tmp_path), "--json"], prog_name="medsurface"
+        cli.app,
+        ["list", str(tmp_path), "--json", str(report), "-q"],
+        prog_name="medsurface",
     )
 
     assert result.exit_code == 0
-    payload = json.loads(result.stdout)
+    payload = json.loads(report.read_text())
     assert payload[0]["id"] == 1
     assert payload[0]["default"] is True
     assert payload[0]["format"] == "DICOM"
@@ -915,7 +918,7 @@ def test_list_json_uses_unique_id_and_plain_stdout(tmp_path, monkeypatch):
     assert payload[0]["dicom"]["kernel"] == ["Hr68f", "1"]
     assert payload[0]["description"] == "[bold red]literal[/bold red]"
     assert "ident" not in payload[0]
-    assert "\x1b" not in result.stdout
+    assert result.stdout == ""
     assert result.stderr == ""
 
 
@@ -1038,12 +1041,15 @@ def test_discovery_warnings_are_deduplicated_and_do_not_corrupt_json(
         return [_candidate()]
 
     monkeypatch.setattr(catalog, "discover", fake_discover)
+    report = tmp_path / "volumes.json"
     result = runner.invoke(
-        cli.app, ["list", str(tmp_path), "--json"], prog_name="medsurface"
+        cli.app,
+        ["list", str(tmp_path), "--json", str(report), "-q"],
+        prog_name="medsurface",
     )
 
     assert result.exit_code == 0
-    assert json.loads(result.stdout)[0]["id"] == 1
+    assert json.loads(report.read_text())[0]["id"] == 1
     assert result.stderr.count("Invalid value for VR UI") == 1
     assert "repeated 3 times" in result.stderr
     assert result.stderr.count("Invalid value for VR DS") == 1
@@ -1343,7 +1349,12 @@ def test_labelmap_extract_forwards_destep_defaults(tmp_path, monkeypatch):
     ("arguments", "message"),
     [
         (["--destep-iters", "100"], "--destep-iters requires --destep"),
+        (["--destep-iters", "600"], "--destep-iters requires --destep"),
         (["--destep-full-mm", "1"], "--destep-full-mm requires --destep"),
+        (
+            ["--destep", "all", "--destep-axis", "z"],
+            "--destep-axis requires --destep band",
+        ),
         (
             ["--destep", "auto", "--destep-axis", "x"],
             "--destep-axis requires --destep band",
@@ -2540,22 +2551,25 @@ def test_fuse_without_selectors_ranks_each_dicom_directory(tmp_path, monkeypatch
     assert captured["moving"] is moving_fine
 
 
-def test_validate_json_is_plain_and_invalid_quality_exits_one(tmp_path, monkeypatch):
+def test_validate_json_writes_a_file_and_invalid_quality_exits_one(
+    tmp_path, monkeypatch
+):
     mesh = tmp_path / "mesh.stl"
     mesh.write_text("placeholder")
     from medsurface import validate as validate_mod
 
     monkeypatch.setattr(validate_mod, "validate", lambda _path: _quality(valid=False))
+    report = tmp_path / "quality.json"
     result = runner.invoke(
         cli.app,
-        ["validate", str(mesh), "--json"],
+        ["validate", str(mesh), "--json", str(report), "-q"],
         prog_name="medsurface",
     )
 
     assert result.exit_code == 1
-    assert json.loads(result.stdout)["valid"] is False
+    assert json.loads(report.read_text())["valid"] is False
+    assert result.stdout == ""
     assert result.stderr == ""
-    assert "\x1b" not in result.stdout
 
     human = runner.invoke(
         cli.app,
@@ -2568,7 +2582,7 @@ def test_validate_json_is_plain_and_invalid_quality_exits_one(tmp_path, monkeypa
     assert "Mesh quality" in human.stdout
 
 
-def test_repair_json_is_plain_and_errors_are_concise(tmp_path, monkeypatch):
+def test_repair_json_writes_a_file_and_errors_are_concise(tmp_path, monkeypatch):
     mesh = tmp_path / "mesh.stl"
     output = tmp_path / "fixed.stl"
     mesh.write_text("placeholder")
@@ -2582,14 +2596,16 @@ def test_repair_json_is_plain_and_errors_are_concise(tmp_path, monkeypatch):
             quality=_quality(),
         ),
     )
+    report = tmp_path / "repair.json"
     result = runner.invoke(
         cli.app,
-        ["repair", str(mesh), "-o", str(output), "--json"],
+        ["repair", str(mesh), "-o", str(output), "--json", str(report), "-q"],
         prog_name="medsurface",
     )
 
     assert result.exit_code == 0
-    assert json.loads(result.stdout)["repair"]["holes_filled"] == 1
+    assert json.loads(report.read_text())["repair"]["holes_filled"] == 1
+    assert result.stdout == ""
     assert result.stderr == ""
 
     def fail(*_args, **_kwargs):
@@ -2603,6 +2619,5 @@ def test_repair_json_is_plain_and_errors_are_concise(tmp_path, monkeypatch):
     )
     assert failed.exit_code == 1
     assert "Loading repair engine ..." in failed.stdout
-    assert "Loading mesh for repair ..." in failed.stdout
     assert "Error: cannot repair" in failed.stderr
     assert "Traceback" not in failed.stderr

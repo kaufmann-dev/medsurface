@@ -54,9 +54,11 @@ but not warnings or failures.
 
 ## JSON and output transactions
 
-`list --json`, `validate --json`, and `repair --json` write plain JSON to stdout.
-Conversion, extraction, and fusion accept `--json FILE`; the human stream never
-shares that destination and JSON contains no ANSI control sequences.
+Every command that reports results (`list`, `convert`, `extract`, `fuse`,
+`validate`, `repair`, and the labelmap commands) accepts `--json FILE`; the human
+stream never shares that destination and JSON contains no ANSI control
+sequences. `list` writes an array of volumes, `validate` the quality report,
+and `repair` the output path, repair statistics, and quality.
 
 Report families are operation-specific:
 
@@ -65,24 +67,26 @@ Report families are operation-specific:
   provenance.
 - Extraction records surface counts, bounds, mask/surface components, finishing
   provenance, validation quality, duration, and warnings.
-- Fusion records output format/compression, scalar `uint8` type, grid geometry,
-  fixed/moving/fused foreground counts and volumes, complete registration data,
-  segmentation settings, duration, warnings, and both inputs' provenance. It
-  has no triangle, surface-finishing, or mesh-quality fields. Label-preserving
-  or N-way fusion instead records the scalar type, per-label voxels, volumes,
-  and names, one registration record per moving input, and every input's
-  provenance.
+- Intensity fusion records output format/compression, scalar `uint8` type,
+  grid geometry, fixed/moving/fused foreground counts and volumes, complete
+  registration data, segmentation settings, duration, warnings, and both
+  inputs' provenance. Labelmap fusion records the same output and grid fields,
+  the scalar type, per-label voxels, volumes, and names, one registration record
+  per moving input, and every input's provenance. Neither has triangle,
+  surface-finishing, or mesh-quality fields.
 - Split extraction records every mesh (label, name, output, counts, bounds,
   components, capping, settings, quality), the combined mesh, skipped and failed
   labels, and per-label statistics.
 
-`--progress json` on `labelmap extract` and `labelmap fuse` replaces the human
-progress display with JSON lines on stderr. Library callers receive the same
-events through the `progress` callback of `labelmap.extract`, `extract_labels`,
-`fuse`, and `fuse_labels`.
+`--progress json` on every command except `presets` replaces the human progress
+display with JSON lines on stderr. Library callers receive the same stage events
+through the `progress` callback of `volume.convert`, `pipeline.extract`,
+`fusion.fuse`, `fusion.fuse_masks`, `repair.repair`, `labelmap.extract`,
+`labelmap.extract_labels`, and `labelmap.fuse_labels`; `stages.stage_runner`
+emits them.
 
 Reports are written, flushed, and atomically replaced from a same-directory
-temporary file. For conversion and fusion, the CLI also stages a same-filesystem
+temporary file. For conversion, fusion, and repair, the CLI also stages a same-filesystem
 rollback sibling for any existing primary destination, using a hard link when
 available and a copy otherwise. Any volume-output or report failure restores the
 old primary file, or removes a newly created one; success removes the rollback
@@ -453,8 +457,7 @@ The published volume is `uint8`, `uint16`, or `uint32` depending on the largest
 label, with identity direction and no copied metadata. NIfTI outputs receive a
 Caret label table extension built from the inputs' tables and caller names; the
 embedding rewrite is atomic and verifies that voxel bytes are unchanged. The
-default grid is the finest input spacing with preserved labels and 0.4 mm for a
-binary union.
+default grid is 0.4 mm in both modes.
 
 ## Fusion identity contract
 

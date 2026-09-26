@@ -19,16 +19,15 @@ from .defaults import (
     DEFAULT_FUSION_GRID_MM,
     DEFAULT_LABELMAP_MASK_SMOOTH_MM,
     DEFAULT_LABELMAP_POST_SURFACE_SMOOTH_ITERS,
+    DEFAULT_LABELMAP_SIMPLIFY_ERROR_MM,
     DEFAULT_LABELMAP_SURFACE_SMOOTH_ITERS,
     SUPPORTED_MESH_EXTENSIONS,
 )
 from .outputs import volume_output
 from .presets import DestepSettings
+from .stages import ProgressSink, stage_runner
 
 Logger = Callable[[str], None]
-#: Receives machine-readable progress events such as
-#: ``{"event": "stage_start", "stage": "marching cubes"}``.
-ProgressSink = Callable[[dict[str, Any]], None]
 SettingsForLabel = Callable[[int], pipeline.SurfaceSettings]
 
 
@@ -60,7 +59,7 @@ def default_surface_settings() -> pipeline.SurfaceSettings:
         resample_mm=0.0,
         mask_smooth_mm=DEFAULT_LABELMAP_MASK_SMOOTH_MM,
         surface_smooth_iters=DEFAULT_LABELMAP_SURFACE_SMOOTH_ITERS,
-        simplify_error_mm=0.25,
+        simplify_error_mm=DEFAULT_LABELMAP_SIMPLIFY_ERROR_MM,
         post_surface_smooth_iters=DEFAULT_LABELMAP_POST_SURFACE_SMOOTH_ITERS,
         keep_largest_component=False,
     )
@@ -268,29 +267,6 @@ def embedded_label_names(candidate: VolumeCandidate) -> dict[int, str]:
     return {}
 
 
-def _stage_runner(
-    say: Logger,
-    progress: ProgressSink | None,
-    width: int,
-    **context: Any,
-):
-    def step(message: str, function):
-        say("%s ..." % message)
-        if progress is not None:
-            progress({"event": "stage_start", "stage": message, **context})
-        before = time.time()
-        value = function()
-        seconds = time.time() - before
-        say("  %-*s %6.1fs" % (width, message, seconds))
-        if progress is not None:
-            progress(
-                {"event": "stage_end", "stage": message, "seconds": seconds, **context}
-            )
-        return value
-
-    return step
-
-
 def extract(
     candidate: VolumeCandidate,
     output_path: str,
@@ -326,7 +302,7 @@ def extract(
         if log:
             log(message)
 
-    step = _stage_runner(say, progress, 34)
+    step = stage_runner(say, progress, 34)
 
     warnings: list[str] = []
 
@@ -558,7 +534,7 @@ def extract_labels(
         if warn:
             warn(message)
 
-    step = _stage_runner(say, progress, 34)
+    step = stage_runner(say, progress, 34)
     volume = step(
         "load labelmap",
         lambda: _load_volume(candidate, allow_large_volume=allow_large_volume),
@@ -614,7 +590,7 @@ def extract_labels(
             mask = sitk.Cast(sitk.Equal(cropped, float(label)), sitk.sitkUInt8)
         cropped = sitk.Image()
         context = {} if label is None else {"label": label}
-        label_step = _stage_runner(say, progress, 34, **context)
+        label_step = stage_runner(say, progress, 34, **context)
         meshed = pipeline.mesh_binary_mask(
             mask,
             path,
@@ -783,7 +759,7 @@ def fuse_labels(
     movings: Sequence[VolumeCandidate],
     output_path: str,
     *,
-    grid_mm: float | None = None,
+    grid_mm: float = DEFAULT_FUSION_GRID_MM,
     labels: Sequence[int] | None = None,
     preserve_labels: bool = True,
     names: Mapping[int, str] | None = None,
@@ -798,8 +774,7 @@ def fuse_labels(
     Registration uses the union of the selected labels of each input, with the
     same quality gates as two-input fusion. With ``preserve_labels`` the output
     keeps label IDs (see :func:`fusion.fuse_label_fields`); otherwise it is a
-    binary ``0``/``1`` union. ``grid_mm`` defaults to the finest input spacing
-    when labels are preserved and to the binary fusion default otherwise.
+    binary ``0``/``1`` union. Either way the output grid is isotropic ``grid_mm``.
     Label names from NIfTI label tables (and ``names``) are re-embedded in
     NIfTI outputs.
     """
@@ -813,7 +788,7 @@ def fuse_labels(
         for second in inputs[index + 1 :]:
             if same_source(first, second):
                 raise fusion.FusionError("two fusion inputs resolve to the same labelmap")
-    if grid_mm is not None and (not np.isfinite(grid_mm) or grid_mm <= 0):
+    if not np.isfinite(grid_mm) or grid_mm <= 0:
         raise ValueError("grid_mm must be finite and greater than zero")
     selection = normalize_labels(labels)
     started = time.time()
@@ -822,7 +797,7 @@ def fuse_labels(
         if log:
             log(message)
 
-    step = _stage_runner(say, progress, 36)
+    step = stage_runner(say, progress, 36)
     warnings: list[str] = []
 
     def add_warning(message: str) -> None:
@@ -886,8 +861,6 @@ def fuse_labels(
     unions.clear()
 
     finest = min(min(volume.image.GetSpacing()) for volume in volumes)
-    if grid_mm is None:
-        grid_mm = float(finest) if preserve_labels else DEFAULT_FUSION_GRID_MM
     if grid_mm > finest:
         add_warning(
             "the fused grid is %.2f mm but the finest input voxel is %.3f mm; "
