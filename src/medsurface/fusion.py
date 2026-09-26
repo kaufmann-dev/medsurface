@@ -336,6 +336,7 @@ def fuse_masks(
     allow_large_volume: bool = False,
     log: Logger | None = None,
     warn: Logger | None = None,
+    progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> FusionResult:
     """Register, union, quantize, and publish two binary foreground masks."""
     output = volume_output(output_path)
@@ -351,9 +352,14 @@ def fuse_masks(
 
     def step(message: str, function):
         say("%s ..." % message)
+        if progress is not None:
+            progress({"event": "stage_start", "stage": message})
         before = time.time()
         value = function()
-        say("  %-36s %6.1fs" % (message, time.time() - before))
+        seconds = time.time() - before
+        say("  %-36s %6.1fs" % (message, seconds))
+        if progress is not None:
+            progress({"event": "stage_end", "stage": message, "seconds": seconds})
         return value
 
     warnings: list[str] = []
@@ -364,6 +370,8 @@ def fuse_masks(
             warn(message)
 
     say("registering ...")
+    if progress is not None:
+        progress({"event": "stage_start", "stage": "registering"})
     try:
         registered = registration.rigid_register(
             fixed_mask,
@@ -373,6 +381,8 @@ def fuse_masks(
     except registration.RegistrationError as exc:
         raise FusionError(str(exc)) from None
     check_registration(registered, force=force)
+    if progress is not None:
+        progress({"event": "stage_end", "stage": "registering"})
     for line in registered.summary().splitlines():
         say("  " + line.strip())
 
@@ -645,3 +655,179 @@ def fuse(
         }
     )
     return result
+
+
+# ------------------------------------------------------- N-way label fusion
+def common_grid_many(
+    images: list[sitk.Image],
+    transforms: list[np.ndarray],
+    grid_mm: float,
+    *,
+    allow_large_volume: bool = False,
+) -> tuple[tuple[int, int, int], np.ndarray]:
+    """Axis-aligned grid covering every image after its moving->fixed transform."""
+    points = np.vstack(
+        [
+            (transform[:3, :3] @ _corners(image).T).T + transform[:3, 3]
+            for image, transform in zip(images, transforms)
+        ]
+    )
+    scaled = points / grid_mm
+    if not np.all(np.isfinite(scaled)):
+        raise FusionError(
+            "the fused grid coordinates overflow at %.4g mm; raise --grid-mm" % grid_mm
+        )
+    low_index = np.floor(scaled.min(0)) - 2
+    high_index = np.ceil(scaled.max(0)) + 2
+    planned = high_index - low_index + 1
+    if not np.all(np.isfinite(planned)):
+        raise FusionError("the fused grid is too large at %.4g mm; raise --grid-mm" % grid_mm)
+    size = (int(planned[0]), int(planned[1]), int(planned[2]))
+    voxels = math.prod(size)
+    if voxels > MAX_VOXELS and not allow_large_volume:
+        raise FusionError(
+            "the fused grid would hold %s voxels at %.4g mm, above the default "
+            "limit of %s; raise --grid-mm or pass --allow-large-volume to attempt "
+            "it (this may exhaust memory)" % (f"{voxels:,}", grid_mm, f"{MAX_VOXELS:,}")
+        )
+    return size, np.asarray(low_index * grid_mm, dtype=float)
+
+
+def _antialias_margin(image: sitk.Image, grid_mm: float) -> list[int]:
+    """Input voxels needed around a crop for antialiasing plus linear support."""
+    sigma_mm = segment._ANTIALIAS_SIGMA_FACTOR * grid_mm
+    return [
+        int(math.ceil(4.0 * sigma_mm / spacing)) + 2 for spacing in image.GetSpacing()
+    ]
+
+
+@dataclass
+class LabelFieldResult:
+    """Label-preserving occupancy fusion on one isotropic grid."""
+
+    labels: np.ndarray  # (z, y, x)
+    grid_size: tuple[int, int, int]
+    grid_origin_mm: tuple[float, float, float]
+    grid_mm: float
+    voxels: dict[int, int]
+
+
+def fuse_label_fields(
+    images: list[sitk.Image],
+    transforms: list[np.ndarray],
+    grid_mm: float,
+    *,
+    labels: tuple[int, ...] | None = None,
+    binary: bool = False,
+    allow_large_volume: bool = False,
+    log: Logger | None = None,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+) -> LabelFieldResult:
+    """Stream every label of every input onto one grid and keep the best label.
+
+    Each label is cropped to its bounding box, antialiased for the target grid,
+    resampled with its input's transform, and compared against a running
+    per-voxel best occupancy. A voxel keeps the label with the highest occupancy
+    when that occupancy exceeds 0.5, which is exactly the union for one label and
+    a fair split between touching labels. Memory is two grid-sized arrays
+    regardless of how many labels or inputs are fused. With ``binary`` every
+    selected label of every input is treated as foreground ``1``.
+    """
+
+    def say(message: str) -> None:
+        if log:
+            log(message)
+
+    size, origin = common_grid_many(
+        images, transforms, grid_mm, allow_large_volume=allow_large_volume
+    )
+    shape_zyx = (size[2], size[1], size[0])
+    best_value = np.zeros(shape_zyx, dtype=np.float32)
+    best_label = np.zeros(shape_zyx, dtype=np.uint32)
+    say(
+        "fused grid %s at %.2f mm isotropic (%.0f M voxels)"
+        % ("x".join(str(value) for value in size), grid_mm, math.prod(size) / 1e6)
+    )
+
+    for input_index, (image, transform) in enumerate(zip(images, transforms)):
+        discrete = sitk.Cast(image, sitk.sitkUInt32)
+        shape = sitk.LabelShapeStatisticsImageFilter()
+        shape.ComputePerimeterOff()
+        shape.ComputeFeretDiameterOff()
+        shape.ComputeOrientedBoundingBoxOff()
+        shape.Execute(discrete)
+        present = [int(label) for label in shape.GetLabels()]
+        if labels is not None:
+            present = [label for label in present if label in labels]
+        if binary and present:
+            groups: list[tuple[int, list[int]]] = [(1, present)]
+        else:
+            groups = [(label, [label]) for label in present]
+        margin = _antialias_margin(image, grid_mm)
+        inverse = registration.inverse_transform(transform)
+        image_size = image.GetSize()
+        for group_label, members in groups:
+            boxes = [shape.GetBoundingBox(member) for member in members]
+            low = [min(box[axis] for box in boxes) for axis in range(3)]
+            high = [max(box[axis] + box[axis + 3] for box in boxes) for axis in range(3)]
+            start = [max(0, low[axis] - margin[axis]) for axis in range(3)]
+            stop = [min(image_size[axis], high[axis] + margin[axis]) for axis in range(3)]
+            extent = [stop[axis] - start[axis] for axis in range(3)]
+            if progress is not None:
+                progress(
+                    {
+                        "event": "label_start",
+                        "input": input_index,
+                        "label": group_label,
+                    }
+                )
+            cropped = sitk.RegionOfInterest(discrete, extent, start)
+            if len(members) == 1:
+                mask = sitk.Equal(cropped, members[0])
+            else:
+                values = sitk.GetArrayViewFromImage(cropped)
+                selected = np.isin(values, members).astype(np.uint8)
+                mask = sitk.GetImageFromArray(selected)
+                mask.CopyInformation(cropped)
+            occupancy = segment.antialias_for_grid(mask, grid_mm)
+            corners = (transform[:3, :3] @ _corners(occupancy).T).T + transform[:3, 3]
+            low_index = np.floor((corners.min(0) - origin) / grid_mm).astype(int) - 1
+            high_index = np.ceil((corners.max(0) - origin) / grid_mm).astype(int) + 2
+            low_index = np.maximum(low_index, 0)
+            high_index = np.minimum(high_index, np.asarray(size))
+            sub_size = high_index - low_index
+            if np.any(sub_size <= 0):
+                continue
+            field = _resample_field(
+                occupancy,
+                (int(sub_size[0]), int(sub_size[1]), int(sub_size[2])),
+                origin + low_index * grid_mm,
+                grid_mm,
+                inverse,
+            )
+            values = sitk.GetArrayViewFromImage(field)
+            region = (
+                slice(int(low_index[2]), int(high_index[2])),
+                slice(int(low_index[1]), int(high_index[1])),
+                slice(int(low_index[0]), int(high_index[0])),
+            )
+            current = best_value[region]
+            better = values > current
+            current[better] = values[better]
+            best_label[region][better] = group_label
+            if progress is not None:
+                progress(
+                    {"event": "label_end", "input": input_index, "label": group_label}
+                )
+
+    result = np.where(best_value > 0.5, best_label, 0).astype(np.uint32)
+    del best_value, best_label
+    found, counts = np.unique(result, return_counts=True)
+    voxels = {int(label): int(count) for label, count in zip(found, counts) if label != 0}
+    return LabelFieldResult(
+        labels=result,
+        grid_size=size,
+        grid_origin_mm=(float(origin[0]), float(origin[1]), float(origin[2])),
+        grid_mm=grid_mm,
+        voxels=voxels,
+    )

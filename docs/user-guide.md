@@ -4,7 +4,7 @@
 [Strict volume conversion](#strict-volume-conversion) ·
 [Extracting an intensity surface](#extracting-an-intensity-surface) ·
 [Using an external labelmap](#using-an-external-labelmap) ·
-[Binary fusion](#binary-fusion) ·
+[Fusion](#fusion) ·
 [Input limitations](#input-requirements-and-limitations) ·
 [Safety and privacy](#safety-and-privacy) ·
 [Technical reference](technical-reference.md)
@@ -217,11 +217,11 @@ medsurface labelmap extract segmentation.nii.gz -o surface.stl
 ```
 
 The command requires one direct NIfTI, NRRD, or MetaImage file. DICOM,
-directories, volume selectors, presets, and structure-name selectors are absent.
-Voxel values must be finite, non-negative integers with at least one nonzero
-voxel. Integer-valued floating-point files are accepted; fractional probability
-maps are not. Every nonzero value becomes one foreground class, so a multilabel
-file can create one mesh with multiple structures.
+directories, volume selectors, and presets are absent. Voxel values must be
+finite, non-negative integers with at least one nonzero voxel. Integer-valued
+floating-point files are accepted; fractional probability maps are not. By
+default every nonzero value becomes one foreground class, so a multilabel file
+creates one mesh with multiple structures.
 
 Labelmap extraction skips intensity thresholds, Otsu, morphology, and mask-island
 removal. Its independent surface defaults are native grid, `0.8 mm` mask
@@ -240,6 +240,45 @@ medsurface labelmap extract selected.nii.gz -o selected.stl
 ```
 
 TotalSegmentator is not installed or run by medsurface.
+
+### Selecting labels
+
+`--labels` restricts the foreground to some label IDs. Lists and inclusive
+ranges are accepted:
+
+```sh
+medsurface labelmap extract segmentations.nii.gz --labels 25-50 -o spine.stl
+```
+
+Selecting every label present gives exactly the same mesh as omitting
+`--labels`.
+
+### One mesh per label
+
+`--split DIR` writes one validated mesh per label into `DIR`, named
+`NNN_name.stl` from the label ID and its name:
+
+```sh
+medsurface labelmap extract segmentations.nii.gz --labels 25-50,91 \
+  --split parts/ -o parts/combined.stl --json parts.json
+```
+
+- Names come from `--label-names names.json` (an object such as
+  `{"91": "skull"}`) or, when absent, from a label table embedded in a NIfTI
+  input the way TotalSegmentator writes it. Unnamed labels become
+  `NNN_label-NNN.stl`.
+- With `--split`, `-o` is optional. When given, it receives one combined mesh of
+  every selected label, extracted from their union, and its extension sets the
+  format of the per-label files. Without `-o` the files are `.stl`.
+- Each label is cropped to its bounding box plus a margin covering mask
+  smoothing and resampling, so each mesh matches what a separate
+  `--labels ID` extraction would produce while running much faster. A label that
+  reaches the image boundary is capped exactly as it would be uncropped.
+- Selected labels without voxels are skipped with a warning. A label that fails
+  is reported and does not stop the others; the command then exits `1`.
+- The JSON report lists every mesh with its quality report, the combined mesh,
+  skipped and failed labels, and per-label voxel counts, volumes, and boundary
+  contact.
 
 ## Reducing stair-step ripples
 
@@ -292,10 +331,11 @@ isolated bumps are faired with their surroundings. Check the faired and frozen
 percentages it logs, and use `band` when it protects too much or too little. Fairing that would fold or intersect the surface is reverted locally;
 if no clean result is possible, the unfaired surface is kept with a warning.
 
-## Binary fusion
+## Fusion
 
-Fusion always publishes a scalar binary `uint8` labelmap. It never writes a
-mesh. Valid destinations are `.nii`, `.nii.gz`, `.nrrd`, and `.mha`.
+Fusion publishes a labelmap volume and never writes a mesh. Valid destinations
+are `.nii`, `.nii.gz`, `.nrrd`, and `.mha`. The result is binary `uint8` unless
+`labelmap fuse --preserve-labels` keeps label IDs.
 
 ### Fuse intensity volumes
 
@@ -324,6 +364,32 @@ medsurface labelmap fuse fixed-selected.nii.gz moving-selected.nii.gz \
 
 Different positive IDs are equivalent. Source IDs, semantic names, and metadata
 are not preserved in the derived labelmap.
+
+### Fuse several labelmaps and keep their labels
+
+`labelmap fuse` accepts more than one moving labelmap. Each one is registered
+to the fixed labelmap with the same quality gates. `--preserve-labels` keeps
+label IDs instead of writing a binary union:
+
+```sh
+medsurface labelmap fuse head.nii.gz neck.nii.gz chest.nii.gz \
+  --preserve-labels -o body.nii.gz --json body.json
+medsurface labelmap extract body.nii.gz --split parts/ -o parts/body.stl
+```
+
+- Registration uses the union of each input's labels (or of `--labels`).
+- Every label of every input is antialiased and resampled onto the shared grid.
+  A voxel keeps the label with the highest occupancy when that occupancy is
+  above `0.5`. For a single label this is the ordinary union; where two labels
+  touch, the boundary is split by their occupancies.
+- Without `--grid-mm`, the grid uses the finest input spacing. Memory stays at
+  two grid-sized arrays however many labels and inputs are fused.
+- The output is `uint8`, or `uint16`/`uint32` when label IDs need it. NIfTI
+  outputs carry the input label table (and `--label-names`) so `--split`
+  names its files.
+- More than one moving labelmap without `--preserve-labels`, or `--labels`,
+  writes a binary union through the same path. Two inputs without either flag
+  keep the original binary behaviour exactly.
 
 ### Shared registration and grid
 
@@ -411,7 +477,14 @@ spinner and elapsed time; redirected output receives persistent ANSI-free lines.
 No percentage is invented when processing libraries do not expose one.
 
 Use `--quiet` with processing commands to suppress normal progress. Warnings and
-errors remain visible. `list --json`, `validate --json`, and `repair --json`
+errors remain visible.
+
+Programs driving `labelmap extract` or `labelmap fuse` can pass
+`--progress json` to receive JSON lines on stderr instead of the human display:
+`stage_start`/`stage_end` (with `seconds`), `label_start`/`label_end`/
+`label_failed` (with the label ID, position, and total), `combined_start`/
+`combined_end`, `status`, `warning`, and `error` events. The human summary on
+stdout is unchanged and can still be suppressed with `--quiet`. `list --json`, `validate --json`, and `repair --json`
 write machine-readable JSON to stdout. Conversion, extraction, and fusion use
 `--json FILE` for a separate report.
 
