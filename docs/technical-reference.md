@@ -21,8 +21,8 @@ The public operations are deliberately separate:
 - `fuse` segments, registers, and unions two intensity volumes into a binary
   labelmap.
 - `labelmap extract` produces a surface from an existing labelmap.
-- `labelmap fuse` registers and unions two existing labelmaps into a binary
-  labelmap.
+- `labelmap fuse` registers two or more existing labelmaps and fuses them into
+  a binary or label-preserving labelmap.
 
 Fusion never dispatches to mesh output. A fused labelmap must be passed
 explicitly to `labelmap extract`, which keeps volume publication independently
@@ -124,9 +124,8 @@ multi-volume catalog also requires an ID. Missing DICOM modality is its own
 applies the rules independently.
 
 The labelmap group is narrower. `labelmap extract` accepts one direct NIfTI,
-NRRD, or MetaImage file. `labelmap fuse` accepts one such file for each role.
-Directories, DICOM, catalog IDs, presets, and label selectors are rejected
-because label selection belongs to the program that produced the segmentation.
+NRRD, or MetaImage file. `labelmap fuse` accepts one such file for each input.
+Directories, DICOM, catalog IDs, and presets are rejected.
 
 ## Strict conversion and verified volume publication
 
@@ -393,10 +392,11 @@ parameters and does not invoke a surface-output path.
 
 ## Fusion registration and gates
 
-`fusion.fuse` supplies independently thresholded and cleaned intensity masks.
-`labelmap.fuse` supplies independently validated all-nonzero masks.
-`fusion.fuse_masks` owns their common registration, grid, quantization, and
-publication path.
+`fusion.fuse` supplies independently thresholded and cleaned intensity masks to
+`fusion.fuse_masks`, which owns their registration, grid, quantization, and
+publication path. `labelmap.fuse_labels` registers each moving labelmap's
+selected-label union with the same registration and gates, then fuses through
+`fusion.fuse_label_fields` (below).
 
 Registration proceeds as follows:
 
@@ -438,8 +438,7 @@ given. A grid coarser than the finest input voxel emits a feature-loss warning.
 
 ### Label-preserving and N-way fusion
 
-`labelmap.fuse_labels` (CLI: more than one moving input, `--preserve-labels`,
-or `--labels`) registers every moving input to the fixed input independently,
+`labelmap.fuse_labels` (CLI: `labelmap fuse`) registers every moving input to the fixed input independently,
 using each input's union mask and the gates above. `fusion.common_grid_many`
 plans one grid over every transformed input. `fusion.fuse_label_fields` then
 streams label by label: crop the label's bounding box plus the antialiasing
@@ -455,8 +454,7 @@ label, with identity direction and no copied metadata. NIfTI outputs receive a
 Caret label table extension built from the inputs' tables and caller names; the
 embedding rewrite is atomic and verifies that voxel bytes are unchanged. The
 default grid is the finest input spacing with preserved labels and 0.4 mm for a
-binary union. Two inputs without `--preserve-labels` or `--labels` still use
-`fusion.fuse_masks`, byte for byte.
+binary union.
 
 ## Fusion identity contract
 

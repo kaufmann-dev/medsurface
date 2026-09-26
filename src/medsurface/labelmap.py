@@ -392,101 +392,6 @@ def extract(
     )
 
 
-def fuse(
-    fixed: VolumeCandidate,
-    moving: VolumeCandidate,
-    output_path: str,
-    *,
-    grid_mm: float = DEFAULT_FUSION_GRID_MM,
-    force: bool = False,
-    allow_large_volume: bool = False,
-    log: Logger | None = None,
-    warn: Logger | None = None,
-    progress: ProgressSink | None = None,
-) -> fusion.FusionResult:
-    volume_output(output_path)
-    if os.path.isdir(output_path):
-        raise ValueError("volume output path is a directory: %s" % output_path)
-    if not np.isfinite(grid_mm) or grid_mm <= 0:
-        raise ValueError("grid_mm must be finite and greater than zero")
-    if same_source(fixed, moving):
-        raise fusion.FusionError(
-            "fixed and moving inputs resolve to the same labelmap"
-        )
-    started = time.time()
-
-    def say(message: str) -> None:
-        if log:
-            log(message)
-
-    step = _stage_runner(say, progress, 36)
-
-    warnings: list[str] = []
-
-    def add_warning(message: str) -> None:
-        warnings.append(message)
-        if warn:
-            warn(message)
-
-    for message in fusion.check_compatible(fixed, moving):
-        add_warning(message)
-    add_warning(
-        "labelmap contents are not verified; confirm that fixed and moving masks "
-        "represent the same rigid structures before using the fused labelmap"
-    )
-
-    say("fixed  ID %d  %s  %s" % (fixed.id, fixed.format, fixed.source_name))
-    say("moving ID %d  %s  %s" % (moving.id, moving.format, moving.source_name))
-    fixed_loaded = step(
-        "load fixed labelmap",
-        lambda: load(fixed, allow_large_volume=allow_large_volume),
-    )
-    for message in volume_mod.warnings_for(fixed_loaded.volume):
-        add_warning(message)
-    moving_loaded = step(
-        "load moving labelmap",
-        lambda: load(moving, allow_large_volume=allow_large_volume),
-    )
-    for message in volume_mod.warnings_for(moving_loaded.volume):
-        add_warning(message)
-
-    fixed_provenance = fixed_loaded.provenance
-    moving_provenance = moving_loaded.provenance
-    fixed_loaded.volume.image = sitk.Image()
-    moving_loaded.volume.image = sitk.Image()
-    result = fusion.fuse_masks(
-        fixed_loaded.mask,
-        moving_loaded.mask,
-        output_path,
-        grid_mm=grid_mm,
-        force=force,
-        allow_large_volume=allow_large_volume,
-        log=say,
-        warn=warn,
-        progress=progress,
-    )
-    result.seconds = time.time() - started
-    result.warnings = warnings + result.warnings
-    result.provenance.update(
-        {
-            "fixed": fixed_provenance,
-            "moving": moving_provenance,
-            "segmentation": {
-                "input_kind": "labelmap",
-                "validation": "finite, discrete, and non-negative",
-                "foreground": "all nonzero source values normalized to 1",
-            },
-            "forced": bool(force),
-            "allow_large_volume": bool(allow_large_volume),
-            "coordinate_system": (
-                "axis-aligned isotropic lattice in the fixed labelmap's "
-                "SimpleITK physical coordinate system"
-            ),
-        }
-    )
-    return result
-
-
 # --------------------------------------------------------------- split output
 @dataclass
 class LabelMesh:
@@ -930,6 +835,10 @@ def fuse_labels(
         "same subject before using the fused labelmap"
     )
     add_warning(fusion.RIGID_REGISTRATION_WARNING)
+    add_warning(
+        "labelmap contents are not verified; confirm that every input represents "
+        "the same rigid structures before using the fused labelmap"
+    )
 
     volumes: list[volume_mod.Volume] = []
     unions: list[sitk.Image] = []
@@ -979,10 +888,11 @@ def fuse_labels(
     finest = min(min(volume.image.GetSpacing()) for volume in volumes)
     if grid_mm is None:
         grid_mm = float(finest) if preserve_labels else DEFAULT_FUSION_GRID_MM
-    elif grid_mm > finest:
+    if grid_mm > finest:
         add_warning(
             "the fused grid is %.2f mm but the finest input voxel is %.3f mm; "
-            "structures thinner than the grid are lost" % (grid_mm, finest)
+            "structures thinner than the grid are lost. Lower --grid-mm to keep "
+            "them, at cubic cost in memory." % (grid_mm, finest)
         )
 
     fused = step(

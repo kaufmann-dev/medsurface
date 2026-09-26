@@ -96,8 +96,8 @@ def test_labelmap_fuse_rejects_short_dimensions_before_registration(
     short = _write(tmp_path / "short.nii.gz", np.ones((4, 4, 2), dtype=np.uint8))
     fixed, moving = (short, valid) if invalid_role == "fixed" else (valid, short)
     monkeypatch.setattr(
-        labelmap.fusion,
-        "fuse_masks",
+        labelmap.registration,
+        "rigid_register",
         lambda *_args, **_kwargs: pytest.fail("registration must not start"),
     )
 
@@ -105,10 +105,11 @@ def test_labelmap_fuse_rejects_short_dimensions_before_registration(
         ValueError,
         match=(r"each volume axis must contain at least 4 voxels; got 2x4x4$"),
     ):
-        labelmap.fuse(
+        labelmap.fuse_labels(
             fixed,
-            moving,
+            [moving],
             str(tmp_path / "out.nii.gz"),
+            preserve_labels=False,
         )
 
 
@@ -280,28 +281,27 @@ def test_labelmap_fuse_registers_rigid_masks_and_uses_fixed_frame(tmp_path):
     moving = _write(moving_path, values * 91, origin=(4.0, -3.0, 2.0))
     output = tmp_path / "fused.nrrd"
 
-    result = labelmap.fuse(
+    result = labelmap.fuse_labels(
         fixed,
-        moving,
+        [moving],
         str(output),
         grid_mm=1.0,
+        preserve_labels=False,
     )
 
     assert output.exists()
     stored = sitk.ReadImage(str(output))
     assert stored.GetPixelID() == sitk.sitkUInt8
     assert set(np.unique(sitk.GetArrayViewFromImage(stored))) == {0, 1}
-    assert int(sitk.GetArrayViewFromImage(stored).sum()) == result.foreground_fused_voxels
-    assert result.registration.surface_overlap > 0.9
-    assert result.registration.shared_fov_dice > 0.9
+    assert int(sitk.GetArrayViewFromImage(stored).sum()) == result.labels[1]["voxels"]
+    assert result.registrations[0].surface_overlap > 0.9
+    assert result.registrations[0].shared_fov_dice > 0.9
     assert "fixed labelmap" in result.provenance["coordinate_system"]
-    assert result.provenance["fixed"]["foreground"] == "all nonzero voxels"
-    assert result.provenance["moving"]["foreground"] == "all nonzero voxels"
-    assert result.provenance["segmentation"] == {
-        "input_kind": "labelmap",
-        "validation": "finite, discrete, and non-negative",
-        "foreground": "all nonzero source values normalized to 1",
-    }
+    assert [item["foreground"] for item in result.provenance["inputs"]] == [
+        "all nonzero voxels",
+        "all nonzero voxels",
+    ]
+    assert result.provenance["output"]["kind"] == "binary labelmap"
     assert "surface" not in result.provenance
     assert "surface_finishing" not in result.provenance
     assert any("rigid registration" in warning for warning in result.warnings)
@@ -352,11 +352,13 @@ def test_labelmap_fuse_normalizes_multilabel_values_in_every_output_format(
         lambda *_args, **_kwargs: _registration_result(),
     )
 
-    result = labelmap.fuse(fixed, moving, str(output), grid_mm=1.0)
+    result = labelmap.fuse_labels(
+        fixed, [moving], str(output), grid_mm=1.0, preserve_labels=False
+    )
     stored = sitk.ReadImage(str(output))
     stored_values = sitk.GetArrayViewFromImage(stored)
 
-    assert isinstance(result, fusion.FusionResult)
+    assert isinstance(result, labelmap.LabelFusionResult)
     assert result.output_format == expected_format
     assert result.compression == expected_compression
     assert set(np.unique(stored_values)) == {0, 1}
@@ -364,9 +366,7 @@ def test_labelmap_fuse_normalizes_multilabel_values_in_every_output_format(
     assert 17 not in stored_values
     assert 91 not in stored_values
     assert 203 not in stored_values
-    assert result.foreground_fixed_voxels == 2 * 8**3
-    assert result.foreground_moving_voxels == 2 * 8**3
-    assert result.foreground_fused_voxels == 2 * 8**3
+    assert result.labels[1]["voxels"] == 2 * 8**3
     assert result.provenance["output"]["kind"] == "binary labelmap"
     assert "surface" not in result.provenance
     assert "surface_finishing" not in result.provenance
@@ -386,13 +386,15 @@ def test_labelmap_fuse_rejects_invalid_moving_values_before_registration(
     valid = _write(tmp_path / "valid.nii.gz", np.ones((4, 4, 4), dtype=np.uint8))
     invalid = _write(tmp_path / "invalid.nrrd", invalid_values)
     monkeypatch.setattr(
-        fusion,
-        "fuse_masks",
+        labelmap.registration,
+        "rigid_register",
         lambda *_args, **_kwargs: pytest.fail("registration must not start"),
     )
 
     with pytest.raises(ValueError, match=message):
-        labelmap.fuse(valid, invalid, str(tmp_path / "out.nii"))
+        labelmap.fuse_labels(
+            valid, [invalid], str(tmp_path / "out.nii"), preserve_labels=False
+        )
 
 
 def test_labelmap_fuse_rejects_the_same_input_before_loading(tmp_path, monkeypatch):
@@ -400,14 +402,16 @@ def test_labelmap_fuse_rejects_the_same_input_before_loading(tmp_path, monkeypat
     candidate = _write(source, _two_labels())
     monkeypatch.setattr(
         labelmap,
-        "load",
+        "_load_volume",
         lambda *_args, **_kwargs: pytest.fail(
             "duplicate inputs must fail before loading"
         ),
     )
 
     with pytest.raises(fusion.FusionError, match="same labelmap"):
-        labelmap.fuse(candidate, candidate, str(tmp_path / "out.nii"))
+        labelmap.fuse_labels(
+            candidate, [candidate], str(tmp_path / "out.nii"), preserve_labels=False
+        )
 
 
 def test_labelmap_extract_does_not_call_segmentation(monkeypatch, tmp_path):

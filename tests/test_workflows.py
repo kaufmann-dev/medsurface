@@ -196,11 +196,12 @@ def test_labelmap_fuse_then_labelmap_extract_produces_a_valid_mesh(tmp_path):
     sitk.WriteImage(fixed_image, str(fixed_path))
     sitk.WriteImage(moving_image, str(moving_path))
 
-    fused = labelmap.fuse(
+    fused = labelmap.fuse_labels(
         catalog.discover(fixed_path)[0],
-        catalog.discover(moving_path)[0],
+        [catalog.discover(moving_path)[0]],
         str(fused_path),
         grid_mm=1.0,
+        preserve_labels=False,
     )
     fused_image = sitk.ReadImage(str(fused_path))
     extracted = labelmap.extract(
@@ -209,11 +210,9 @@ def test_labelmap_fuse_then_labelmap_extract_produces_a_valid_mesh(tmp_path):
     )
 
     assert set(np.unique(sitk.GetArrayViewFromImage(fused_image))) == {0, 1}
-    assert fused.registration.surface_overlap > 0.9
-    assert fused.registration.shared_fov_dice > 0.9
-    assert fused.provenance["segmentation"]["foreground"].endswith(
-        "normalized to 1"
-    )
+    assert fused.registrations[0].surface_overlap > 0.9
+    assert fused.registrations[0].shared_fov_dice > 0.9
+    assert fused.provenance["output"]["kind"] == "binary labelmap"
     assert mesh_path.exists()
     assert extracted.quality["valid"]
     assert extracted.quality["components"] == 1

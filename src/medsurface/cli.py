@@ -1878,7 +1878,6 @@ def fuse_labelmaps(
     if names is not None and not preserve_labels:
         _error("--label-names requires --preserve-labels")
         raise typer.Exit(2)
-    legacy = len(moving_inputs) == 1 and not preserve_labels and selection is None
     emitted_warnings: list[str] = []
 
     def emit_warning(message: str) -> None:
@@ -1891,12 +1890,9 @@ def fuse_labelmaps(
         movings = []
         found = list(fixed_found)
         for index, moving_input in enumerate(moving_inputs, start=1):
-            if fixed_input.resolve() == moving_input.resolve():
-                moving, moving_found = fixed, fixed_found
-            else:
-                role = "moving" if len(moving_inputs) == 1 else "moving %d" % index
-                progress.update("Discovering %s labelmap ..." % role)
-                moving, moving_found = _select_labelmap(moving_input, role)
+            role = "moving" if len(moving_inputs) == 1 else "moving %d" % index
+            progress.update("Discovering %s labelmap ..." % role)
+            moving, moving_found = _select_labelmap(moving_input, role)
             movings.append(moving)
             found.extend(moving_found)
         try:
@@ -1914,45 +1910,25 @@ def fuse_labelmaps(
             if json_file is not None
             else nullcontext()
         )
-        sink = _progress_sink(progress)
-        result: Any
         try:
             with transaction:
-                if legacy:
-                    extra: dict[str, Any] = {} if sink is None else {"progress": sink}
-                    result = labelmap_mod.fuse(
-                        fixed=fixed,
-                        moving=movings[0],
-                        output_path=str(output),
-                        grid_mm=(
-                            defaults.DEFAULT_FUSION_GRID_MM if grid_mm is None else grid_mm
-                        ),
-                        force=force,
-                        allow_large_volume=allow_large_volume,
-                        log=progress.log,
-                        warn=emit_warning,
-                        **extra,
-                    )
-                    result_payload = _fusion_result_payload(result)
-                else:
-                    result = labelmap_mod.fuse_labels(
-                        fixed,
-                        movings,
-                        str(output),
-                        grid_mm=grid_mm,
-                        labels=selection,
-                        preserve_labels=preserve_labels,
-                        names=names,
-                        force=force,
-                        allow_large_volume=allow_large_volume,
-                        log=progress.log,
-                        warn=emit_warning,
-                        progress=sink,
-                    )
-                    result_payload = _labelmap_fusion_payload(result)
+                result = labelmap_mod.fuse_labels(
+                    fixed,
+                    movings,
+                    str(output),
+                    grid_mm=grid_mm,
+                    labels=selection,
+                    preserve_labels=preserve_labels,
+                    names=names,
+                    force=force,
+                    allow_large_volume=allow_large_volume,
+                    log=progress.log,
+                    warn=emit_warning,
+                    progress=_progress_sink(progress),
+                )
                 if json_file is not None:
                     payload = {
-                        "result": result_payload,
+                        "result": _labelmap_fusion_payload(result),
                         "provenance": result.provenance,
                     }
                     progress.update("Writing JSON report ...")
@@ -1972,29 +1948,30 @@ def fuse_labelmaps(
 
     _emit_remaining_warnings(result.warnings, emitted_warnings)
     if not quiet:
-        if legacy:
-            _print_fusion_result(result)
-        else:
-            _success("wrote %s" % result.output_path)
-            _log(
-                "%s voxels at %.3f mm   %d label(s)   %.0f cm3   %.1fs"
-                % (
-                    "x".join(str(value) for value in result.grid_size),
-                    result.grid_mm,
-                    len(result.labels),
-                    result.volume_fused_mm3 / 1000.0,
-                    result.seconds,
-                )
+        _success("wrote %s" % result.output_path)
+        _log(
+            "%s voxels at %.3f mm   %d label(s)   %.0f cm3   %.1fs"
+            % (
+                "x".join(str(value) for value in result.grid_size),
+                result.grid_mm,
+                len(result.labels),
+                result.volume_fused_mm3 / 1000.0,
+                result.seconds,
             )
-            hint: list[object] = [
-                "medsurface", "labelmap", "extract", result.output_path, "-o", "MODEL.stl",
-            ]
-            if preserve_labels:
-                hint = [
+        )
+        if preserve_labels:
+            _print_command_hint(
+                "Extract surfaces with:  ",
+                [
                     "medsurface", "labelmap", "extract", result.output_path,
                     "--split", "MODELS", "-o", "COMBINED.stl",
-                ]
-            _print_command_hint("Extract surfaces with:  ", hint)
+                ],
+            )
+        else:
+            _print_command_hint(
+                "Extract a surface with:  ",
+                ["medsurface", "labelmap", "extract", result.output_path, "-o", "MODEL.stl"],
+            )
         if json_file is not None:
             _success("wrote %s" % json_file)
 
