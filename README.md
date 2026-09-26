@@ -72,8 +72,9 @@ medsurface labelmap extract segmentation.nii.gz -o surface.stl
 | `medsurface convert INPUT -o VOLUME`                          | Preserve one image while changing its single-file storage format   |
 | `medsurface extract INPUT -o MODEL.stl`                       | Segment one intensity volume and extract a surface mesh            |
 | `medsurface fuse FIXED MOVING -o LABELMAP`                    | Segment, register, and union two volumes into a binary labelmap    |
-| `medsurface labelmap extract MASK -o MODEL.stl`               | Extract one surface from all nonzero labels in one mask            |
-| `medsurface labelmap fuse FIXED_MASK MOVING_MASK -o LABELMAP` | Register and union two matching labelmaps into one binary labelmap |
+| `medsurface labelmap extract MASK -o MODEL.stl`               | Extract one surface from all nonzero (or `--labels`) labels        |
+| `medsurface labelmap extract MASK --split DIR`                | Extract one validated surface per label                            |
+| `medsurface labelmap fuse FIXED MOVING... -o LABELMAP`        | Register and fuse labelmaps into a binary or `--preserve-labels` map |
 | `medsurface validate MODEL.stl`                               | Report mesh quality without changing the file                      |
 | `medsurface repair MODEL.stl -o FIXED.stl`                    | Repair an open or non-manifold mesh                                |
 
@@ -174,6 +175,23 @@ Different positive source IDs are equivalent and are not preserved. Fusion does
 not transfer source metadata or intensity-preset surface settings to the result;
 the later `labelmap extract` uses its normal labelmap defaults.
 
+### Keep structures separate
+
+Select labels, write one mesh per structure, and fuse more than two scans while
+keeping their label IDs:
+
+```sh
+medsurface labelmap extract segmentations.nii.gz --labels 25-50,91 \
+  --split parts/ -o parts/combined.stl
+medsurface labelmap fuse head.nii.gz neck.nii.gz chest.nii.gz \
+  --preserve-labels -o body.nii.gz
+```
+
+Per-label files are named from the label table TotalSegmentator embeds in NIfTI
+files, or from `--label-names names.json`. Programs can add `--progress json`
+for JSON-lines progress on stderr. See [Using an external
+labelmap][labelmap-guide].
+
 ## Validate and repair
 
 Every mesh-producing extraction validates its serialized mesh before atomic
@@ -203,3 +221,4 @@ explanation][validation].
 [input-limitations]: https://github.com/kaufmann-dev/medsurface/blob/main/docs/user-guide.md#input-requirements-and-limitations
 [validation]: https://github.com/kaufmann-dev/medsurface/blob/main/docs/user-guide.md#understanding-validation
 [destep]: https://github.com/kaufmann-dev/medsurface/blob/main/docs/user-guide.md#reducing-stair-step-ripples
+[labelmap-guide]: https://github.com/kaufmann-dev/medsurface/blob/main/docs/user-guide.md#using-an-external-labelmap
