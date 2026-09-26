@@ -710,15 +710,15 @@ def fuse_label_fields(
     log: Logger | None = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> LabelFieldResult:
-    """Stream every label of every input onto one grid and keep the best label.
+    """Stream every label of every input onto one grid.
 
-    Each label is cropped to its bounding box, antialiased for the target grid,
-    resampled with its input's transform, and compared against a running
-    per-voxel best occupancy. A voxel keeps the label with the highest occupancy
-    when that occupancy exceeds 0.5, which is exactly the union for one label and
-    a fair split between touching labels. Memory is two grid-sized arrays
-    regardless of how many labels or inputs are fused. With ``binary`` every
-    selected label of every input is treated as foreground ``1``.
+    Each input's selected labels are cropped to their bounding box, antialiased
+    for the target grid, and resampled with the input's transform. A voxel is
+    foreground when the union occupancy of any input exceeds 0.5, exactly as in
+    binary fusion, so touching labels never open cracks between them. With
+    ``binary`` foreground is ``1``; otherwise it keeps the label with the highest
+    individual occupancy. Memory is one grid-sized array for a binary union and
+    three for labels, regardless of how many labels or inputs are fused.
     """
 
     def say(message: str) -> None:
@@ -729,8 +729,10 @@ def fuse_label_fields(
         images, transforms, grid_mm, allow_large_volume=allow_large_volume
     )
     shape_zyx = (size[2], size[1], size[0])
-    best_value = np.zeros(shape_zyx, dtype=np.float32)
-    best_label = np.zeros(shape_zyx, dtype=np.uint32)
+    union_value = np.zeros(shape_zyx, dtype=np.float32)
+    if not binary:
+        best_value = np.zeros(shape_zyx, dtype=np.float32)
+        best_label = np.zeros(shape_zyx, dtype=np.uint32)
     say(
         "fused grid %s at %.2f mm isotropic (%.0f M voxels)"
         % ("x".join(str(value) for value in size), grid_mm, math.prod(size) / 1e6)
@@ -746,35 +748,26 @@ def fuse_label_fields(
         present = [int(label) for label in shape.GetLabels()]
         if labels is not None:
             present = [label for label in present if label in labels]
-        if binary and present:
-            groups: list[tuple[int, list[int]]] = [(1, present)]
-        else:
-            groups = [(label, [label]) for label in present]
+        if not present:
+            continue
         margin = _antialias_margin(image, grid_mm)
         inverse = registration.inverse_transform(transform)
         image_size = image.GetSize()
-        for group_label, members in groups:
+
+        def resample(members: list[int]):
+            """Occupancy of ``members`` on the sub-grid it covers, or ``None``."""
             boxes = [shape.GetBoundingBox(member) for member in members]
             low = [min(box[axis] for box in boxes) for axis in range(3)]
             high = [max(box[axis] + box[axis + 3] for box in boxes) for axis in range(3)]
             start = [max(0, low[axis] - margin[axis]) for axis in range(3)]
             stop = [min(image_size[axis], high[axis] + margin[axis]) for axis in range(3)]
             extent = [stop[axis] - start[axis] for axis in range(3)]
-            if progress is not None:
-                progress(
-                    {
-                        "event": "label_start",
-                        "input": input_index,
-                        "label": group_label,
-                    }
-                )
             cropped = sitk.RegionOfInterest(discrete, extent, start)
             if len(members) == 1:
                 mask = sitk.Equal(cropped, members[0])
             else:
-                values = sitk.GetArrayViewFromImage(cropped)
-                selected = np.isin(values, members).astype(np.uint8)
-                mask = sitk.GetImageFromArray(selected)
+                selected = np.isin(sitk.GetArrayViewFromImage(cropped), members)
+                mask = sitk.GetImageFromArray(selected.astype(np.uint8))
                 mask.CopyInformation(cropped)
             occupancy = segment.antialias_for_grid(mask, grid_mm)
             corners = (transform[:3, :3] @ _corners(occupancy).T).T + transform[:3, 3]
@@ -784,7 +777,7 @@ def fuse_label_fields(
             high_index = np.minimum(high_index, np.asarray(size))
             sub_size = high_index - low_index
             if np.any(sub_size <= 0):
-                continue
+                return None
             field = _resample_field(
                 occupancy,
                 (int(sub_size[0]), int(sub_size[1]), int(sub_size[2])),
@@ -792,23 +785,46 @@ def fuse_label_fields(
                 grid_mm,
                 inverse,
             )
-            values = sitk.GetArrayViewFromImage(field)
             region = (
                 slice(int(low_index[2]), int(high_index[2])),
                 slice(int(low_index[1]), int(high_index[1])),
                 slice(int(low_index[0]), int(high_index[0])),
             )
-            current = best_value[region]
-            better = values > current
-            current[better] = values[better]
-            best_label[region][better] = group_label
-            if progress is not None:
-                progress(
-                    {"event": "label_end", "input": input_index, "label": group_label}
-                )
+            return region, sitk.GetArrayFromImage(field)
 
-    result = np.where(best_value > 0.5, best_label, 0).astype(np.uint32)
-    del best_value, best_label
+        def report(event: str, label: int) -> None:
+            if progress is not None:
+                progress({"event": event, "input": input_index, "label": label})
+
+        if binary:
+            report("label_start", 1)
+        sampled = resample(present)
+        if sampled is not None:
+            region, values = sampled
+            np.maximum(union_value[region], values, out=union_value[region])
+        if binary:
+            report("label_end", 1)
+            continue
+        for label in present:
+            report("label_start", label)
+            sampled = resample([label])
+            if sampled is not None:
+                region, values = sampled
+                current = best_value[region]
+                better = values > current
+                current[better] = values[better]
+                best_label[region][better] = label
+            report("label_end", label)
+
+    foreground = union_value > 0.5
+    del union_value
+    if binary:
+        result = foreground.astype(np.uint32)
+    else:
+        del best_value
+        result = np.where(foreground, best_label, 0).astype(np.uint32)
+        del best_label
+    del foreground
     found, counts = np.unique(result, return_counts=True)
     voxels = {int(label): int(count) for label, count in zip(found, counts) if label != 0}
     return LabelFieldResult(

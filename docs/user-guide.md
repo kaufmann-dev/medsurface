@@ -271,9 +271,11 @@ medsurface labelmap extract segmentations.nii.gz --labels 25-50,91 \
   every selected label, extracted from their union, and its extension sets the
   format of the per-label files. Without `-o` the files are `.stl`.
 - Each label is cropped to its bounding box plus a margin covering mask
-  smoothing and resampling, so each mesh matches what a separate
-  `--labels ID` extraction would produce while running much faster. A label that
-  reaches the image boundary is capped exactly as it would be uncropped.
+  smoothing and resampling, which runs much faster than separate `--labels ID`
+  extractions. At native resolution the surface matches a separate extraction;
+  with `--resample-mm` it can differ by up to one resampled voxel, and
+  simplification may pick different triangles within its error limit. A label
+  that reaches the image boundary is capped exactly as it would be uncropped.
 - Selected labels without voxels are skipped with a warning. A label that fails
   is reported and does not stop the others; the command then exits `1`.
 - The JSON report lists every mesh with its quality report, the combined mesh,
@@ -379,10 +381,10 @@ medsurface labelmap extract body.nii.gz --split parts/ -o parts/body.stl
 
 - Registration uses the union of each input's labels (or of `--labels`).
 - Every label of every input is antialiased and resampled onto the shared grid.
-  A voxel keeps the label with the highest occupancy when that occupancy is
-  above `0.5`. For a single label this is the ordinary union; where two labels
-  touch, the boundary is split by their occupancies.
-- The grid spacing is `--grid-mm` (default `0.4 mm`). Memory stays at two
+  A voxel is foreground exactly where the binary union would be, so touching
+  labels never leave gaps between them; it keeps the label with the highest
+  occupancy, which splits boundaries between touching labels.
+- The grid spacing is `--grid-mm` (default `0.4 mm`). Memory stays at three
   grid-sized arrays however many labels and inputs are fused.
 - The output is `uint8`, or `uint16`/`uint32` when label IDs need it. NIfTI
   outputs carry the input label table (and `--label-names`) so `--split`

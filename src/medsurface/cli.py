@@ -1640,12 +1640,6 @@ def extract_labelmap(
         progress.update("Loading labelmap extraction engine ...")
         from . import labelmap as labelmap_mod
 
-        extra: dict[str, Any] = {}
-        if selection is not None:
-            extra["labels"] = selection
-        sink = _progress_sink(progress)
-        if sink is not None:
-            extra["progress"] = sink
         try:
             result = labelmap_mod.extract(
                 candidate=chosen,
@@ -1661,7 +1655,8 @@ def extract_labelmap(
                 allow_large_volume=allow_large_volume,
                 log=progress.log,
                 warn=emit_warning,
-                **extra,
+                labels=selection,
+                progress=_progress_sink(progress),
             )
         except (OSError, RuntimeError, ValueError) as exc:
             _error(exc)

@@ -249,3 +249,18 @@ def test_cli_json_progress_streams_fusion_events(tmp_path):
     stages = {event.get("stage") for event in events if event["event"] == "stage_end"}
     assert "register moving 1 to fixed" in stages
     assert any(event["event"] == "warning" for event in events)
+
+
+@pytest.mark.parametrize("grid_mm", [0.7, 0.45, 0.4, 0.33])
+def test_touching_labels_keep_the_whole_union(grid_mm):
+    values = np.zeros((40, 40, 40), dtype=np.uint8)
+    values[8:32, 8:32, 8:20] = 1
+    values[8:32, 8:20, 20:32] = 2
+    values[8:32, 20:32, 20:32] = 3
+    image = sitk.GetImageFromArray(values)
+
+    labelled = fusion.fuse_label_fields([image], [np.eye(4)], grid_mm).labels
+    union = fusion.fuse_label_fields([image], [np.eye(4)], grid_mm, binary=True).labels
+
+    np.testing.assert_array_equal(labelled > 0, union > 0)
+    assert set(np.unique(labelled)) == {0, 1, 2, 3}
