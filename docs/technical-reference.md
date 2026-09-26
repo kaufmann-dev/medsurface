@@ -68,7 +68,18 @@ Report families are operation-specific:
 - Fusion records output format/compression, scalar `uint8` type, grid geometry,
   fixed/moving/fused foreground counts and volumes, complete registration data,
   segmentation settings, duration, warnings, and both inputs' provenance. It
-  has no triangle, surface-finishing, or mesh-quality fields.
+  has no triangle, surface-finishing, or mesh-quality fields. Label-preserving
+  or N-way fusion instead records the scalar type, per-label voxels, volumes,
+  and names, one registration record per moving input, and every input's
+  provenance.
+- Split extraction records every mesh (label, name, output, counts, bounds,
+  components, capping, settings, quality), the combined mesh, skipped and failed
+  labels, and per-label statistics.
+
+`--progress json` on `labelmap extract` and `labelmap fuse` replaces the human
+progress display with JSON lines on stderr. Library callers receive the same
+events through the `progress` callback of `labelmap.extract`, `extract_labels`,
+`fuse`, and `fuse_labels`.
 
 Reports are written, flushed, and atomically replaced from a same-directory
 temporary file. For conversion and fusion, the CLI also stages a same-filesystem
@@ -222,6 +233,28 @@ settings are resolved only when extraction begins; fusion does not embed them.
 
 Every input axis must contain at least four samples because the shared recursive
 Gaussian and processing contract have no alternate small-image path.
+
+`--labels` (API `labels=`) replaces step 3 with membership in the selected IDs.
+Selections are validated as positive integers and sorted; selecting every
+present label produces the identical mask and mesh.
+
+`labelmap.extract_labels` (CLI `--split`) loads the volume once and measures
+every label with one `LabelShapeStatistics` pass (`labelmap.inspect_labels`:
+voxels, volume, bounding box, boundary contact). Each selected label is cropped
+to its bounding box plus `ceil((3·mask_smooth_mm + 2·resample_mm + 2·spacing) /
+spacing) + 1` voxels per axis, clamped to the image. The margin keeps the
+smoothed occupancy field and resampling support unchanged, and guarantees that a
+label that does not touch the image boundary does not touch the crop boundary,
+so field-of-view capping behaves exactly as for the uncropped image. The crop
+then follows the normal `pipeline.mesh_binary_mask` path. Settings may be one
+`SurfaceSettings` or a callable per label. The optional combined mesh is
+extracted from the union of the selected labels cropped to their joint bounding
+box; concatenating per-label meshes would not form a valid closed surface.
+
+Label names come from the caller or from a NIfTI-1 extension holding a Caret
+label table (`<Label Key="5"><![CDATA[liver]]></Label>`), read by
+`medsurface.labelnames` with the standard library only. File names are
+`{label:03d}_{slug}.{format}`.
 
 ## File-volume compatibility
 
@@ -402,6 +435,28 @@ IDs and their collisions are intentionally collapsed to one class.
 The grid must have finite positive spacing and no coordinate/integer overflow.
 Plans above 500 million voxels are rejected unless `--allow-large-volume` is
 given. A grid coarser than the finest input voxel emits a feature-loss warning.
+
+### Label-preserving and N-way fusion
+
+`labelmap.fuse_labels` (CLI: more than one moving input, `--preserve-labels`,
+or `--labels`) registers every moving input to the fixed input independently,
+using each input's union mask and the gates above. `fusion.common_grid_many`
+plans one grid over every transformed input. `fusion.fuse_label_fields` then
+streams label by label: crop the label's bounding box plus the antialiasing
+margin, antialias for the grid, linearly resample with the input's inverse
+transform onto the sub-grid it covers, and update a running per-voxel best
+occupancy and best label. A voxel keeps its best label when the occupancy is
+strictly above `0.5`. Memory is one `float32` and one `uint32` grid regardless of
+label or input count. In binary mode every selected label of an input is one
+group labelled `1`.
+
+The published volume is `uint8`, `uint16`, or `uint32` depending on the largest
+label, with identity direction and no copied metadata. NIfTI outputs receive a
+Caret label table extension built from the inputs' tables and caller names; the
+embedding rewrite is atomic and verifies that voxel bytes are unchanged. The
+default grid is the finest input spacing with preserved labels and 0.4 mm for a
+binary union. Two inputs without `--preserve-labels` or `--labels` still use
+`fusion.fuse_masks`, byte for byte.
 
 ## Fusion identity contract
 

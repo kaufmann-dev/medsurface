@@ -1352,6 +1352,91 @@ def extract(
     _exit_for_quality(report)
 
 
+def _parse_label_selection(value: str | None) -> list[int] | None:
+    """Parse ``--labels`` such as ``3,7,12`` or ``10-14,20``."""
+    if value is None:
+        return None
+    labels: set[int] = set()
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            if "-" in part:
+                low_text, high_text = part.split("-", 1)
+                low, high = int(low_text), int(high_text)
+                if high < low:
+                    raise ValueError
+                labels.update(range(low, high + 1))
+            else:
+                labels.add(int(part))
+        except ValueError:
+            _error("--labels expects positive label IDs such as 3,7,12 or 10-14")
+            raise typer.Exit(2) from None
+    if not labels or min(labels) <= 0:
+        _error("--labels expects positive label IDs such as 3,7,12 or 10-14")
+        raise typer.Exit(2)
+    return sorted(labels)
+
+
+def _load_label_names(path: Path | None) -> dict[int, str] | None:
+    if path is None:
+        return None
+    from .labelnames import load_names_json
+
+    try:
+        return load_names_json(path)
+    except (OSError, ValueError) as exc:
+        _error("cannot read --label-names %s: %s" % (path, exc))
+        raise typer.Exit(2) from None
+
+
+class ProgressChoice(str, Enum):
+    """Progress formats accepted by ``--progress``."""
+
+    HUMAN = "human"
+    JSON = "json"
+
+
+_PROGRESS_OPTION = typer.Option(
+    ProgressChoice.HUMAN,
+    "--progress",
+    help="Progress format: human-readable stages, or JSON lines on stderr for "
+    "other programs (stage, label, warning, and error events).",
+)
+
+
+class _JsonProgress(_ProgressDisplay):
+    """JSON-lines progress on stderr for programs driving the CLI."""
+
+    def __init__(self) -> None:
+        super().__init__(False, "")
+
+    @staticmethod
+    def emit(event: dict[str, Any]) -> None:
+        sys.stderr.write(json.dumps(event, default=str) + "\n")
+        sys.stderr.flush()
+
+    def update(self, message: str) -> None:
+        self.emit({"event": "status", "message": str(message).strip()})
+
+    def log(self, message: str) -> None:
+        return None
+
+    def diagnostic(self, kind: str, message: object) -> None:
+        self.emit({"event": kind, "message": str(message)})
+
+
+def _progress_display(choice: ProgressChoice, quiet: bool, initial: str) -> _ProgressDisplay:
+    if choice is ProgressChoice.JSON:
+        return _JsonProgress()
+    return _ProgressDisplay(not quiet, initial)
+
+
+def _progress_sink(progress: _ProgressDisplay):
+    return progress.emit if isinstance(progress, _JsonProgress) else None
+
+
 @labelmap_app.command("extract")
 def extract_labelmap(
     input_path: Path = typer.Argument(
@@ -1362,8 +1447,33 @@ def extract_labelmap(
         readable=True,
         help="Direct NIfTI, NRRD, or MetaImage labelmap file.",
     ),
-    output: Path = typer.Option(
-        ..., "-o", "--output", help="Output .stl/.ply/.obj file."
+    output: Path | None = typer.Option(
+        None,
+        "-o",
+        "--output",
+        help="Output .stl/.ply/.obj file. With --split it is optional and receives "
+        "the combined model of every selected label.",
+    ),
+    labels: str | None = typer.Option(
+        None,
+        "--labels",
+        help="Only use these label IDs, e.g. 3,7,12 or 10-14 (default: every nonzero label).",
+    ),
+    split: Path | None = typer.Option(
+        None,
+        "--split",
+        file_okay=False,
+        dir_okay=True,
+        help="Write one mesh per label into this directory as NNN_name.stl.",
+    ),
+    label_names: Path | None = typer.Option(
+        None,
+        "--label-names",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help='JSON object {"5": "liver"} naming --split files (default: the '
+        "label table embedded in a NIfTI input, if any).",
     ),
     resample_mm: float | None = typer.Option(
         None,
@@ -1412,12 +1522,22 @@ def extract_labelmap(
     json_file: Path | None = typer.Option(
         None, "--json", help="Write results and provenance to this JSON file."
     ),
+    progress_format: ProgressChoice = _PROGRESS_OPTION,
     quiet: bool = typer.Option(
         False, "-q", "--quiet", help="Suppress normal progress output."
     ),
 ) -> None:
-    """Create one mesh from every nonzero voxel in a labelmap."""
-    _validate_mesh_output(output)
+    """Create one mesh from every nonzero (or selected) voxel, or one mesh per label."""
+    if output is None and split is None:
+        _error("pass -o/--output, --split, or both")
+        raise typer.Exit(2)
+    if output is not None:
+        _validate_mesh_output(output)
+    selection = _parse_label_selection(labels)
+    names = _load_label_names(label_names)
+    if names is not None and split is None:
+        _error("--label-names requires --split")
+        raise typer.Exit(2)
     _validate_processing_numbers(
         nonnegative=[
             ("--resample-mm", resample_mm),
@@ -1435,13 +1555,35 @@ def extract_labelmap(
         destep_iters,
         destep_max_mm,
     )
+    if split is not None:
+        _extract_labelmap_split(
+            input_path=input_path,
+            split=split,
+            output=output,
+            selection=selection,
+            names=names,
+            resample_mm=resample_mm,
+            mask_smooth_mm=mask_smooth_mm,
+            surface_smooth_iters=surface_smooth_iters,
+            simplify_error_mm=simplify_error_mm,
+            post_surface_smooth_iters=post_surface_smooth_iters,
+            keep_largest_component=_keep_largest_component(components),
+            destep_settings=destep_settings,
+            no_cap=no_cap,
+            allow_large_volume=allow_large_volume,
+            json_file=json_file,
+            progress_format=progress_format,
+            quiet=quiet,
+        )
+        return
+    assert output is not None
     emitted_warnings: list[str] = []
 
     def emit_warning(message: str) -> None:
         emitted_warnings.append(message)
         _warn(message)
 
-    progress = _ProgressDisplay(not quiet, "Discovering labelmap ...")
+    progress = _progress_display(progress_format, quiet, "Discovering labelmap ...")
     with progress:
         chosen, found = _select_labelmap(input_path)
         try:
@@ -1453,6 +1595,12 @@ def extract_labelmap(
         progress.update("Loading labelmap extraction engine ...")
         from . import labelmap as labelmap_mod
 
+        extra: dict[str, Any] = {}
+        if selection is not None:
+            extra["labels"] = selection
+        sink = _progress_sink(progress)
+        if sink is not None:
+            extra["progress"] = sink
         try:
             result = labelmap_mod.extract(
                 candidate=chosen,
@@ -1468,8 +1616,9 @@ def extract_labelmap(
                 allow_large_volume=allow_large_volume,
                 log=progress.log,
                 warn=emit_warning,
+                **extra,
             )
-        except ValueError as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             _error(exc)
             raise typer.Exit(1) from None
 
@@ -1511,6 +1660,146 @@ def extract_labelmap(
     _exit_for_quality(report)
 
 
+def _extract_labelmap_split(
+    *,
+    input_path: Path,
+    split: Path,
+    output: Path | None,
+    selection: list[int] | None,
+    names: dict[int, str] | None,
+    resample_mm: float | None,
+    mask_smooth_mm: float,
+    surface_smooth_iters: int,
+    simplify_error_mm: float | None,
+    post_surface_smooth_iters: int,
+    keep_largest_component: bool | None,
+    destep_settings: presets_mod.DestepSettings | None,
+    no_cap: bool,
+    allow_large_volume: bool,
+    json_file: Path | None,
+    progress_format: ProgressChoice,
+    quiet: bool,
+) -> None:
+    if split.exists() and not split.is_dir():
+        _error("--split must name a directory: %s" % split)
+        raise typer.Exit(2)
+    mesh_format = extension(output).lstrip(".") if output is not None else "stl"
+    emitted_warnings: list[str] = []
+
+    def emit_warning(message: str) -> None:
+        emitted_warnings.append(message)
+        _warn(message)
+
+    progress = _progress_display(progress_format, quiet, "Discovering labelmap ...")
+    with progress:
+        chosen, found = _select_labelmap(input_path)
+        try:
+            if output is not None:
+                _protect_output_paths(found, output, json_file)
+            elif json_file is not None:
+                _protect_output_paths(found, json_file, None)
+        except ValueError as exc:
+            _error(exc)
+            raise typer.Exit(2) from None
+
+        progress.update("Loading labelmap extraction engine ...")
+        from . import labelmap as labelmap_mod
+
+        try:
+            settings = labelmap_mod.resolve_surface_settings(
+                resample_mm=resample_mm,
+                mask_smooth_mm=mask_smooth_mm,
+                surface_smooth_iters=surface_smooth_iters,
+                simplify_error_mm=simplify_error_mm,
+                post_surface_smooth_iters=post_surface_smooth_iters,
+                keep_largest_component=keep_largest_component,
+                destep=destep_settings,
+            )
+            result = labelmap_mod.extract_labels(
+                chosen,
+                str(split),
+                labels=selection,
+                names=names,
+                settings=settings,
+                combined_path=None if output is None else str(output),
+                mesh_format=mesh_format,
+                cap_field_of_view=not no_cap,
+                allow_large_volume=allow_large_volume,
+                log=progress.log,
+                warn=emit_warning,
+                progress=_progress_sink(progress),
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            _error(exc)
+            raise typer.Exit(1) from None
+
+        if json_file is not None:
+            payload = {
+                "result": {
+                    "output_dir": result.output_dir,
+                    "meshes": [mesh.payload() for mesh in result.meshes],
+                    "combined": (
+                        None if result.combined is None else result.combined.payload()
+                    ),
+                    "skipped": result.skipped,
+                    "failed": result.failed,
+                    "seconds": result.seconds,
+                    "warnings": result.warnings,
+                },
+                "provenance": result.provenance,
+            }
+            progress.update("Writing JSON report ...")
+            try:
+                _write_json_file(json_file, payload)
+            except OSError as exc:
+                _error("cannot write JSON report %s: %s" % (json_file, exc))
+                raise typer.Exit(1) from None
+
+    _emit_remaining_warnings(result.warnings, emitted_warnings)
+    meshes = [*result.meshes, *([result.combined] if result.combined else [])]
+    if not quiet:
+        for mesh in meshes:
+            label = "combined" if mesh.label is None else "label %d" % mesh.label
+            if mesh.name:
+                label += " (%s)" % mesh.name
+            _success("wrote %s   %s" % (mesh.output_path, label))
+        _log(
+            "%d mesh(es)   triangles %s   %.1fs"
+            % (
+                len(meshes),
+                f"{sum(mesh.triangles for mesh in meshes):,}",
+                result.seconds,
+            )
+        )
+        if json_file is not None:
+            _success("wrote %s" % json_file)
+    for mesh in meshes:
+        _warn_if_invalid(mesh.quality, mesh.output_path)
+    for failure in result.failed:
+        _error("label %s failed: %s" % (failure["label"], failure["error"]))
+    if result.failed or not all(mesh.quality["valid"] for mesh in meshes):
+        raise typer.Exit(1)
+
+
+def _labelmap_fusion_payload(result: Any) -> dict[str, Any]:
+    return {
+        "output": result.output_path,
+        "format": result.output_format,
+        "compression": result.compression,
+        "pixel_type": result.pixel_type,
+        "components": 1,
+        "labels_preserved": result.preserve_labels,
+        "grid_mm": result.grid_mm,
+        "grid_size": list(result.grid_size),
+        "grid_origin_mm": list(result.grid_origin_mm),
+        "grid_direction": list(result.grid_direction),
+        "labels": {str(label): item for label, item in result.labels.items()},
+        "volume_fused_mm3": result.volume_fused_mm3,
+        "seconds": result.seconds,
+        "warnings": result.warnings,
+    }
+
+
 @labelmap_app.command("fuse")
 def fuse_labelmaps(
     fixed_input: Path = typer.Argument(
@@ -1521,24 +1810,46 @@ def fuse_labelmaps(
         readable=True,
         help="Fixed labelmap; defines the output coordinate frame.",
     ),
-    moving_input: Path = typer.Argument(
+    moving_inputs: list[Path] = typer.Argument(
         ...,
         exists=True,
         file_okay=True,
         dir_okay=False,
         readable=True,
-        help="Moving labelmap to register to the fixed labelmap.",
+        metavar="MOVING...",
+        help="One or more moving labelmaps to register to the fixed labelmap.",
     ),
     output: Path = typer.Option(
         ...,
         "-o",
         "--output",
-        help="Atomic .nii/.nii.gz/.nrrd/.mha binary labelmap.",
+        help="Atomic .nii/.nii.gz/.nrrd/.mha labelmap (binary unless --preserve-labels).",
     ),
-    grid_mm: float = typer.Option(
-        defaults.DEFAULT_FUSION_GRID_MM,
+    preserve_labels: bool = typer.Option(
+        False,
+        "--preserve-labels",
+        help="Keep label IDs instead of writing a binary union; touching labels "
+        "are split by their fused occupancy. NIfTI outputs keep label names.",
+    ),
+    labels: str | None = typer.Option(
+        None,
+        "--labels",
+        help="Only fuse these label IDs, e.g. 3,7,12 or 10-14 (default: every nonzero label).",
+    ),
+    label_names: Path | None = typer.Option(
+        None,
+        "--label-names",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help='JSON object {"5": "liver"} of names embedded in a NIfTI output '
+        "with --preserve-labels (default: names embedded in the inputs).",
+    ),
+    grid_mm: float | None = typer.Option(
+        None,
         "--grid-mm",
-        help="Isotropic fused-grid voxel size in mm.",
+        help="Isotropic fused-grid voxel size in mm (default: %.1f for a binary union, "
+        "the finest input spacing with --preserve-labels)." % defaults.DEFAULT_FUSION_GRID_MM,
     ),
     force: bool = typer.Option(
         False, "--force", help="Override registration-quality gates."
@@ -1551,32 +1862,45 @@ def fuse_labelmaps(
     json_file: Path | None = typer.Option(
         None, "--json", help="Write results and provenance to this JSON file."
     ),
+    progress_format: ProgressChoice = _PROGRESS_OPTION,
     quiet: bool = typer.Option(
         False, "-q", "--quiet", help="Suppress normal progress output."
     ),
 ) -> None:
-    """Register and union two labelmaps into one binary labelmap."""
+    """Register and fuse two or more labelmaps into one binary or labelled labelmap."""
     _validate_volume_output(output)
     _validate_processing_numbers(
         nonnegative=[],
         positive=(("--grid-mm", grid_mm),),
     )
+    selection = _parse_label_selection(labels)
+    names = _load_label_names(label_names)
+    if names is not None and not preserve_labels:
+        _error("--label-names requires --preserve-labels")
+        raise typer.Exit(2)
+    legacy = len(moving_inputs) == 1 and not preserve_labels and selection is None
     emitted_warnings: list[str] = []
 
     def emit_warning(message: str) -> None:
         emitted_warnings.append(message)
         _warn(message)
 
-    progress = _ProgressDisplay(not quiet, "Discovering fixed labelmap ...")
+    progress = _progress_display(progress_format, quiet, "Discovering fixed labelmap ...")
     with progress:
         fixed, fixed_found = _select_labelmap(fixed_input, "fixed")
-        if fixed_input.resolve() == moving_input.resolve():
-            moving, moving_found = fixed, fixed_found
-        else:
-            progress.update("Discovering moving labelmap ...")
-            moving, moving_found = _select_labelmap(moving_input, "moving")
+        movings = []
+        found = list(fixed_found)
+        for index, moving_input in enumerate(moving_inputs, start=1):
+            if fixed_input.resolve() == moving_input.resolve():
+                moving, moving_found = fixed, fixed_found
+            else:
+                role = "moving" if len(moving_inputs) == 1 else "moving %d" % index
+                progress.update("Discovering %s labelmap ..." % role)
+                moving, moving_found = _select_labelmap(moving_input, role)
+            movings.append(moving)
+            found.extend(moving_found)
         try:
-            _protect_output_paths([*fixed_found, *moving_found], output, json_file)
+            _protect_output_paths(found, output, json_file)
         except ValueError as exc:
             _error(exc)
             raise typer.Exit(2) from None
@@ -1590,21 +1914,45 @@ def fuse_labelmaps(
             if json_file is not None
             else nullcontext()
         )
+        sink = _progress_sink(progress)
+        result: Any
         try:
             with transaction:
-                result = labelmap_mod.fuse(
-                    fixed=fixed,
-                    moving=moving,
-                    output_path=str(output),
-                    grid_mm=grid_mm,
-                    force=force,
-                    allow_large_volume=allow_large_volume,
-                    log=progress.log,
-                    warn=emit_warning,
-                )
+                if legacy:
+                    extra: dict[str, Any] = {} if sink is None else {"progress": sink}
+                    result = labelmap_mod.fuse(
+                        fixed=fixed,
+                        moving=movings[0],
+                        output_path=str(output),
+                        grid_mm=(
+                            defaults.DEFAULT_FUSION_GRID_MM if grid_mm is None else grid_mm
+                        ),
+                        force=force,
+                        allow_large_volume=allow_large_volume,
+                        log=progress.log,
+                        warn=emit_warning,
+                        **extra,
+                    )
+                    result_payload = _fusion_result_payload(result)
+                else:
+                    result = labelmap_mod.fuse_labels(
+                        fixed,
+                        movings,
+                        str(output),
+                        grid_mm=grid_mm,
+                        labels=selection,
+                        preserve_labels=preserve_labels,
+                        names=names,
+                        force=force,
+                        allow_large_volume=allow_large_volume,
+                        log=progress.log,
+                        warn=emit_warning,
+                        progress=sink,
+                    )
+                    result_payload = _labelmap_fusion_payload(result)
                 if json_file is not None:
                     payload = {
-                        "result": _fusion_result_payload(result),
+                        "result": result_payload,
                         "provenance": result.provenance,
                     }
                     progress.update("Writing JSON report ...")
@@ -1624,7 +1972,29 @@ def fuse_labelmaps(
 
     _emit_remaining_warnings(result.warnings, emitted_warnings)
     if not quiet:
-        _print_fusion_result(result)
+        if legacy:
+            _print_fusion_result(result)
+        else:
+            _success("wrote %s" % result.output_path)
+            _log(
+                "%s voxels at %.3f mm   %d label(s)   %.0f cm3   %.1fs"
+                % (
+                    "x".join(str(value) for value in result.grid_size),
+                    result.grid_mm,
+                    len(result.labels),
+                    result.volume_fused_mm3 / 1000.0,
+                    result.seconds,
+                )
+            )
+            hint: list[object] = [
+                "medsurface", "labelmap", "extract", result.output_path, "-o", "MODEL.stl",
+            ]
+            if preserve_labels:
+                hint = [
+                    "medsurface", "labelmap", "extract", result.output_path,
+                    "--split", "MODELS", "-o", "COMBINED.stl",
+                ]
+            _print_command_hint("Extract surfaces with:  ", hint)
         if json_file is not None:
             _success("wrote %s" % json_file)
 
