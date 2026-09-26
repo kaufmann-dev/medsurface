@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 import os
@@ -335,10 +336,13 @@ class _ProgressDisplay:
                     _active_progress.reset(self._context_token)
                     self._context_token = None
                 if cancelled:
-                    self.diagnostic_console.print(Text("Cancelled.", style="yellow"))
+                    self._report_cancelled()
             finally:
                 if previous_sigint_handler is not None:
                     signal.signal(signal.SIGINT, previous_sigint_handler)
+
+    def _report_cancelled(self) -> None:
+        self.diagnostic_console.print(Text("Cancelled.", style="yellow"))
 
     def _print(self, message: str) -> None:
         self.console.print(Text(message, style="cyan"))
@@ -398,20 +402,39 @@ def _print_diagnostic(console: Console, kind: str, message: object) -> None:
     console.print(_styled_message(prefix, style, message))
 
 
-def _warn(message: object) -> None:
+class _JsonSession:
+    """One command run with ``--progress json``: collects its final report."""
+
+    def __init__(self) -> None:
+        self.result: object | None = None
+
+
+_json_session: ContextVar[_JsonSession | None] = ContextVar(
+    "json_session", default=None
+)
+
+
+def _emit_json(event: dict[str, Any]) -> None:
+    sys.stderr.write(json.dumps(event, default=str) + "\n")
+    sys.stderr.flush()
+
+
+def _diagnostic(kind: str, message: object) -> None:
     progress = _active_progress.get()
     if progress is not None:
-        progress.diagnostic("warning", message)
+        progress.diagnostic(kind, message)
+    elif _json_session.get() is not None:
+        _emit_json({"event": kind, "message": str(message)})
     else:
-        _print_diagnostic(stderr_console, "warning", message)
+        _print_diagnostic(stderr_console, kind, message)
+
+
+def _warn(message: object) -> None:
+    _diagnostic("warning", message)
 
 
 def _error(message: object) -> None:
-    progress = _active_progress.get()
-    if progress is not None:
-        progress.diagnostic("error", message)
-    else:
-        _print_diagnostic(stderr_console, "error", message)
+    _diagnostic("error", message)
 
 
 class ProgressChoice(str, Enum):
@@ -440,10 +463,11 @@ class _JsonProgress(_ProgressDisplay):
         self.update(self.initial)
         return self
 
-    @staticmethod
-    def emit(event: dict[str, Any]) -> None:
-        sys.stderr.write(json.dumps(event, default=str) + "\n")
-        sys.stderr.flush()
+    def _report_cancelled(self) -> None:
+        # The final result event reports cancellation as exit code 130.
+        return None
+
+    emit = staticmethod(_emit_json)
 
     def update(self, message: str) -> None:
         self.emit({"event": "status", "message": str(message).strip()})
@@ -463,6 +487,62 @@ def _progress_display(choice: ProgressChoice, quiet: bool, initial: str) -> _Pro
 
 def _progress_sink(progress: _ProgressDisplay):
     return progress.emit if isinstance(progress, _JsonProgress) else None
+
+
+def _machine_readable(command):
+    """Give a command a complete JSON-lines stream under ``--progress json``.
+
+    Human stdout is suppressed, every warning and error is an event, and the
+    run ends with ``{"event": "result", "exit_code": ..., "result": ...}``
+    carrying the same report ``--json`` writes, or ``null`` when the command
+    failed before producing one.
+    """
+
+    @functools.wraps(command)
+    def run(*args: Any, **kwargs: Any) -> None:
+        if kwargs.get("progress_format") is not ProgressChoice.JSON:
+            command(*args, **kwargs)
+            return
+        kwargs["quiet"] = True
+        session = _JsonSession()
+        token = _json_session.set(session)
+        exit_code = 0
+        try:
+            command(*args, **kwargs)
+        except typer.Exit as exc:
+            exit_code = exc.exit_code
+            raise
+        except KeyboardInterrupt:
+            exit_code = 130
+            raise
+        except Exception as exc:
+            exit_code = 1
+            _emit_json({"event": "error", "message": str(exc)})
+            raise
+        finally:
+            _json_session.reset(token)
+            _emit_json(
+                {"event": "result", "exit_code": exit_code, "result": session.result}
+            )
+
+    return run
+
+
+def _publish_report(
+    progress: _ProgressDisplay | None, json_file: Path | None, payload: object
+) -> None:
+    """Write the optional ``--json`` report and hand it to the JSON result event."""
+    if json_file is not None:
+        if progress is not None:
+            progress.update("Writing JSON report ...")
+        try:
+            _write_json_file(json_file, payload)
+        except OSError as exc:
+            _error("cannot write JSON report %s: %s" % (json_file, exc))
+            raise typer.Exit(1) from None
+    session = _json_session.get()
+    if session is not None:
+        session.result = payload
 
 
 def _quality_status(report: dict[str, Any] | None) -> int:
@@ -903,6 +983,7 @@ def _protect_output_paths(
 
 
 @app.command("list")
+@_machine_readable
 def list_volumes(
     input_path: Path = typer.Argument(
         ...,
@@ -937,53 +1018,48 @@ def list_volumes(
     from . import catalog
 
     recommended = catalog.recommended(found)
-    if json_file is not None:
-        payload = [
-            {
-                "id": candidate.id,
-                "default": candidate is recommended,
-                "format": candidate.format,
-                "source": candidate.source_name,
-                "modality": candidate.modality,
-                "description": candidate.description,
-                "size": list(candidate.size) if candidate.size else None,
-                "spacing": list(candidate.spacing) if candidate.spacing else None,
-                "origin": list(candidate.origin) if candidate.origin else None,
-                "direction": list(candidate.direction) if candidate.direction else None,
-                "pixel_type": candidate.pixel_type,
-                "components": candidate.components,
-                "plane": candidate.plane,
-                "usable": candidate.usable,
-                "unusable_reason": candidate.unusable_reason,
-                "dicom": (
-                    {
-                        "uid": candidate.dicom.uid,
-                        "part": candidate.dicom.part,
-                        "n_parts": candidate.dicom.n_parts,
-                        "series_number": candidate.dicom.series_number,
-                        "kernel": list(candidate.dicom.kernel_values),
-                        "sharp_kernel": candidate.dicom.sharp_kernel,
-                        "spacing_uniform": candidate.dicom.spacing_uniform,
-                        "spacing_spread_mm": candidate.dicom.spacing_spread_mm,
-                        "localizer": candidate.dicom.is_localizer,
-                        "image_type": list(candidate.dicom.image_type),
-                        "rescale_type": candidate.dicom.rescale_type,
-                        "multi_energy_ct_acquisition": (
-                            candidate.dicom.multi_energy_ct_acquisition
-                        ),
-                        "hu_calibration_verified": candidate.dicom.has_calibrated_hu,
-                    }
-                    if candidate.dicom is not None
-                    else None
-                ),
-            }
-            for candidate in found
-        ]
-        try:
-            _write_json_file(json_file, payload)
-        except OSError as exc:
-            _error("cannot write JSON report %s: %s" % (json_file, exc))
-            raise typer.Exit(1) from None
+    payload = [
+        {
+            "id": candidate.id,
+            "default": candidate is recommended,
+            "format": candidate.format,
+            "source": candidate.source_name,
+            "modality": candidate.modality,
+            "description": candidate.description,
+            "size": list(candidate.size) if candidate.size else None,
+            "spacing": list(candidate.spacing) if candidate.spacing else None,
+            "origin": list(candidate.origin) if candidate.origin else None,
+            "direction": list(candidate.direction) if candidate.direction else None,
+            "pixel_type": candidate.pixel_type,
+            "components": candidate.components,
+            "plane": candidate.plane,
+            "usable": candidate.usable,
+            "unusable_reason": candidate.unusable_reason,
+            "dicom": (
+                {
+                    "uid": candidate.dicom.uid,
+                    "part": candidate.dicom.part,
+                    "n_parts": candidate.dicom.n_parts,
+                    "series_number": candidate.dicom.series_number,
+                    "kernel": list(candidate.dicom.kernel_values),
+                    "sharp_kernel": candidate.dicom.sharp_kernel,
+                    "spacing_uniform": candidate.dicom.spacing_uniform,
+                    "spacing_spread_mm": candidate.dicom.spacing_spread_mm,
+                    "localizer": candidate.dicom.is_localizer,
+                    "image_type": list(candidate.dicom.image_type),
+                    "rescale_type": candidate.dicom.rescale_type,
+                    "multi_energy_ct_acquisition": (
+                        candidate.dicom.multi_energy_ct_acquisition
+                    ),
+                    "hu_calibration_verified": candidate.dicom.has_calibrated_hu,
+                }
+                if candidate.dicom is not None
+                else None
+            ),
+        }
+        for candidate in found
+    ]
+    _publish_report(None, json_file, payload)
     if quiet:
         return
 
@@ -1077,6 +1153,7 @@ def presets() -> None:
 
 
 @app.command()
+@_machine_readable
 def convert(
     input_path: Path = typer.Argument(
         ...,
@@ -1163,30 +1240,24 @@ def convert(
                     warn=emit_warning,
                     progress=_progress_sink(progress),
                 )
-                if json_file is not None:
-                    payload = {
-                        "result": {
-                            "output": result.output_path,
-                            "format": result.format,
-                            "compression": result.compression,
-                            "dimensions": list(result.dimensions),
-                            "pixel_type": result.pixel_type,
-                            "components": result.components,
-                            "spacing_mm": list(result.spacing),
-                            "origin_mm": list(result.origin),
-                            "direction": list(result.direction),
-                            "seconds": result.seconds,
-                            "warnings": result.warnings,
-                            "metadata_policy": result.metadata_policy,
-                        },
-                        "provenance": result.provenance,
-                    }
-                    progress.update("Writing JSON report ...")
-                    try:
-                        _write_json_file(json_file, payload)
-                    except OSError as exc:
-                        _error("cannot write JSON report %s: %s" % (json_file, exc))
-                        raise typer.Exit(1) from None
+                payload = {
+                    "result": {
+                        "output": result.output_path,
+                        "format": result.format,
+                        "compression": result.compression,
+                        "dimensions": list(result.dimensions),
+                        "pixel_type": result.pixel_type,
+                        "components": result.components,
+                        "spacing_mm": list(result.spacing),
+                        "origin_mm": list(result.origin),
+                        "direction": list(result.direction),
+                        "seconds": result.seconds,
+                        "warnings": result.warnings,
+                        "metadata_policy": result.metadata_policy,
+                    },
+                    "provenance": result.provenance,
+                }
+                _publish_report(progress, json_file, payload)
         except typer.Exit:
             raise
         except (OSError, RuntimeError, ValueError) as exc:
@@ -1209,6 +1280,7 @@ def convert(
 
 
 @app.command()
+@_machine_readable
 def extract(
     ctx: typer.Context,
     input_path: Path = typer.Argument(
@@ -1400,28 +1472,22 @@ def extract(
 
         report = result.quality
 
-        if json_file is not None:
-            payload = {
-                "result": {
-                    "output": result.output_path,
-                    "triangles": result.triangles,
-                    "vertices": result.vertices,
-                    "bounds_mm": list(result.bounds_mm),
-                    "seconds": result.seconds,
-                    "capped_field_of_view": result.capped_field_of_view,
-                    "labelmap_components": result.labelmap_components,
-                    "surface_components": result.surface_components,
-                    "warnings": result.warnings,
-                },
-                "provenance": result.provenance,
-                "quality": report,
-            }
-            progress.update("Writing JSON report ...")
-            try:
-                _write_json_file(json_file, payload)
-            except OSError as exc:
-                _error("cannot write JSON report %s: %s" % (json_file, exc))
-                raise typer.Exit(1) from None
+        payload = {
+            "result": {
+                "output": result.output_path,
+                "triangles": result.triangles,
+                "vertices": result.vertices,
+                "bounds_mm": list(result.bounds_mm),
+                "seconds": result.seconds,
+                "capped_field_of_view": result.capped_field_of_view,
+                "labelmap_components": result.labelmap_components,
+                "surface_components": result.surface_components,
+                "warnings": result.warnings,
+            },
+            "provenance": result.provenance,
+            "quality": report,
+        }
+        _publish_report(progress, json_file, payload)
 
     _emit_remaining_warnings(result.warnings, emitted_warnings)
 
@@ -1480,6 +1546,7 @@ def _load_label_names(path: Path | None) -> dict[int, str] | None:
 
 
 @labelmap_app.command("extract")
+@_machine_readable
 def extract_labelmap(
     ctx: typer.Context,
     input_path: Path = typer.Argument(
@@ -1663,28 +1730,22 @@ def extract_labelmap(
             raise typer.Exit(1) from None
 
         report = result.quality
-        if json_file is not None:
-            payload = {
-                "result": {
-                    "output": result.output_path,
-                    "triangles": result.triangles,
-                    "vertices": result.vertices,
-                    "bounds_mm": list(result.bounds_mm),
-                    "seconds": result.seconds,
-                    "capped_field_of_view": result.capped_field_of_view,
-                    "labelmap_components": result.labelmap_components,
-                    "surface_components": result.surface_components,
-                    "warnings": result.warnings,
-                },
-                "provenance": result.provenance,
-                "quality": report,
-            }
-            progress.update("Writing JSON report ...")
-            try:
-                _write_json_file(json_file, payload)
-            except OSError as exc:
-                _error("cannot write JSON report %s: %s" % (json_file, exc))
-                raise typer.Exit(1) from None
+        payload = {
+            "result": {
+                "output": result.output_path,
+                "triangles": result.triangles,
+                "vertices": result.vertices,
+                "bounds_mm": list(result.bounds_mm),
+                "seconds": result.seconds,
+                "capped_field_of_view": result.capped_field_of_view,
+                "labelmap_components": result.labelmap_components,
+                "surface_components": result.surface_components,
+                "warnings": result.warnings,
+            },
+            "provenance": result.provenance,
+            "quality": report,
+        }
+        _publish_report(progress, json_file, payload)
 
     _emit_remaining_warnings(result.warnings, emitted_warnings)
     if not quiet:
@@ -1773,27 +1834,21 @@ def _extract_labelmap_split(
             _error(exc)
             raise typer.Exit(1) from None
 
-        if json_file is not None:
-            payload = {
-                "result": {
-                    "output_dir": result.output_dir,
-                    "meshes": [mesh.payload() for mesh in result.meshes],
-                    "combined": (
-                        None if result.combined is None else result.combined.payload()
-                    ),
-                    "skipped": result.skipped,
-                    "failed": result.failed,
-                    "seconds": result.seconds,
-                    "warnings": result.warnings,
-                },
-                "provenance": result.provenance,
-            }
-            progress.update("Writing JSON report ...")
-            try:
-                _write_json_file(json_file, payload)
-            except OSError as exc:
-                _error("cannot write JSON report %s: %s" % (json_file, exc))
-                raise typer.Exit(1) from None
+        payload = {
+            "result": {
+                "output_dir": result.output_dir,
+                "meshes": [mesh.payload() for mesh in result.meshes],
+                "combined": (
+                    None if result.combined is None else result.combined.payload()
+                ),
+                "skipped": result.skipped,
+                "failed": result.failed,
+                "seconds": result.seconds,
+                "warnings": result.warnings,
+            },
+            "provenance": result.provenance,
+        }
+        _publish_report(progress, json_file, payload)
 
     _emit_remaining_warnings(result.warnings, emitted_warnings)
     meshes = [*result.meshes, *([result.combined] if result.combined else [])]
@@ -1841,6 +1896,7 @@ def _labelmap_fusion_payload(result: Any) -> dict[str, Any]:
 
 
 @labelmap_app.command("fuse")
+@_machine_readable
 def fuse_labelmaps(
     fixed_input: Path = typer.Argument(
         ...,
@@ -1967,17 +2023,11 @@ def fuse_labelmaps(
                     warn=emit_warning,
                     progress=_progress_sink(progress),
                 )
-                if json_file is not None:
-                    payload = {
-                        "result": _labelmap_fusion_payload(result),
-                        "provenance": result.provenance,
-                    }
-                    progress.update("Writing JSON report ...")
-                    try:
-                        _write_json_file(json_file, payload)
-                    except OSError as exc:
-                        _error("cannot write JSON report %s: %s" % (json_file, exc))
-                        raise typer.Exit(1) from None
+                payload = {
+                    "result": _labelmap_fusion_payload(result),
+                    "provenance": result.provenance,
+                }
+                _publish_report(progress, json_file, payload)
         except typer.Exit:
             raise
         except fusion_mod.FusionError as exc:
@@ -2018,6 +2068,7 @@ def fuse_labelmaps(
 
 
 @app.command()
+@_machine_readable
 def fuse(
     fixed_input: Path = typer.Argument(
         ...,
@@ -2192,17 +2243,11 @@ def fuse(
                     warn=emit_warning,
                     progress=_progress_sink(progress),
                 )
-                if json_file is not None:
-                    payload = {
-                        "result": _fusion_result_payload(result),
-                        "provenance": result.provenance,
-                    }
-                    progress.update("Writing JSON report ...")
-                    try:
-                        _write_json_file(json_file, payload)
-                    except OSError as exc:
-                        _error("cannot write JSON report %s: %s" % (json_file, exc))
-                        raise typer.Exit(1) from None
+                payload = {
+                    "result": _fusion_result_payload(result),
+                    "provenance": result.provenance,
+                }
+                _publish_report(progress, json_file, payload)
         except typer.Exit:
             raise
         except fusion_mod.FusionError as exc:
@@ -2221,6 +2266,7 @@ def fuse(
 
 
 @app.command()
+@_machine_readable
 def validate(
     mesh: Path = typer.Argument(
         ...,
@@ -2256,13 +2302,7 @@ def validate(
         except (OSError, RuntimeError, ValueError) as exc:
             _error("cannot validate %s: %s" % (mesh, exc))
             raise typer.Exit(1) from None
-        if json_file is not None:
-            progress.update("Writing JSON report ...")
-            try:
-                _write_json_file(json_file, report)
-            except OSError as exc:
-                _error("cannot write JSON report %s: %s" % (json_file, exc))
-                raise typer.Exit(1) from None
+        _publish_report(progress, json_file, report)
     if not quiet:
         stdout_console.print(_plain(mesh, "bold"))
         _print_quality(report)
@@ -2272,6 +2312,7 @@ def validate(
 
 
 @app.command()
+@_machine_readable
 def repair(
     mesh: Path = typer.Argument(
         ...,
@@ -2317,20 +2358,15 @@ def repair(
                     log=progress.log,
                     progress=_progress_sink(progress),
                 )
-                if json_file is not None:
-                    progress.update("Writing JSON report ...")
-                    try:
-                        _write_json_file(
-                            json_file,
-                            {
-                                "output": str(output),
-                                "repair": result.stats,
-                                "quality": result.quality,
-                            },
-                        )
-                    except OSError as exc:
-                        _error("cannot write JSON report %s: %s" % (json_file, exc))
-                        raise typer.Exit(1) from None
+                _publish_report(
+                    progress,
+                    json_file,
+                    {
+                        "output": str(output),
+                        "repair": result.stats,
+                        "quality": result.quality,
+                    },
+                )
         except typer.Exit:
             raise
         except (OSError, RuntimeError, ValueError) as exc:

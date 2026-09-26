@@ -489,12 +489,11 @@ def extract_labels(
     """Extract one validated mesh per label, plus an optional combined mesh.
 
     Each label is cropped to its bounding box plus :func:`crop_margin_voxels`,
-    so memory and time scale with the structure instead of the whole scan. At
-    native resolution the surface matches an uncropped extraction; with
-    ``resample_mm`` the resampled lattice starts at the crop, so the surface can
-    differ by up to one resampled voxel. Simplification may choose different
-    triangles within its error limit either way. A label that reaches the image
-    boundary is capped exactly as :func:`extract` would cap it. The combined
+    so memory and time scale with the structure instead of the whole scan. The
+    surface matches an uncropped extraction, because resampling samples the
+    uncropped image's lattice; simplification may still choose different
+    triangles within its error limit. A label that reaches the image boundary is
+    capped exactly as :func:`extract` would cap it. The combined
     mesh is extracted from the union of the selected labels; concatenating the
     per-label meshes would not form one valid closed surface.
 
@@ -603,6 +602,7 @@ def extract_labels(
             step=label_step,
             log=say,
             warn=add_warning,
+            lattice_origin=image.GetOrigin(),
         )
         return LabelMesh(
             label=label,

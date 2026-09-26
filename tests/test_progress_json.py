@@ -19,13 +19,15 @@ def _events(stderr: str) -> list[dict]:
 
 
 def _run(argv: list[str]) -> list[dict]:
-    result = runner.invoke(
-        cli.app, [*argv, "--progress", "json", "-q"], prog_name="medsurface"
-    )
+    result = runner.invoke(cli.app, [*argv, "--progress", "json"], prog_name="medsurface")
     assert result.exit_code == 0, result.output
     assert result.stdout == ""
     events = _events(result.stderr)
-    assert events and events[0]["event"] == "status"
+    assert events[0]["event"] == "status"
+    final = events[-1]
+    assert final["event"] == "result" and final["exit_code"] == 0
+    assert final["result"] is not None
+    assert all(event["event"] != "result" for event in events[:-1])
     return events
 
 
@@ -84,3 +86,38 @@ def test_every_command_streams_json_progress(tmp_path):
         _run(["repair", str(mesh), "-o", str(tmp_path / "repaired.stl")])
     )
     assert {"load mesh", "fill boundary holes"} <= repair_stages
+
+
+def test_usage_errors_before_processing_are_json_events(tmp_path):
+    source = _volume(tmp_path / "labels.nii.gz")
+    for argv, message in (
+        (["labelmap", "extract", str(source)], "pass -o/--output, --split, or both"),
+        (["labelmap", "extract", str(source), "-o", "x.stl", "--labels", "a"], "--labels"),
+        (["extract", str(source), "-o", "model.txt"], "unsupported output extension"),
+    ):
+        result = runner.invoke(
+            cli.app, [*argv, "--progress", "json"], prog_name="medsurface"
+        )
+        assert result.exit_code == 2
+        assert result.stdout == ""
+        events = _events(result.stderr)
+        assert events[0]["event"] == "error" and message in events[0]["message"]
+        assert events[-1] == {"event": "result", "exit_code": 2, "result": None}
+
+
+def test_failed_quality_still_reports_the_result(tmp_path, monkeypatch):
+    from medsurface import validate as validate_mod
+
+    mesh = tmp_path / "mesh.stl"
+    mesh.write_text("placeholder")
+    report = {"valid": False, "problems": ["not watertight"]}
+    monkeypatch.setattr(validate_mod, "validate", lambda _path: report)
+
+    result = runner.invoke(
+        cli.app, ["validate", str(mesh), "--progress", "json"], prog_name="medsurface"
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    final = _events(result.stderr)[-1]
+    assert final == {"event": "result", "exit_code": 1, "result": report}
