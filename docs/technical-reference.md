@@ -560,9 +560,9 @@ the palette's label names.
 
 ## Dependencies and development
 
-The repository uses uv 0.11.28 for dependency resolution, environments, command
-execution, and CI. Typer 0.21 defines the CLI and Rich 14 renders terminal
-output. `uv.lock` covers Python 3.11–3.14; local development defaults to Python
+The repository requires uv 0.11.28 or newer for dependency resolution,
+environments, command execution, and CI, which pins 0.11.28. Typer 0.21 defines
+the CLI and Rich 14 renders terminal output. `uv.lock` covers Python 3.11–3.14; local development defaults to Python
 3.12.
 
 ```sh
