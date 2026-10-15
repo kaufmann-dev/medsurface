@@ -824,13 +824,7 @@ def fuse_labels(
 
     max_label = max(fused.voxels)
     pixel_id, pixel_type = _label_pixel_type(max_label, not preserve_labels)
-    image = sitk.Cast(sitk.GetImageFromArray(fused.labels), pixel_id)
-    fused.labels = np.empty((0, 0, 0), dtype=np.uint32)
-    image.SetSpacing((fused.grid_mm,) * 3)
-    image.SetOrigin(fused.grid_origin_mm)
-    image.SetDirection(tuple(np.eye(3).ravel()))
-    owner = [image]
-    image = sitk.Image()
+    owner = [fusion.label_field_image(fused, pixel_id)]
     step(
         "validate and publish fused labelmap",
         lambda: volume_mod.write_verified_volume(
@@ -870,7 +864,7 @@ def fuse_labels(
         grid_mm=fused.grid_mm,
         grid_size=fused.grid_size,
         grid_origin_mm=fused.grid_origin_mm,
-        grid_direction=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+        grid_direction=fusion.IDENTITY_DIRECTION,
         registrations=registrations,
         labels=label_payload,
         seconds=time.time() - started,

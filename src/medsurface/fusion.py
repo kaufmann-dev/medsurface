@@ -29,6 +29,9 @@ MIN_SHARED_FOV_DICE = 0.55
 MIN_SHARED_FOV_MM3 = 20_000.0
 
 
+IDENTITY_DIRECTION = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+
+
 class FusionError(RuntimeError):
     """Registration or fused-grid failure that makes publication unsafe."""
 
@@ -306,66 +309,21 @@ def fuse_masks(
     if coarse_grid is not None:
         reporter.warn(coarse_grid)
 
-    size, origin = step(
-        "plan fused grid",
-        lambda: common_grid(
+    fused = step(
+        "fuse occupancy fields",
+        lambda: fuse_label_fields(
             [fixed_mask, moving_mask],
             [np.eye(4), registered.transform],
             grid_mm,
+            binary=True,
             allow_large_volume=allow_large_volume,
+            log=say,
         ),
     )
-    say(
-        "fused grid %s at %.2f mm isotropic (%.0f M voxels)"
-        % (
-            "x".join(str(value) for value in size),
-            grid_mm,
-            math.prod(size) / 1e6,
-        )
-    )
-    identity = sitk.Transform(3, sitk.sitkIdentity)
-    inverse = registration.inverse_transform(registered.transform)
-    fixed_field = step(
-        "resample fixed",
-        lambda: resample_axis_aligned(
-            segment.antialias_for_grid(fixed_mask, grid_mm),
-            size,
-            origin,
-            grid_mm,
-            identity,
-        ),
-    )
-    moving_field = step(
-        "resample moving",
-        lambda: resample_axis_aligned(
-            segment.antialias_for_grid(moving_mask, grid_mm),
-            size,
-            origin,
-            grid_mm,
-            inverse,
-        ),
-    )
-    fused_field = step(
-        "fuse occupancy fields",
-        lambda: sitk.Maximum(fixed_field, moving_field),
-    )
-
-    def count_foreground() -> tuple[int, int, int]:
-        fixed_count = int(
-            np.count_nonzero(sitk.GetArrayViewFromImage(fixed_field) > 0.5)
-        )
-        moving_count = int(
-            np.count_nonzero(sitk.GetArrayViewFromImage(moving_field) > 0.5)
-        )
-        fused_count = int(
-            np.count_nonzero(sitk.GetArrayViewFromImage(fused_field) > 0.5)
-        )
-        return fixed_count, moving_count, fused_count
-
-    fixed_count, moving_count, fused_count = step(
-        "measure fused foreground",
-        count_foreground,
-    )
+    fixed_mask = sitk.Image()
+    moving_mask = sitk.Image()
+    fixed_count, moving_count = fused.input_voxels
+    fused_count = fused.voxels.get(1, 0)
     if fused_count == 0:
         raise FusionError("the fused labelmap contains no foreground voxels")
     voxel_mm3 = grid_mm**3
@@ -378,16 +336,7 @@ def fuse_masks(
         )
     )
 
-    binary = sitk.Cast(sitk.Greater(fused_field, 0.5), sitk.sitkUInt8)
-    for key in binary.GetMetaDataKeys():
-        binary.EraseMetaData(key)
-    fixed_field = sitk.Image()
-    moving_field = sitk.Image()
-    fused_field = sitk.Image()
-    fixed_mask = sitk.Image()
-    moving_mask = sitk.Image()
-    owner = [binary]
-    binary = sitk.Image()
+    owner = [label_field_image(fused, sitk.sitkUInt8)]
     step(
         "validate and publish fused labelmap",
         lambda: volume_mod.write_verified_volume(
@@ -402,9 +351,9 @@ def fuse_masks(
         output_format=output.format,
         compression=output.compression,
         grid_mm=grid_mm,
-        grid_size=size,
-        grid_origin_mm=(float(origin[0]), float(origin[1]), float(origin[2])),
-        grid_direction=(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+        grid_size=fused.grid_size,
+        grid_origin_mm=fused.grid_origin_mm,
+        grid_direction=IDENTITY_DIRECTION,
         registration=registered,
         foreground_fixed_voxels=fixed_count,
         foreground_moving_voxels=moving_count,
@@ -591,11 +540,23 @@ def _antialias_margin(image: sitk.Image, grid_mm: float) -> list[int]:
 class LabelFieldResult:
     """Label-preserving occupancy fusion on one isotropic grid."""
 
-    labels: np.ndarray  # (z, y, x)
+    labels: np.ndarray  # (z, y, x); uint8 for a binary union, else uint32
     grid_size: tuple[int, int, int]
     grid_origin_mm: tuple[float, float, float]
     grid_mm: float
     voxels: dict[int, int]
+    #: Grid voxels each input covers above half occupancy, in input order.
+    input_voxels: list[int]
+
+
+def label_field_image(fused: LabelFieldResult, pixel_id: int) -> sitk.Image:
+    """Fused labels as an image on their grid; releases ``fused.labels``."""
+    image = sitk.Cast(sitk.GetImageFromArray(fused.labels), pixel_id)
+    fused.labels = np.empty((0, 0, 0), dtype=fused.labels.dtype)
+    image.SetSpacing((fused.grid_mm,) * 3)
+    image.SetOrigin(fused.grid_origin_mm)
+    image.SetDirection(IDENTITY_DIRECTION)
+    return image
 
 
 def fuse_label_fields(
@@ -618,12 +579,15 @@ def fuse_label_fields(
     ``binary`` foreground is ``1``; otherwise it keeps the label with the highest
     individual occupancy. Memory is one grid-sized array for a binary union and
     three for labels, regardless of how many labels or inputs are fused.
+    ``input_voxels`` counts, per input, the grid voxels its selected labels
+    occupy above 0.5.
     """
 
     def say(message: str) -> None:
         if log:
             log(message)
 
+    input_voxels: list[int] = []
     size, origin = common_grid(
         images, transforms, grid_mm, allow_large_volume=allow_large_volume
     )
@@ -648,6 +612,7 @@ def fuse_label_fields(
         if labels is not None:
             present = [label for label in present if label in labels]
         if not present:
+            input_voxels.append(0)
             continue
         margin = _antialias_margin(image, grid_mm)
         inverse = registration.inverse_transform(transform)
@@ -698,9 +663,12 @@ def fuse_label_fields(
         if binary:
             report("label_start", 1)
         sampled = resample(present)
+        covered = 0
         if sampled is not None:
             region, values = sampled
+            covered = int(np.count_nonzero(values > 0.5))
             np.maximum(union_value[region], values, out=union_value[region])
+        input_voxels.append(covered)
         if binary:
             report("label_end", 1)
             continue
@@ -718,18 +686,20 @@ def fuse_label_fields(
     foreground = union_value > 0.5
     del union_value
     if binary:
-        result = foreground.astype(np.uint32)
+        result = foreground.view(np.uint8)
+        fused_voxels = int(np.count_nonzero(result))
+        voxels = {1: fused_voxels} if fused_voxels else {}
     else:
         del best_value
         result = np.where(foreground, best_label, 0).astype(np.uint32)
-        del best_label
-    del foreground
-    found, counts = np.unique(result, return_counts=True)
-    voxels = {int(label): int(count) for label, count in zip(found, counts) if label != 0}
+        del best_label, foreground
+        found, counts = np.unique(result, return_counts=True)
+        voxels = {int(label): int(count) for label, count in zip(found, counts) if label != 0}
     return LabelFieldResult(
         labels=result,
         grid_size=size,
         grid_origin_mm=(float(origin[0]), float(origin[1]), float(origin[2])),
         grid_mm=grid_mm,
         voxels=voxels,
+        input_voxels=input_voxels,
     )

@@ -407,10 +407,11 @@ parameters and does not invoke a surface-output path.
 ## Fusion registration and gates
 
 `fusion.fuse` supplies independently thresholded and cleaned intensity masks to
-`fusion.fuse_masks`, which owns their registration, grid, quantization, and
+`fusion.fuse_masks`, which owns their registration, quantization, and
 publication path. `labelmap.fuse_labels` registers each moving labelmap's
-selected-label union with the same registration and gates, then fuses through
-`fusion.fuse_label_fields` (below).
+selected-label union with the same registration and gates. Both fuse through
+`fusion.fuse_label_fields` (below), which `fusion.fuse_masks` runs as a binary
+union.
 
 Registration proceeds as follows:
 
@@ -437,9 +438,10 @@ only gate failure.
 After registration, grid planning transforms moving bounds into the fixed
 physical coordinate system, combines them with fixed bounds, adds a two-voxel
 margin, and creates an identity-direction isotropic lattice at `--grid-mm`
-spacing. Both masks are antialiased for that grid and linearly resampled. The
-voxelwise maximum combines occupancies; values strictly greater than `0.5` are
-cast to `uint8` foreground `1`, with background `0`.
+spacing. Both masks are antialiased for that grid and linearly resampled, each
+cropped to its foreground plus the antialiasing margin and written only to the
+sub-grid it covers. The voxelwise maximum combines occupancies; values strictly
+greater than `0.5` are `uint8` foreground `1`, with background `0`.
 
 Fixed, moving, and fused foreground counts are measured under the same
 quantization. Volumes equal count × `grid_mm³`. Empty fusion is an error. Derived
@@ -463,8 +465,8 @@ strictly above `0.5`, exactly as in binary fusion. With preserved labels each
 label is then resampled on its own to update a running best occupancy and best
 label, which only decides the label of a foreground voxel, so touching labels
 never open cracks where no single label exceeds `0.5`. Memory is one `float32`
-grid for a binary union and two `float32` plus one `uint32` grid with labels,
-regardless of label or input count.
+grid plus a `uint8` result for a binary union and two `float32` plus one
+`uint32` grid with labels, regardless of label or input count.
 
 The published volume is `uint8`, `uint16`, or `uint32` depending on the largest
 label, with identity direction and no copied metadata. NIfTI outputs receive a
