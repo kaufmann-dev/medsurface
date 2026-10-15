@@ -105,14 +105,20 @@ def smooth(mesh: mrmeshpy.Mesh, iterations: int, force: float) -> mrmeshpy.Mesh:
     return result
 
 
-def selected_self_intersecting_faces(mesh: mrmeshpy.Mesh) -> np.ndarray:
-    """Mark both faces in each MeshLib self-collision pair."""
-    faces = to_arrays(mesh)[1]
+def self_intersecting_face_ids(mesh: mrmeshpy.Mesh) -> np.ndarray:
+    """Sorted unique IDs of both faces in each MeshLib self-collision pair."""
     pairs = mrmeshpy.findSelfCollidingTriangles(mrmeshpy.MeshPart(mesh))
-    selected = np.zeros(len(faces), dtype=bool)
+    selected: set[int] = set()
     for pair in pairs:
-        selected[int(pair.aFace)] = True
-        selected[int(pair.bFace)] = True
+        selected.add(int(pair.aFace))
+        selected.add(int(pair.bFace))
+    return np.array(sorted(selected), dtype=np.int64)
+
+
+def selected_self_intersecting_faces(mesh: mrmeshpy.Mesh) -> np.ndarray:
+    """Per-face mask, aligned with :func:`to_arrays` faces, of self-collisions."""
+    selected = np.zeros(len(mrmeshnumpy.getNumpyFaces(mesh.topology)), dtype=bool)
+    selected[self_intersecting_face_ids(mesh)] = True
     return selected
 
 
@@ -343,10 +349,6 @@ def _decimate_candidate(
     return candidate, before, after, float(result.errorIntroduced)
 
 
-def _meshlib_self_intersecting_face_ids(mesh: mrmeshpy.Mesh) -> np.ndarray:
-    return np.flatnonzero(selected_self_intersecting_faces(mesh))
-
-
 def _meshlib_disoriented_face_ids(mesh: mrmeshpy.Mesh) -> np.ndarray:
     return np.flatnonzero(selected_disoriented_faces(mesh))
 
@@ -427,7 +429,7 @@ def decimate_safely(
         if reasons:
             break
 
-        colliding_ids = _meshlib_self_intersecting_face_ids(candidate)
+        colliding_ids = self_intersecting_face_ids(candidate)
         disoriented_ids = _meshlib_disoriented_face_ids(candidate)
         remaining_intersections = int(len(colliding_ids))
         remaining_disoriented = int(len(disoriented_ids))

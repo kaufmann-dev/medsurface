@@ -15,12 +15,7 @@ from .outputs import validate_mesh_input
 def _self_intersections(mesh: mrmeshpy.Mesh) -> int | str:
     """Count unique faces in MeshLib self-collision pairs."""
     try:
-        pairs = mrmeshpy.findSelfCollidingTriangles(mrmeshpy.MeshPart(mesh))
-        selected = set()
-        for pair in pairs:
-            selected.add(int(pair.aFace))
-            selected.add(int(pair.bFace))
-        return len(selected)
+        return len(surface.self_intersecting_face_ids(mesh))
     except Exception as exc:  # noqa: BLE001
         return "error: %s" % type(exc).__name__
 
