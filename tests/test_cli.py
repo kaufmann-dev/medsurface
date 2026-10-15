@@ -219,6 +219,8 @@ from medsurface import cli
 
 heavy_modules = {
     "medsurface.labelmap",
+    "medsurface.minecraft.blockgrid",
+    "medsurface.minecraft.world",
     "medsurface.fusion",
     "medsurface.pipeline",
     "medsurface.registration",
@@ -264,6 +266,7 @@ def test_root_command_without_arguments_is_lightweight_help():
         "validate",
         "repair",
         "labelmap",
+        "minecraft",
     ):
         assert command in result.stdout
 
@@ -290,6 +293,13 @@ def test_version_is_lightweight_and_public():
         ["labelmap", "--help"],
         ["labelmap", "extract", "--help"],
         ["labelmap", "fuse", "--help"],
+        ["minecraft", "--help"],
+        ["minecraft", "blocks", "--help"],
+        ["minecraft", "to-world", "--help"],
+        ["minecraft", "resample", "--help"],
+        ["minecraft", "inspect", "--help"],
+        ["minecraft", "validate", "--help"],
+        ["minecraft", "to-labelmap", "--help"],
     ],
 )
 def test_every_help_surface_is_lightweight(argv):
@@ -534,6 +544,9 @@ def test_legacy_command_names_are_absent():
         ["repair", "broken.stl"],
         ["labelmap", "extract"],
         ["labelmap", "fuse"],
+        ["minecraft", "to-world", "labels.nii.gz"],
+        ["minecraft", "to-labelmap", "world"],
+        ["minecraft", "to-world", "labels.nii.gz", "-o", "w", "--orient", "sideways"],
     ],
 )
 def test_malformed_invocations_fail_before_heavy_imports(argv):

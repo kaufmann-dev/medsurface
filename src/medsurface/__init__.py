@@ -1,4 +1,4 @@
-"""Convert medical volumes, fuse binary labelmaps, and extract surface meshes."""
+"""Convert medical volumes, fuse labelmaps, extract surface meshes, and edit labelmaps in Minecraft."""
 
 from .presets import PRESETS, Preset  # noqa: F401
 

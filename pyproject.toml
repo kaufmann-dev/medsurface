@@ -5,13 +5,13 @@ build-backend = "hatchling.build"
 [project]
 name = "medsurface"
 version = "0.1.0"
-description = "Convert medical volumes, fuse binary labelmaps, and extract surface meshes"
+description = "Convert medical volumes, fuse labelmaps, extract surface meshes, and edit labelmaps in Minecraft"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "David Kaufmann", email = "david@kaufmann.dev" }]
-keywords = ["dicom", "ct", "mri", "stl", "mesh", "marching-cubes", "3d-printing", "medical-imaging"]
+keywords = ["dicom", "ct", "mri", "stl", "mesh", "marching-cubes", "3d-printing", "medical-imaging", "minecraft"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Science/Research",

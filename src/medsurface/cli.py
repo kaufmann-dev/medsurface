@@ -180,7 +180,7 @@ stderr_console = Console(stderr=True, highlight=False, markup=False)
 
 app = typer.Typer(
     add_completion=False,
-    help="Convert volumes, fuse scans or labelmaps, and extract surface meshes.",
+    help="Convert volumes, fuse scans or labelmaps, extract surface meshes, and edit labelmaps in Minecraft.",
     invoke_without_command=True,
     no_args_is_help=False,
     pretty_exceptions_show_locals=False,
@@ -195,6 +195,15 @@ labelmap_app = typer.Typer(
     rich_markup_mode="rich",
 )
 app.add_typer(labelmap_app, name="labelmap")
+minecraft_app = typer.Typer(
+    add_completion=False,
+    help="Round-trip labelmaps through editable Minecraft Java worlds.",
+    invoke_without_command=True,
+    no_args_is_help=False,
+    pretty_exceptions_show_locals=False,
+    rich_markup_mode="rich",
+)
+app.add_typer(minecraft_app, name="minecraft")
 
 
 def _version_callback(value: bool) -> None:
@@ -214,7 +223,7 @@ def root(
         help="Show version and exit.",
     ),
 ) -> None:
-    """Convert volumes, fuse scans or labelmaps, and extract surface meshes."""
+    """Convert volumes, fuse scans or labelmaps, extract surface meshes, and edit labelmaps in Minecraft."""
     if ctx.invoked_subcommand is None:
         stdout_console.print(ctx.get_help())
 
@@ -222,6 +231,13 @@ def root(
 @labelmap_app.callback()
 def labelmap_root(ctx: typer.Context) -> None:
     """Fuse labelmaps or extract their surface meshes."""
+    if ctx.invoked_subcommand is None:
+        stdout_console.print(ctx.get_help())
+
+
+@minecraft_app.callback()
+def minecraft_root(ctx: typer.Context) -> None:
+    """Round-trip labelmaps through editable Minecraft Java worlds."""
     if ctx.invoked_subcommand is None:
         stdout_console.print(ctx.get_help())
 
@@ -2377,5 +2393,512 @@ def repair(
     if not quiet:
         _success("wrote %s" % output)
         _print_quality(report)
+        if json_file is not None:
+            _success("wrote %s" % json_file)
+
+
+class OrientChoice(str, Enum):
+    """Grid orientations accepted by ``--orient``."""
+
+    VOXEL = "voxel"
+    ANATOMICAL = "anatomical"
+
+
+_BLOCK_MM_OPTION = typer.Option(
+    None,
+    "--block-mm",
+    metavar="MM|auto",
+    help="Resample to cubic blocks of this size in mm, or 'auto' (tallest axis at "
+    "most 320 blocks, at most 64 million blocks, never finer than the scan).",
+    show_default="one voxel per block",
+)
+_ORIENT_OPTION = typer.Option(
+    OrientChoice.VOXEL,
+    "--orient",
+    help="Keep index axes as stored, or stand anatomy upright without mirroring.",
+)
+_FILL_THRESHOLD_OPTION = typer.Option(
+    0.5,
+    "--fill-threshold",
+    help="Fraction of a block that labels must cover for it to be filled "
+    "(requires --block-mm).",
+)
+_CROP_OPTION = typer.Option(
+    False,
+    "--crop",
+    help="Crop to the labelled region plus a small margin (requires --block-mm).",
+)
+
+
+def _transform_options(
+    ctx: typer.Context,
+    block_mm: str | None,
+    orient: OrientChoice,
+    fill_threshold: float,
+    crop: bool,
+):
+    """Translate transform options into settings or exit with a usage error."""
+    from .minecraft import blockgrid
+
+    try:
+        size = blockgrid.parse_block_mm(block_mm) if block_mm is not None else None
+        if size is None and _given(ctx, "fill_threshold"):
+            raise ValueError("--fill-threshold requires --block-mm")
+        options = blockgrid.TransformOptions(
+            block_mm=size,
+            orientation=orient.value,
+            fill_threshold=fill_threshold,
+            crop=crop,
+        )
+        blockgrid.validate_options(options)
+    except ValueError as exc:
+        _error(exc)
+        raise typer.Exit(2) from None
+    return options
+
+
+def _minecraft_world_dir(world: Path) -> None:
+    if not world.is_dir():
+        _error("%s is not a Minecraft world directory" % world)
+        raise typer.Exit(2)
+
+
+@minecraft_app.command("blocks")
+@_machine_readable
+def minecraft_blocks(
+    json_file: Path | None = typer.Option(
+        None, "--json", help="Write the block list to this JSON file."
+    ),
+    progress_format: ProgressChoice = _PROGRESS_OPTION,
+    quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress the block table."),
+) -> None:
+    """List the supported label blocks with approximate colors."""
+    from .minecraft.palette import BLOCKS, block_color
+
+    entries = []
+    for block in BLOCKS:
+        rgb = block_color(block) or (128, 128, 128)
+        entries.append({"block": block, "rgb": list(rgb), "hex": "#%02x%02x%02x" % rgb})
+    _publish_report(None, json_file, {"blocks": entries})
+    if quiet:
+        return
+    table = Table(box=box.SIMPLE_HEAVY, title="%d label blocks" % len(entries))
+    table.add_column("Block", overflow="fold")
+    table.add_column("Color", no_wrap=True)
+    for entry in entries:
+        color = str(entry["hex"])
+        table.add_row(_plain(entry["block"]), Text("██ ", style=color) + color)
+    stdout_console.print(table)
+    if json_file is not None:
+        _success("wrote %s" % json_file)
+
+
+@minecraft_app.command("to-world")
+@_machine_readable
+def minecraft_to_world(
+    ctx: typer.Context,
+    input_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Direct NIfTI, NRRD, or MetaImage labelmap file.",
+    ),
+    output: Path = typer.Option(
+        ..., "-o", "--output", help="New world directory; existing paths are never overwritten."
+    ),
+    vertical_axis: AxisChoice | None = typer.Option(
+        None,
+        "--vertical-axis",
+        help="Index axis mapped to Minecraft's vertical Y axis.",
+        show_default="z",
+    ),
+    block_mm: str | None = _BLOCK_MM_OPTION,
+    orient: OrientChoice = _ORIENT_OPTION,
+    fill_threshold: float = _FILL_THRESHOLD_OPTION,
+    crop: bool = _CROP_OPTION,
+    world_name: str | None = typer.Option(
+        None,
+        "--world-name",
+        help="World name shown in Minecraft's world list.",
+        show_default="output folder name",
+    ),
+    source_name: str | None = typer.Option(
+        None,
+        "--source-name",
+        help="File name recorded in the world instead of the input's name.",
+    ),
+    palette_file: Path | None = typer.Option(
+        None,
+        "--palette",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help='JSON object choosing blocks or names per label, e.g. {"5": "bone_block"} '
+        'or {"5": {"block": "minecraft:bone_block", "name": "skull"}}.',
+    ),
+    pack_id: str = typer.Option(
+        "medsurface",
+        "--pack-id",
+        help="Namespace and folder of the custom-height dimension data pack.",
+    ),
+    allow_large_volume: bool = typer.Option(
+        False,
+        "--allow-large-volume",
+        help="Bypass the 500-million-voxel source limit; may exhaust memory.",
+    ),
+    json_file: Path | None = typer.Option(
+        None, "--json", help="Write results to this JSON file."
+    ),
+    progress_format: ProgressChoice = _PROGRESS_OPTION,
+    quiet: bool = typer.Option(
+        False, "-q", "--quiet", help="Suppress normal progress output."
+    ),
+) -> None:
+    """Convert a labelmap into a new Minecraft Java world, one voxel per block."""
+    transform = _transform_options(ctx, block_mm, orient, fill_threshold, crop)
+    from .minecraft import palette as palette_mod
+    from .minecraft import world as world_mod
+
+    try:
+        if os.path.lexists(output):
+            raise ValueError("output %s already exists; refusing to overwrite it" % output)
+        if orient is OrientChoice.ANATOMICAL and vertical_axis not in (None, AxisChoice.Z):
+            raise ValueError(
+                "--orient anatomical always places superior on Minecraft Y; "
+                "omit --vertical-axis"
+            )
+        world_mod.validate_pack_id(pack_id)
+        for option, value in (("--world-name", world_name), ("--source-name", source_name)):
+            if value is not None and not value.strip():
+                raise ValueError("%s must not be empty" % option)
+        overrides = (
+            palette_mod.parse_overrides(palette_file.read_text(encoding="utf-8"))
+            if palette_file is not None
+            else {}
+        )
+    except (OSError, ValueError) as exc:
+        _error(exc)
+        raise typer.Exit(2) from None
+    options = world_mod.WorldOptions(
+        vertical_axis=vertical_axis.value if vertical_axis is not None else None,
+        transform=transform,
+        world_name=world_name,
+        source_name=source_name,
+        palette=overrides,
+        pack_id=pack_id,
+    )
+
+    progress = _progress_display(progress_format, quiet, "Discovering labelmap ...")
+    with progress:
+        chosen, found = _select_labelmap(input_path)
+        try:
+            _protect_output_paths(found, output, json_file)
+        except ValueError as exc:
+            _error(exc)
+            raise typer.Exit(2) from None
+        try:
+            result = world_mod.to_world(
+                chosen,
+                output,
+                options,
+                allow_large_volume=allow_large_volume,
+                log=progress.log,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            _error(exc)
+            raise typer.Exit(1) from None
+        try:
+            _publish_report(progress, json_file, result.as_dict())
+        except typer.Exit:
+            shutil.rmtree(output, ignore_errors=True)
+            raise
+
+    if not quiet:
+        _success(
+            "wrote Minecraft Java %s world %s"
+            % (world_mod.MINECRAFT_VERSION, result.output_path)
+        )
+        _log(
+            "%s blocks   %d labels   volume %s to %s   %.1fs"
+            % (
+                "x".join(str(value) for value in result.size),
+                len(result.labels),
+                list(result.volume_bounds.min),
+                list(result.volume_bounds.max),
+                result.seconds,
+            )
+        )
+        if result.transform is not None:
+            _log(
+                "derived grid: orientation %s, block %s"
+                % (
+                    result.transform.orientation,
+                    "%g mm" % result.transform.block_mm
+                    if result.transform.block_mm is not None
+                    else "one voxel",
+                )
+            )
+        if json_file is not None:
+            _success("wrote %s" % json_file)
+        _print_command_hint(
+            "After editing and closing the world, export it with:  ",
+            [
+                "medsurface",
+                "minecraft",
+                "to-labelmap",
+                result.output_path,
+                "-o",
+                "edited.nii.gz",
+            ],
+        )
+
+
+@minecraft_app.command("resample")
+@_machine_readable
+def minecraft_resample(
+    ctx: typer.Context,
+    input_path: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        help="Direct NIfTI, NRRD, or MetaImage labelmap file.",
+    ),
+    output: Path = typer.Option(
+        ..., "-o", "--output", help="Atomic .nii/.nii.gz/.nrrd/.mha output file."
+    ),
+    block_mm: str | None = _BLOCK_MM_OPTION,
+    orient: OrientChoice = _ORIENT_OPTION,
+    fill_threshold: float = _FILL_THRESHOLD_OPTION,
+    crop: bool = _CROP_OPTION,
+    allow_large_volume: bool = typer.Option(
+        False,
+        "--allow-large-volume",
+        help="Bypass the 500-million-voxel source limit; may exhaust memory.",
+    ),
+    json_file: Path | None = typer.Option(
+        None, "--json", help="Write results to this JSON file."
+    ),
+    progress_format: ProgressChoice = _PROGRESS_OPTION,
+    quiet: bool = typer.Option(
+        False, "-q", "--quiet", help="Suppress normal progress output."
+    ),
+) -> None:
+    """Write the cubic-block or reoriented grid that to-world would build."""
+    _validate_volume_output(output)
+    transform = _transform_options(ctx, block_mm, orient, fill_threshold, crop)
+    if transform.is_identity:
+        _error("nothing to resample: pass --block-mm and/or --orient anatomical")
+        raise typer.Exit(2)
+
+    progress = _progress_display(progress_format, quiet, "Discovering labelmap ...")
+    with progress:
+        chosen, found = _select_labelmap(input_path)
+        try:
+            _protect_output_paths(found, output, json_file)
+        except ValueError as exc:
+            _error(exc)
+            raise typer.Exit(2) from None
+        from .minecraft import world as world_mod
+
+        transaction = (
+            _restore_output_on_failure(output) if json_file is not None else nullcontext()
+        )
+        try:
+            with transaction:
+                result = world_mod.resample(
+                    chosen,
+                    output,
+                    transform,
+                    allow_large_volume=allow_large_volume,
+                    log=progress.log,
+                )
+                _publish_report(progress, json_file, result.as_dict())
+        except typer.Exit:
+            raise
+        except (OSError, RuntimeError, ValueError) as exc:
+            _error(exc)
+            raise typer.Exit(1) from None
+
+    if not quiet:
+        _success("wrote %s" % result.output_path)
+        _log(
+            "%s blocks   %s   %d labels   %.1fs"
+            % (
+                "x".join(str(value) for value in result.size),
+                result.pixel_type,
+                len(result.label_voxels),
+                result.seconds,
+            )
+        )
+        if json_file is not None:
+            _success("wrote %s" % json_file)
+
+
+@minecraft_app.command("inspect")
+@_machine_readable
+def minecraft_inspect(
+    world: Path = typer.Argument(
+        ..., exists=True, file_okay=False, dir_okay=True, help="World created by to-world."
+    ),
+    json_file: Path | None = typer.Option(
+        None, "--json", help="Write the world manifest to this JSON file."
+    ),
+    progress_format: ProgressChoice = _PROGRESS_OPTION,
+    quiet: bool = typer.Option(False, "-q", "--quiet", help="Suppress the summary."),
+) -> None:
+    """Show a world's source, grid, placement, and label palette."""
+    from .minecraft import world as world_mod
+
+    try:
+        manifest = world_mod.load_manifest(world)
+    except ValueError as exc:
+        _error(exc)
+        raise typer.Exit(1) from None
+    _publish_report(None, json_file, manifest.raw)
+    if quiet:
+        return
+    raw = manifest.raw
+    bounds = manifest.placement.bounds
+    stdout_console.print(_plain(world, "bold"))
+    stdout_console.print(
+        _plain(
+            _detail_block(
+                [
+                    ("Minecraft", "Java %s" % raw["minecraft_version"]),
+                    ("Source", raw["source"]["name"]),
+                    ("Grid", "x".join(str(value) for value in manifest.size)),
+                    ("Spacing (mm)", " × ".join("%.3g" % value for value in manifest.spacing)),
+                    ("Pixel type", manifest.dtype),
+                    ("Vertical index axis", raw["vertical_axis"]),
+                    ("Volume bounds", "%s to %s" % (list(bounds.min), list(bounds.max))),
+                    (
+                        "Derived grid",
+                        raw["transform"]["orientation"] if raw.get("transform") else None,
+                    ),
+                ]
+            )
+        )
+    )
+    table = Table(box=box.SIMPLE_HEAVY, title="Label palette", row_styles=("", "dim"))
+    table.add_column("Label", justify="right", no_wrap=True)
+    table.add_column("Block", overflow="fold")
+    table.add_column("Name", overflow="fold")
+    table.add_column("Voxels", justify="right", no_wrap=True)
+    table.add_column("Legend", no_wrap=True)
+    for entry in manifest.palette:
+        table.add_row(
+            _plain(entry.label),
+            _plain(entry.block),
+            _plain(entry.name or "unnamed"),
+            _plain(f"{entry.voxel_count:,}"),
+            _plain(" ".join(str(value) for value in entry.legend_position)),
+        )
+    stdout_console.print(table)
+    if json_file is not None:
+        _success("wrote %s" % json_file)
+
+
+@minecraft_app.command("validate")
+@_machine_readable
+def minecraft_validate(
+    world: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        help="World created by to-world; Minecraft must have closed it.",
+    ),
+    json_file: Path | None = typer.Option(
+        None, "--json", help="Write the validation report to this JSON file."
+    ),
+    progress_format: ProgressChoice = _PROGRESS_OPTION,
+    quiet: bool = typer.Option(
+        False, "-q", "--quiet", help="Suppress normal progress output."
+    ),
+) -> None:
+    """Check world metadata, required chunks, and every block in the export volume."""
+    _minecraft_world_dir(world)
+    progress = _progress_display(progress_format, quiet, "Reading world manifest ...")
+    with progress:
+        from .minecraft import world as world_mod
+
+        try:
+            result = world_mod.validate(world, log=progress.log)
+        except (OSError, RuntimeError, ValueError) as exc:
+            _error(exc)
+            raise typer.Exit(1) from None
+        _publish_report(progress, json_file, result.as_dict())
+    if not quiet:
+        _success(
+            "valid world: %d chunks and %s voxels checked; %d labels present"
+            % (result.required_chunks, f"{result.checked_voxels:,}", len(result.label_voxels))
+        )
+        if json_file is not None:
+            _success("wrote %s" % json_file)
+
+
+@minecraft_app.command("to-labelmap")
+@_machine_readable
+def minecraft_to_labelmap(
+    world: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        help="World created by to-world; Minecraft must have closed it.",
+    ),
+    output: Path = typer.Option(
+        ..., "-o", "--output", help="Atomic .nii/.nii.gz/.nrrd/.mha output file."
+    ),
+    json_file: Path | None = typer.Option(
+        None, "--json", help="Write results to this JSON file."
+    ),
+    progress_format: ProgressChoice = _PROGRESS_OPTION,
+    quiet: bool = typer.Option(
+        False, "-q", "--quiet", help="Suppress normal progress output."
+    ),
+) -> None:
+    """Validate an edited world and export it as a labelmap on its original grid."""
+    _validate_volume_output(output)
+    _minecraft_world_dir(world)
+    from .paths import protect_outputs
+
+    try:
+        protect_outputs([], output, json_file)
+    except ValueError as exc:
+        _error(exc)
+        raise typer.Exit(2) from None
+    progress = _progress_display(progress_format, quiet, "Reading world manifest ...")
+    with progress:
+        from .minecraft import world as world_mod
+
+        transaction = (
+            _restore_output_on_failure(output) if json_file is not None else nullcontext()
+        )
+        try:
+            with transaction:
+                result = world_mod.to_labelmap(world, output, log=progress.log)
+                _publish_report(progress, json_file, result.as_dict())
+        except typer.Exit:
+            raise
+        except (OSError, RuntimeError, ValueError) as exc:
+            _error(exc)
+            raise typer.Exit(1) from None
+
+    if not quiet:
+        _success("wrote %s" % result.output_path)
+        _log(
+            "%s voxels   %s   %d labels   %.1fs"
+            % (
+                "x".join(str(value) for value in result.size),
+                result.pixel_type,
+                len(result.label_voxels),
+                result.seconds,
+            )
+        )
         if json_file is not None:
             _success("wrote %s" % json_file)

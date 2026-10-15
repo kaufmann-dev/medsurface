@@ -4,7 +4,8 @@
 [User guide][user-guide] · [Technical reference][technical-reference]
 
 Convert medical volumes without changing their image data, extract STL/PLY/OBJ
-surface meshes, or register two segmentations into an editable binary labelmap.
+surface meshes, register two segmentations into an editable binary labelmap, or
+edit a labelmap block by block in Minecraft Java.
 DICOM series, NIfTI, NRRD, and MetaImage inputs are supported.
 
 > **Safety:** `medsurface` is not validated for diagnosis, treatment planning,
@@ -65,18 +66,24 @@ medsurface labelmap extract segmentation.nii.gz -o surface.stl
 
 ## Commands
 
-| command                                                       | purpose                                                            |
-| ------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `medsurface list INPUT`                                       | Show every supported volume and any automatic default              |
-| `medsurface presets`                                          | Show the available tissue presets                                  |
-| `medsurface convert INPUT -o VOLUME`                          | Preserve one image while changing its single-file storage format   |
-| `medsurface extract INPUT -o MODEL.stl`                       | Segment one intensity volume and extract a surface mesh            |
-| `medsurface fuse FIXED MOVING -o LABELMAP`                    | Segment, register, and union two volumes into a binary labelmap    |
-| `medsurface labelmap extract MASK -o MODEL.stl`               | Extract one surface from all nonzero (or `--labels`) labels        |
-| `medsurface labelmap extract MASK --split DIR`                | Extract one validated surface per label                            |
-| `medsurface labelmap fuse FIXED MOVING... -o LABELMAP`        | Register and fuse labelmaps into a binary or `--preserve-labels` map |
-| `medsurface validate MODEL.stl`                               | Report mesh quality without changing the file                      |
-| `medsurface repair MODEL.stl -o FIXED.stl`                    | Repair an open or non-manifold mesh                                |
+| command                                                | purpose                                                              |
+| ------------------------------------------------------ | -------------------------------------------------------------------- |
+| `medsurface list INPUT`                                | Show every supported volume and any automatic default                |
+| `medsurface presets`                                   | Show the available tissue presets                                    |
+| `medsurface convert INPUT -o VOLUME`                   | Preserve one image while changing its single-file storage format     |
+| `medsurface extract INPUT -o MODEL.stl`                | Segment one intensity volume and extract a surface mesh              |
+| `medsurface fuse FIXED MOVING -o LABELMAP`             | Segment, register, and union two volumes into a binary labelmap      |
+| `medsurface labelmap extract MASK -o MODEL.stl`        | Extract one surface from all nonzero (or `--labels`) labels          |
+| `medsurface labelmap extract MASK --split DIR`         | Extract one validated surface per label                              |
+| `medsurface labelmap fuse FIXED MOVING... -o LABELMAP` | Register and fuse labelmaps into a binary or `--preserve-labels` map |
+| `medsurface validate MODEL.stl`                        | Report mesh quality without changing the file                        |
+| `medsurface repair MODEL.stl -o FIXED.stl`             | Repair an open or non-manifold mesh                                  |
+| `medsurface minecraft to-world MASK -o WORLD`          | Build an editable Minecraft Java world, one voxel per block          |
+| `medsurface minecraft to-labelmap WORLD -o LABELMAP`   | Validate an edited world and export it on the original grid          |
+| `medsurface minecraft inspect WORLD`                   | Show a world's grid, placement, and label palette                    |
+| `medsurface minecraft validate WORLD`                  | Check every block in a world's export volume                         |
+| `medsurface minecraft resample MASK -o LABELMAP`       | Write the cubic-block grid `to-world --block-mm` would build         |
+| `medsurface minecraft blocks`                          | List the 127 supported label blocks with approximate colors          |
 
 Run `medsurface COMMAND --help` for every option and `medsurface --version` for
 the installed version. Mesh destinations are `.stl`, `.ply`, or `.obj`.
@@ -192,6 +199,21 @@ files, or from `--label-names names.json`. Programs can add `--progress json`
 to any command for JSON-lines progress on stderr. See [Using an external
 labelmap][labelmap-guide].
 
+### Edit a labelmap in Minecraft
+
+Turn a labelmap into a Minecraft Java 26.2 world, edit it block by block, and
+export the edited labels on the original grid:
+
+```sh
+medsurface minecraft to-world segmentations.nii.gz -o ./labels-world
+# Copy labels-world into Minecraft's saves directory, edit, and close it.
+medsurface minecraft to-labelmap ./labels-world -o edited.nii.gz
+```
+
+One voxel becomes one block and label `0` is air. Add `--block-mm auto
+--orient anatomical` for cubic blocks with the anatomy standing upright. See
+[Minecraft worlds][minecraft-guide].
+
 ## Validate and repair
 
 Every mesh-producing extraction validates its serialized mesh before atomic
@@ -222,3 +244,4 @@ explanation][validation].
 [validation]: https://github.com/kaufmann-dev/medsurface/blob/main/docs/user-guide.md#understanding-validation
 [destep]: https://github.com/kaufmann-dev/medsurface/blob/main/docs/user-guide.md#reducing-stair-step-ripples
 [labelmap-guide]: https://github.com/kaufmann-dev/medsurface/blob/main/docs/user-guide.md#using-an-external-labelmap
+[minecraft-guide]: https://github.com/kaufmann-dev/medsurface/blob/main/docs/user-guide.md#minecraft-worlds

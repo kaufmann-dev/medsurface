@@ -5,6 +5,7 @@
 [Extracting an intensity surface](#extracting-an-intensity-surface) ·
 [Using an external labelmap](#using-an-external-labelmap) ·
 [Fusion](#fusion) ·
+[Minecraft worlds](#minecraft-worlds) ·
 [Input limitations](#input-requirements-and-limitations) ·
 [Safety and privacy](#safety-and-privacy) ·
 [Technical reference](technical-reference.md)
@@ -437,6 +438,141 @@ and grid fields, per-label voxel counts and volumes, one registration per
 moving input, and per-input provenance. Neither contains mesh-quality or
 surface-finishing fields.
 
+## Minecraft worlds
+
+`medsurface minecraft` turns a discrete labelmap into an editable Minecraft Java
+Edition 26.2 world (data version 4903) and exports the edited blocks back to a
+labelmap. Inputs are the same direct NIfTI, NRRD, or MetaImage labelmap files
+`labelmap extract` accepts. By default one voxel becomes one block and the image
+is neither resampled nor reoriented, so anisotropic medical voxels can look
+stretched; see [Cubic blocks and anatomical
+orientation](#cubic-blocks-and-anatomical-orientation).
+
+### Build, edit, and export a world
+
+```sh
+medsurface minecraft to-world "/path/to/segmentations.nii.gz" -o ./labels-world
+```
+
+The output must be a new directory; existing paths are never overwritten. The
+world is a creative, peaceful void world with a lit sea-lantern wireframe around
+the editable volume, a spawn platform, and a block legend outside the exported
+region. A bundled data pack in `datapacks/medsurface` gives the Overworld enough
+vertical height for the chosen axis and must stay in place.
+
+Optional world settings:
+
+```sh
+medsurface minecraft to-world labels.nii.gz -o ./skull-world \
+  --vertical-axis y --world-name "My skull" --source-name labels.nii.gz \
+  --palette palette.json --pack-id clinic
+```
+
+- `--vertical-axis` chooses the index axis mapped to Minecraft Y (default `z`).
+- `--world-name` sets the name in Minecraft's world list (default: the output
+  folder name).
+- `--source-name` records this file name in the world instead of the real input
+  name, for example to keep a patient name out of the saved world.
+- `--pack-id` names the custom-height data pack and its namespace (default
+  `medsurface`). It uses `a-z`, `0-9`, `_`, `-` and `.`.
+- `--palette` chooses blocks and legend names per label with a JSON object such
+  as `{"5": "bone_block", "7": {"block": "minecraft:red_wool", "name":
+  "heart"}}`. Blocks must come from `medsurface minecraft blocks`, and each block
+  can be used once; unlisted labels keep the automatic choice.
+
+Copy the world directory into the Minecraft Java saves directory (usually
+`$HOME/.minecraft/saves` on Linux) and open it with Java Edition 26.2. Before
+editing, show the label mapping:
+
+```sh
+medsurface minecraft inspect ./labels-world
+```
+
+Inside the wireframe:
+
+- Air means label `0`; breaking a labelled block sets that voxel to `0`.
+- Placing a block from the palette sets that voxel to its label. Block states
+  such as the facing of glazed terracotta are ignored.
+- Blocks not listed by `inspect` are rejected instead of being guessed.
+- The frame, platform, and legend are outside the volume and are never exported.
+
+Close the world in Minecraft first; both commands below refuse a world that
+Minecraft holds open. Validate the whole volume, then export:
+
+```sh
+medsurface minecraft validate ./labels-world
+medsurface minecraft to-labelmap ./labels-world -o edited.nii.gz
+```
+
+`to-labelmap` writes `.nii`, `.nii.gz`, `.nrrd`, or `.mha` with the grid's
+dimensions, spacing, origin, direction, and pixel type, verified and published
+atomically like `convert`. NIfTI outputs embed the palette's label names as a
+TotalSegmentator-style label table. Source metadata other than the geometry is
+not carried over. Unknown blocks are reported with counts and sample
+coordinates, and no output is written.
+
+### Label names and blocks
+
+A binary labelmap receives one neutral, clearly visible block. A multilabel map
+assigns every distinct nonzero value a unique block, so at most 127 nonzero
+labels are supported. Names from an embedded NIfTI label table (TotalSegmentator
+`--ml` output, plain text or CDATA) guide the choice: bones use pale mineral
+blocks, arteries reds, veins blues, lungs cyan or light blue, and brain labels
+pink or magenta. Labels without names stay unnamed.
+
+The 127 label blocks are deterministic, inert concrete, wool, glazed and plain
+terracotta, stained glass, mineral, stone, and plank blocks. Falling blocks,
+fluids, crops, containers, and redstone mechanisms are excluded. `medsurface
+minecraft blocks` lists them with approximate colors for legends outside
+Minecraft.
+
+### Cubic blocks and anatomical orientation
+
+Two opt-in options change the grid before the world is built:
+
+```sh
+medsurface minecraft to-world segmentations.nii.gz -o ./ct-world \
+  --block-mm auto --orient anatomical --crop
+```
+
+- `--block-mm MM` resamples to cubic blocks of `MM` millimetres. Each block is
+  supersampled, and each sample weights its neighbouring voxels trilinearly. A
+  block is filled when labels cover at least `--fill-threshold` of it (default
+  `0.5`) and takes the label covering the most. This keeps volumes and
+  proportions when shrinking, lets one-block-thin structures survive, and avoids
+  terraces when stretching thick slices.
+- `--block-mm auto` picks the finest size from 0.25 mm to 20 mm that is not
+  finer than the scan, keeps the vertical axis at or below 320 blocks, and keeps
+  the world at or below 64 million blocks.
+- `--orient anatomical` uses the image direction so that superior points up
+  (Minecraft +Y), the patient's right is +X, and posterior is +Z. This is a
+  proper rotation, so the model is not mirrored. Without `--block-mm` it only
+  permutes and flips axes. It always uses Minecraft Y as the vertical axis; do
+  not combine it with another `--vertical-axis`.
+- `--crop` (with `--block-mm`) limits the grid to the labelled region plus a
+  small margin.
+
+The world records the derived grid, and `to-labelmap` exports the edited world
+on that grid rather than the source grid. To preview it without building a
+world:
+
+```sh
+medsurface minecraft resample segmentations.nii.gz -o blocks.nii.gz \
+  --block-mm 2 --orient anatomical
+```
+
+### Coordinates and limits
+
+Without `--orient anatomical`, the vertical index axis maps to Minecraft Y and
+the other two index axes, in order, map to X and Z. Because this swaps two axes,
+an image stored in a right-handed index order appears mirrored. X and Z are
+centred around zero, and Y is centred within the generated dimension.
+
+The dimension keeps Minecraft's standard `-64..319` range for vertical axes up
+to 384 voxels and otherwise grows in 16-block steps up to Minecraft's
+4,064-block custom-dimension limit. A longer vertical axis is rejected with the
+axes that would fit.
+
 ## Input requirements and limitations
 
 Supported file inputs are NIfTI (`.nii`, `.nii.gz`), NRRD (`.nrrd`, `.nhdr`),
@@ -473,8 +609,9 @@ for exact behavior.
 
 ## Long-running commands
 
-`list`, `convert`, `extract`, `fuse`, both labelmap commands, `validate`, and
-`repair` announce the current stage. Interactive terminals show an indeterminate
+`list`, `convert`, `extract`, `fuse`, both labelmap commands, `validate`,
+`repair`, and the Minecraft commands that read or write volumes announce the
+current stage. Interactive terminals show an indeterminate
 spinner and elapsed time; redirected output receives persistent ANSI-free lines.
 No percentage is invented when processing libraries do not expose one.
 

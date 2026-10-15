@@ -23,6 +23,8 @@ The public operations are deliberately separate:
 - `labelmap extract` produces a surface from an existing labelmap.
 - `labelmap fuse` registers two or more existing labelmaps and fuses them into
   a binary or label-preserving labelmap.
+- `minecraft to-world`, `to-labelmap`, `inspect`, `validate`, `resample`, and
+  `blocks` round-trip a labelmap through an editable Minecraft Java world.
 
 Fusion never dispatches to mesh output. A fused labelmap must be passed
 explicitly to `labelmap extract`, which keeps volume publication independently
@@ -55,7 +57,8 @@ but not warnings or failures.
 ## JSON and output transactions
 
 Every command that reports results (`list`, `convert`, `extract`, `fuse`,
-`validate`, `repair`, and the labelmap commands) accepts `--json FILE`; the human
+`validate`, `repair`, the labelmap commands, and the Minecraft commands) accepts
+`--json FILE`; the human
 stream never shares that destination and JSON contains no ANSI control
 sequences. `list` writes an array of volumes, `validate` the quality report,
 and `repair` the output path, repair statistics, and quality.
@@ -508,6 +511,53 @@ described above.
 degeneracies, and fills holes. An invalid result is discarded and an existing
 destination is preserved.
 
+## Minecraft world round trip
+
+The `medsurface.minecraft` package writes and reads Java Edition 26.2 worlds
+(data version 4903) without third-party Minecraft libraries. Keep the version
+and data version synchronized across chunk NBT, `level.dat`, the manifest,
+tests, and documentation; other Minecraft versions are rejected rather than
+guessed.
+
+- `nbt.py` encodes typed NBT and decodes every tag type into plain Python and
+  numpy values.
+- `anvil.py` writes zlib region files and reads gzip, zlib, uncompressed, and
+  external (`.mcc`) chunks. LZ4 regions are rejected. Chunk and region
+  coordinates use floor division, so negative coordinates are Euclidean.
+  Block-state indices are ordered X fastest, then Z, then Y, packed into longs
+  without spanning, with at least four bits per block and air as the first
+  palette entry. Decoding reads palette `Name` only and ignores block-state
+  properties.
+- `palette.py` owns the 127 inert label blocks, their approximate colors, the
+  anatomical keyword families, and palette overrides. Additions must be unique,
+  non-falling, non-fluid full cubes without block entities.
+- `blockgrid.py` implements the opt-in cubic-block resampling and anatomical
+  orientation in LPS physical space. The anatomical frame is +i right, +j
+  posterior, +k superior. Resampling supersamples each block up to six times
+  per axis, accumulates trilinear label coverage in bounded batches, fills a
+  block at `--fill-threshold` coverage, and breaks ties toward the smaller
+  label. Pixel type and label values never change.
+- `world.py` places the grid, builds guides, writes world metadata, the data
+  pack, and the manifest, and validates and decodes edited worlds.
+
+Worlds are staged in a temporary sibling directory and renamed into place; an
+existing output path is refused. Guide blocks always lie outside
+`volume_bounds`. `.medsurface/minecraft.json` (schema 1) records the source name
+and SHA-256, the exported grid (size, spacing, origin, direction, numpy dtype),
+the axis mapping, dimension and volume bounds, required chunks, the palette with
+legend positions, and `transform` only when `--block-mm` or `--orient
+anatomical` derived the grid. Reading validates the schema, data version,
+unique positive labels and blocks, and that the bounds match a freshly computed
+placement.
+
+`validate` and `to-labelmap` take a non-blocking exclusive POSIX record lock on
+`session.lock` (the lock Java uses on Unix; `msvcrt` locking on Windows), require
+every chunk intersecting the volume, and map air variants to `0`. Any other
+block outside the palette is never mapped to a label: counts and up to twelve
+sample positions are reported and no output is created. Exports go through the
+same verified atomic volume publication as `convert`, and NIfTI outputs embed
+the palette's label names.
+
 ## Dependencies and development
 
 The repository uses uv 0.11.28 for dependency resolution, environments, command
@@ -533,4 +583,5 @@ test, and the full suite on Python 3.11 through 3.14.
 Synthetic regression tests cover catalog selection, every supported conversion
 input/output family, metadata policy, verified atomic publication, binary
 fusion, registration gates, complete fusion-to-extraction workflows, surface
-extraction, validation, and repair. Run them with `uv run pytest -q`.
+extraction, validation, repair, and Minecraft world round trips (NBT and Anvil
+codecs, palettes, resampling, orientation, unknown blocks, and world locking). Run them with `uv run pytest -q`.
