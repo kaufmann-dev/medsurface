@@ -5,7 +5,7 @@ import math
 import pytest
 
 from medsurface.geometry import (
-    is_anisotropic,
+    axis_size_problem,
     kernel_extent_mm,
     kernel_radius_voxels,
     mm3_to_voxels,
@@ -107,7 +107,13 @@ def test_voxel_volume_and_island_conversion():
     assert mm3_to_voxels(1e-6, HEAD_CT) == 1
 
 
-def test_anisotropy_detection():
-    assert is_anisotropic(HEAD_CT)
-    assert not is_anisotropic((0.5, 0.5, 0.5))
+def test_voxel_volume_of_anisotropic_spacing():
     assert not math.isnan(voxel_volume_mm3(HEAD_CT))
+
+
+def test_axis_size_problem_requires_four_voxels_on_three_axes():
+    assert axis_size_problem((4, 4, 4)) is None
+    assert axis_size_problem((4, 3, 4)) == (
+        "each volume axis must contain at least 4 voxels; got 4x3x4"
+    )
+    assert axis_size_problem((8, 8)) is not None

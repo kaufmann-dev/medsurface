@@ -12,8 +12,9 @@ from typing import Any
 import meshlib.mrmeshpy as mm
 
 from . import surface
+from .outputs import validate_mesh_output
 from .paths import same_file
-from .stages import Logger, ProgressSink, stage_runner
+from .stages import Logger, ProgressSink, Reporter
 
 
 @dataclass
@@ -31,13 +32,9 @@ def repair(
     """Weld, fix multiple edges, collapse degeneracies, fill every hole."""
     if same_file(in_path, out_path):
         raise ValueError("input and output must be different files; repair is not in-place")
-    surface.validate_output_path(out_path)
-
-    def say(msg: str) -> None:
-        if log:
-            log(msg)
-
-    step = stage_runner(say, progress, 34)
+    validate_mesh_output(out_path)
+    reporter = Reporter(log, None, progress, 34)
+    say, step = reporter.say, reporter.step
 
     mesh = step("load mesh", lambda: mm.loadMesh(in_path))
     stats = {

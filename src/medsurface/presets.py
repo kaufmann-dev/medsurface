@@ -160,31 +160,6 @@ def get(name: str) -> Preset:
         ) from None
 
 
-def validate(preset: Preset) -> None:
-    """Reject invalid processing values before image or mesh allocation begins."""
-    validate_segmentation(preset)
-    nonnegative = {
-        "resample_mm": preset.resample_mm,
-        "mask_smooth_mm": preset.mask_smooth_mm,
-        "simplify_error_mm": preset.simplify_error_mm,
-    }
-    for name, value in nonnegative.items():
-        if not math.isfinite(value) or value < 0:
-            raise ValueError("%s must be finite and non-negative" % name)
-    if (
-        not isinstance(preset.surface_smooth_iters, int)
-        or preset.surface_smooth_iters < 0
-    ):
-        raise ValueError("surface_smooth_iters must be a non-negative integer")
-    if (
-        not isinstance(preset.post_surface_smooth_iters, int)
-        or preset.post_surface_smooth_iters < 0
-    ):
-        raise ValueError("post_surface_smooth_iters must be a non-negative integer")
-    if preset.destep is not None:
-        validate_destep(preset.destep)
-
-
 def validate_segmentation(preset: Preset) -> None:
     """Validate only fields used to turn intensities into a binary mask."""
     for name, value in {

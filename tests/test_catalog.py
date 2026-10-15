@@ -115,7 +115,7 @@ def test_native_volume_limit_accepts_counts_at_or_below_the_boundary(
     candidate = catalog.discover(path)[0]
     candidate.size = size
     loaded = _image()
-    monkeypatch.setattr(sitk, "ReadImage", lambda _path: loaded)
+    monkeypatch.setattr(sitk, "ReadImage", lambda _path, **_kwargs: loaded)
 
     assert volume.load(candidate).image is loaded
     assert np.prod(size, dtype=object) <= MAX_VOXELS
@@ -129,7 +129,7 @@ def test_native_volume_limit_refuses_before_reading_pixels(tmp_path, monkeypatch
     monkeypatch.setattr(
         sitk,
         "ReadImage",
-        lambda _path: pytest.fail("pixel reading must not start above the voxel limit"),
+        lambda _path, **_kwargs: pytest.fail("pixel reading must not start above the voxel limit"),
     )
 
     with pytest.raises(ValueError, match="500,000,000.*--allow-large-volume"):
@@ -142,7 +142,7 @@ def test_native_volume_override_allows_pixel_loading(tmp_path, monkeypatch):
     candidate = catalog.discover(path)[0]
     candidate.size = (1_000, 1_000, 501)
     loaded = _image()
-    monkeypatch.setattr(sitk, "ReadImage", lambda _path: loaded)
+    monkeypatch.setattr(sitk, "ReadImage", lambda _path, **_kwargs: loaded)
 
     assert volume.load(candidate, allow_large_volume=True).image is loaded
 

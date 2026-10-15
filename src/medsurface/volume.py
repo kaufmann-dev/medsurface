@@ -13,10 +13,11 @@ from typing import Any, Callable
 import numpy as np
 import SimpleITK as sitk
 
-from .catalog import DicomSource, FileSource, VolumeCandidate, validate_image
-from .defaults import MAX_VOXELS, MIN_VOLUME_AXIS_VOXELS
+from .catalog import DicomSource, FileSource, VolumeCandidate, image_io, validate_image
+from .defaults import MAX_VOXELS
+from .geometry import axis_size_problem
 from .outputs import VolumeOutput, volume_output
-from .stages import ProgressSink, stage_runner
+from .stages import Logger, ProgressSink, Reporter
 
 
 @dataclass
@@ -37,10 +38,6 @@ class Volume:
         f = sitk.MinimumMaximumImageFilter()
         f.Execute(self.image)
         return float(f.GetMinimum()), float(f.GetMaximum())
-
-    def array(self) -> np.ndarray:
-        """Voxels as ``(z, y, x)``."""
-        return sitk.GetArrayViewFromImage(self.image)
 
 
 @dataclass(frozen=True)
@@ -91,14 +88,9 @@ def _voxel_count(candidate: VolumeCandidate) -> int:
             "volume ID %d has no complete positive 3D dimensions; "
             "pixel data will not be loaded without a usable header" % candidate.id
         )
-    if any(value < MIN_VOLUME_AXIS_VOXELS for value in size):
-        raise ValueError(
-            "each volume axis must contain at least %d voxels; got %s"
-            % (
-                MIN_VOLUME_AXIS_VOXELS,
-                "x".join(str(value) for value in size),
-            )
-        )
+    size_problem = axis_size_problem(size)
+    if size_problem is not None:
+        raise ValueError(size_problem)
     return math.prod(int(value) for value in size)
 
 
@@ -158,14 +150,9 @@ def load(
             if preserve_metadata and series.files:
                 metadata_omissions = _copy_dicom_metadata(reader, image)
         else:
-            source_path = str(candidate.source.path)
-            if candidate.source.path.name == candidate.source.path.name.casefold():
-                image = sitk.ReadImage(source_path)
-            else:
-                image = sitk.ReadImage(
-                    source_path,
-                    imageIO=_image_io(candidate.source.path),
-                )
+            image = sitk.ReadImage(
+                str(candidate.source.path), imageIO=image_io(candidate.source.path)
+            )
             if not preserve_metadata:
                 _erase_metadata(image)
     except RuntimeError as exc:
@@ -239,17 +226,6 @@ def warnings_for(volume: Volume) -> list[str]:
         )
 
     return out
-
-
-def _image_io(path: os.PathLike[str] | str) -> str:
-    name = os.fspath(path).casefold()
-    if name.endswith((".nii", ".nii.gz")):
-        return "NiftiImageIO"
-    if name.endswith((".nrrd", ".nhdr")):
-        return "NrrdImageIO"
-    if name.endswith((".mha", ".mhd")):
-        return "MetaImageIO"
-    return ""
 
 
 def provenance_for(volume: Volume) -> dict[str, Any]:
@@ -479,28 +455,15 @@ def convert(
     *,
     strip_metadata: bool = False,
     allow_large_volume: bool = False,
-    log: Callable[[str], None] | None = None,
-    warn: Callable[[str], None] | None = None,
+    log: Logger | None = None,
+    warn: Logger | None = None,
     progress: ProgressSink | None = None,
 ) -> ConversionResult:
     """Preserve one selected image while changing only its storage format."""
     output = volume_output(output_path)
-    if os.path.isdir(output_path):
-        raise ValueError("volume output path is a directory: %s" % output_path)
     started = time.time()
-
-    def say(message: str) -> None:
-        if log:
-            log(message)
-
-    step = stage_runner(say, progress, 34)
-
-    warnings: list[str] = []
-
-    def add_warning(message: str) -> None:
-        warnings.append(message)
-        if warn:
-            warn(message)
+    reporter = Reporter(log, warn, progress, 34)
+    step = reporter.step
 
     loaded = step(
         "load volume",
@@ -511,8 +474,7 @@ def convert(
         ),
     )
     provenance = provenance_for(loaded)
-    for message in loading_warnings_for(loaded):
-        add_warning(message)
+    reporter.warn_all(loading_warnings_for(loaded))
 
     dimensions = tuple(int(value) for value in loaded.image.GetSize())
     pixel_type = loaded.image.GetPixelIDTypeAsString()
@@ -533,7 +495,7 @@ def convert(
         not strip_metadata
         and written.preserved_metadata < written.source_metadata
     ):
-        add_warning(
+        reporter.warn(
             "%s preserved %d of %d source metadata entries; metadata not "
             "representable by the destination format was omitted"
             % (
@@ -554,7 +516,7 @@ def convert(
         origin=origin,
         direction=direction,
         seconds=time.time() - started,
-        warnings=warnings,
+        warnings=reporter.warnings,
         metadata_policy="stripped" if strip_metadata else "preserved-best-effort",
         provenance=provenance,
     )

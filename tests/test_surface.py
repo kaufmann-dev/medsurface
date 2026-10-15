@@ -175,8 +175,8 @@ def test_looser_simplification_error_produces_no_more_faces(solid_sphere):
     image, _ = solid_sphere
     poly = _mesh(image, smooth_iters=5)
     before = poly.topology.numValidFaces()
-    strict = surface.decimate(poly, 0.05)
-    loose = surface.decimate(poly, 0.25)
+    strict = surface.decimate_safely(poly, 0.05)[0]
+    loose = surface.decimate_safely(poly, 0.25)[0]
     assert strict.topology.numValidFaces() < before
     assert loose.topology.numValidFaces() <= strict.topology.numValidFaces()
 
@@ -371,7 +371,7 @@ def test_simplification_never_opens_a_closed_mesh(solid_sphere, tmp_path, error_
     poly = _mesh(image, smooth_iters=10)
     assert surface.count_defects(poly) == (0, 0)
 
-    smaller = surface.decimate(poly, error_mm)
+    smaller = surface.decimate_safely(poly, error_mm)[0]
 
     assert surface.count_defects(smaller) == (0, 0)
     report = validate.validate(_write(smaller, tmp_path, "dec_%s.stl" % error_mm))
@@ -387,7 +387,7 @@ def test_zero_simplification_error_is_a_noop(solid_sphere):
     image, _ = solid_sphere
     poly = _mesh(image, smooth_iters=5)
     assert (
-        surface.decimate(poly, 0).topology.numValidFaces()
+        surface.decimate_safely(poly, 0)[0].topology.numValidFaces()
         == poly.topology.numValidFaces()
     )
 
@@ -401,7 +401,7 @@ def test_decimation_preserves_genus(tmp_path):
 
     poly = surface.from_arrays(*torus_mesh)
 
-    smaller = surface.decimate(poly, 0.25)
+    smaller = surface.decimate_safely(poly, 0.25)[0]
     after = validate.validate(_write(smaller, tmp_path, "torus_dec.stl"))
     assert after["watertight"]
     assert after["genus"] == 1, "decimation closed the tunnel"
@@ -563,7 +563,7 @@ def test_simplification_with_zero_error_is_a_noop(solid_sphere):
     image, _ = solid_sphere
     poly = _mesh(image)
     n = poly.topology.numValidFaces()
-    assert surface.decimate(poly, 0).topology.numValidFaces() == n
+    assert surface.decimate_safely(poly, 0)[0].topology.numValidFaces() == n
 
 
 def test_unsupported_extension_is_rejected(solid_sphere, tmp_path):

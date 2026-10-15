@@ -11,8 +11,7 @@ import meshlib.mrmeshpy as mrmeshpy
 import numpy as np
 import SimpleITK as sitk
 
-from .defaults import SUPPORTED_MESH_EXTENSIONS
-from .outputs import extension
+from .outputs import validate_mesh_output
 
 
 @dataclass(frozen=True)
@@ -492,10 +491,6 @@ def decimate_safely(
     )
 
 
-def decimate(mesh: mrmeshpy.Mesh, simplify_error_mm: float) -> mrmeshpy.Mesh:
-    return decimate_safely(mesh, simplify_error_mm)[0]
-
-
 def vertex_normals(mesh: mrmeshpy.Mesh) -> tuple[np.ndarray, np.ndarray]:
     """Return packed vertices and area-weighted unit vertex normals."""
     vertices, faces = to_arrays(mesh)
@@ -517,18 +512,8 @@ def vertex_normals_from_arrays(vertices: np.ndarray, faces: np.ndarray) -> np.nd
     return normals
 
 
-def validate_output_path(path: str) -> None:
-    """Reject unsupported mesh destinations before expensive processing."""
-    ext = extension(path)
-    if ext not in SUPPORTED_MESH_EXTENSIONS:
-        raise ValueError(
-            "unsupported output extension %r; supported: %s"
-            % (ext, ", ".join(SUPPORTED_MESH_EXTENSIONS))
-        )
-
-
 def write(mesh: mrmeshpy.Mesh, path: str) -> None:
-    validate_output_path(path)
+    validate_mesh_output(path)
     parent = os.path.dirname(os.path.abspath(path))
     os.makedirs(parent, exist_ok=True)
     mrmeshpy.saveMesh(mesh, path)
@@ -537,9 +522,8 @@ def write(mesh: mrmeshpy.Mesh, path: str) -> None:
 def write_validated(mesh: mrmeshpy.Mesh, path: str) -> dict:
     from . import validate
 
-    validate_output_path(path)
-    vertices, faces = to_arrays(mesh)
-    in_memory = validate.validate_arrays(vertices, faces)
+    validate_mesh_output(path)
+    in_memory = validate.validate_arrays(*to_arrays(mesh))
     if not in_memory["valid"]:
         raise ValueError(
             "in-memory output mesh is invalid: %s" % "; ".join(in_memory["problems"])

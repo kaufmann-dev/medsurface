@@ -19,10 +19,19 @@ import numpy as np
 import SimpleITK as sitk
 
 from . import series as series_mod
-from .defaults import MIN_VOLUME_AXIS_VOXELS
+from .geometry import axis_size_problem
 from .series import Series
 
-SUPPORTED_EXTENSIONS = (".nii.gz", ".nii", ".nrrd", ".nhdr", ".mha", ".mhd")
+#: Supported input suffixes, compound suffixes first, with their format name and
+#: the ITK reader that must handle them regardless of filename case.
+_INPUT_FORMATS = {
+    ".nii.gz": ("NIfTI", "NiftiImageIO"),
+    ".nii": ("NIfTI", "NiftiImageIO"),
+    ".nrrd": ("NRRD", "NrrdImageIO"),
+    ".nhdr": ("NRRD", "NrrdImageIO"),
+    ".mha": ("MetaImage", "MetaImageIO"),
+    ".mhd": ("MetaImage", "MetaImageIO"),
+}
 
 
 @dataclass(frozen=True)
@@ -89,23 +98,15 @@ class VolumeCandidate:
 
 def _extension(path: Path) -> str | None:
     name = path.name.casefold()
-    return next((ext for ext in SUPPORTED_EXTENSIONS if name.endswith(ext)), None)
+    return next((ext for ext in _INPUT_FORMATS if name.endswith(ext)), None)
 
 
-def _format_for(extension: str) -> str:
-    if extension in (".nii", ".nii.gz"):
-        return "NIfTI"
-    if extension in (".nrrd", ".nhdr"):
-        return "NRRD"
-    return "MetaImage"
-
-
-def _image_io(extension: str) -> str:
-    if extension in (".nii", ".nii.gz"):
-        return "NiftiImageIO"
-    if extension in (".nrrd", ".nhdr"):
-        return "NrrdImageIO"
-    return "MetaImageIO"
+def image_io(path: Path) -> str:
+    """ITK reader for a supported input file, independent of filename case."""
+    extension = _extension(path)
+    if extension is None:
+        raise ValueError("unsupported input extension %r" % path.name)
+    return _INPUT_FORMATS[extension][1]
 
 
 def _header_value(lines: list[str], pattern: re.Pattern[str]) -> tuple[int, str] | None:
@@ -194,14 +195,7 @@ def _metadata(reader: sitk.ImageFileReader, *names: str) -> str | None:
 def _plane(direction: tuple[float, ...] | None) -> str | None:
     if direction is None or len(direction) != 9:
         return None
-    matrix = np.asarray(direction, dtype=float).reshape(3, 3)
-    normal = np.abs(matrix[:, 2])
-    axis = int(np.argmax(normal))
-    if not math.isfinite(float(normal[axis])):
-        return None
-    if normal[axis] < 0.95:
-        return "oblique"
-    return ("sagittal", "coronal", "axial")[axis]
+    return series_mod.plane_of_normal(np.asarray(direction, dtype=float).reshape(3, 3)[:, 2])
 
 
 def _geometry_reason(
@@ -219,14 +213,9 @@ def _geometry_reason(
         return "expected one scalar component, got %d" % components
     if "complex" in pixel_type.casefold():
         return "complex-valued pixels are unsupported"
-    if len(size) != 3 or any(value < MIN_VOLUME_AXIS_VOXELS for value in size):
-        return (
-            "each volume axis must contain at least %d voxels; got %s"
-            % (
-                MIN_VOLUME_AXIS_VOXELS,
-                "x".join(str(value) for value in size),
-            )
-        )
+    size_problem = axis_size_problem(size)
+    if size_problem is not None:
+        return size_problem
     if len(spacing) != 3 or any(not math.isfinite(value) or value <= 0 for value in spacing):
         return "spacing must contain three finite positive values"
     if len(origin) != 3 or any(not math.isfinite(value) for value in origin):
@@ -251,11 +240,30 @@ def validate_image(image: sitk.Image) -> str | None:
     )
 
 
+def _unreadable_candidate(source: FileSource, root: Path, reason: str) -> VolumeCandidate:
+    return VolumeCandidate(
+        id=0,
+        source=source,
+        format=source.format,
+        source_name=_relative_name(source.path, root),
+        modality=None,
+        description=None,
+        size=None,
+        spacing=None,
+        direction=None,
+        origin=None,
+        pixel_type=None,
+        components=None,
+        plane=None,
+        unusable_reason=reason,
+    )
+
+
 def _file_candidate(path: Path, root: Path) -> VolumeCandidate:
     extension = _extension(path)
     if extension is None:
         raise ValueError("unsupported input extension %r" % path.name)
-    format_name = _format_for(extension)
+    format_name, reader_io = _INPUT_FORMATS[extension]
     payload_problem: str | None
     try:
         payloads = _detached_payloads(path, extension)
@@ -266,26 +274,11 @@ def _file_candidate(path: Path, root: Path) -> VolumeCandidate:
         payload_problem = _payload_reason(payloads)
     source = FileSource(path=path, format=format_name, payload_paths=payloads)
     if payload_problem is not None:
-        return VolumeCandidate(
-            id=0,
-            source=source,
-            format=format_name,
-            source_name=_relative_name(path, root),
-            modality=None,
-            description=None,
-            size=None,
-            spacing=None,
-            direction=None,
-            origin=None,
-            pixel_type=None,
-            components=None,
-            plane=None,
-            unusable_reason=payload_problem,
-        )
+        return _unreadable_candidate(source, root, payload_problem)
     try:
         reader = sitk.ImageFileReader()
         reader.SetFileName(str(path))
-        reader.SetImageIO(_image_io(extension))
+        reader.SetImageIO(reader_io)
         reader.ReadImageInformation()
         dimension = reader.GetDimension()
         size = tuple(int(value) for value in reader.GetSize())
@@ -300,22 +293,7 @@ def _file_candidate(path: Path, root: Path) -> VolumeCandidate:
         modality = _metadata(reader, "modality")
         description = _metadata(reader, "description", "descrip", "content", "intent_name")
     except RuntimeError as exc:
-        return VolumeCandidate(
-            id=0,
-            source=source,
-            format=format_name,
-            source_name=_relative_name(path, root),
-            modality=None,
-            description=None,
-            size=None,
-            spacing=None,
-            direction=None,
-            origin=None,
-            pixel_type=None,
-            components=None,
-            plane=None,
-            unusable_reason=_reader_error(exc),
-        )
+        return _unreadable_candidate(source, root, _reader_error(exc))
 
     return VolumeCandidate(
         id=0,
@@ -355,16 +333,9 @@ def _dicom_candidate(series: Series, root: Path) -> VolumeCandidate:
     if series.columns is not None and series.rows is not None:
         size = (series.columns, series.rows, series.n_slices)
     reason = series.unusable_reason
-    if size is not None and any(
-        value < MIN_VOLUME_AXIS_VOXELS for value in size
-    ):
-        reason = (
-            "each volume axis must contain at least %d voxels; got %s"
-            % (
-                MIN_VOLUME_AXIS_VOXELS,
-                "x".join(str(value) for value in size),
-            )
-        )
+    size_problem = axis_size_problem(size) if size is not None else None
+    if size_problem is not None:
+        reason = size_problem
     elif reason is None and size is None:
         reason = "missing image dimensions"
     spacing = None

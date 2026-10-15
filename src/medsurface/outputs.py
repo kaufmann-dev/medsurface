@@ -21,6 +21,14 @@ class VolumeOutput:
         return self.compression != "none"
 
 
+_VOLUME_OUTPUTS = {
+    ".nii": VolumeOutput(".nii", "NIfTI", "none"),
+    ".nii.gz": VolumeOutput(".nii.gz", "NIfTI", "gzip"),
+    ".nrrd": VolumeOutput(".nrrd", "NRRD", "gzip"),
+    ".mha": VolumeOutput(".mha", "MetaImage", "zlib"),
+}
+
+
 def extension(path: str | os.PathLike[str]) -> str:
     """Return a normalized extension while preserving compound NIfTI suffixes."""
     normalized = os.fspath(path).casefold()
@@ -30,28 +38,34 @@ def extension(path: str | os.PathLike[str]) -> str:
 
 
 def volume_output(path: str | os.PathLike[str]) -> VolumeOutput:
-    """Classify an atomic volume destination or reject its extension."""
+    """Classify an atomic volume destination or reject it."""
     ext = extension(path)
-    contracts = {
-        ".nii": VolumeOutput(".nii", "NIfTI", "none"),
-        ".nii.gz": VolumeOutput(".nii.gz", "NIfTI", "gzip"),
-        ".nrrd": VolumeOutput(".nrrd", "NRRD", "gzip"),
-        ".mha": VolumeOutput(".mha", "MetaImage", "zlib"),
-    }
     try:
-        return contracts[ext]
+        output = _VOLUME_OUTPUTS[ext]
     except KeyError:
         raise ValueError(
             "unsupported volume output extension %r; supported: %s"
             % (ext, ", ".join(SUPPORTED_VOLUME_EXTENSIONS))
         ) from None
+    if os.path.isdir(path):
+        raise ValueError("volume output path is a directory: %s" % os.fspath(path))
+    return output
 
 
-def validate_mesh_output(path: str | os.PathLike[str]) -> None:
-    """Require a mesh destination and report compound suffixes accurately."""
+def _require_mesh_extension(path: str | os.PathLike[str], role: str) -> None:
     ext = extension(path)
     if ext not in SUPPORTED_MESH_EXTENSIONS:
         raise ValueError(
-            "unsupported mesh extension %r; supported: %s"
-            % (ext, ", ".join(SUPPORTED_MESH_EXTENSIONS))
+            "unsupported %s extension %r; supported: %s"
+            % (role, ext, ", ".join(SUPPORTED_MESH_EXTENSIONS))
         )
+
+
+def validate_mesh_output(path: str | os.PathLike[str]) -> None:
+    """Reject unsupported mesh destinations, reporting compound suffixes accurately."""
+    _require_mesh_extension(path, "output")
+
+
+def validate_mesh_input(path: str | os.PathLike[str]) -> None:
+    """Reject unsupported mesh inputs before loading them."""
+    _require_mesh_extension(path, "mesh")

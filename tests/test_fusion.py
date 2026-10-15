@@ -373,14 +373,14 @@ def test_common_grid_rejects_tiny_spacing_without_integer_overflow():
     mask = _image(_lumpy_shell(), spacing=(1.0, 1.0, 1.0))
 
     with pytest.raises(FusionError, match="raise --grid-mm"):
-        fusion._common_grid(mask, mask, np.eye(4), 1e-12)
+        fusion.common_grid([mask, mask], [np.eye(4), np.eye(4)], 1e-12)
 
 
 def test_common_grid_accepts_exactly_the_default_voxel_limit():
     mask = sitk.Image((2, 2, 2), sitk.sitkUInt8)
     mask.SetSpacing((495.0, 995.0, 995.0))
 
-    size, _origin = fusion._common_grid(mask, mask, np.eye(4), 1.0)
+    size, _origin = fusion.common_grid([mask, mask], [np.eye(4), np.eye(4)], 1.0)
 
     assert size == (500, 1_000, 1_000)
     assert math.prod(size) == 500_000_000
@@ -389,10 +389,9 @@ def test_common_grid_accepts_exactly_the_default_voxel_limit():
 def test_common_grid_override_allows_a_grid_above_the_default_limit():
     mask = _image(_lumpy_shell(), spacing=(1.0, 1.0, 1.0))
 
-    size, _origin = fusion._common_grid(
-        mask,
-        mask,
-        np.eye(4),
+    size, _origin = fusion.common_grid(
+        [mask, mask],
+        [np.eye(4), np.eye(4)],
         1e-12,
         allow_large_volume=True,
     )

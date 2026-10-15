@@ -5,23 +5,11 @@ from __future__ import annotations
 import os
 from typing import Any
 
-import meshlib.mrmeshnumpy as mrmeshnumpy
 import meshlib.mrmeshpy as mrmeshpy
 import numpy as np
 
-from .defaults import SUPPORTED_MESH_EXTENSIONS
-from .outputs import extension
-
-
-def _load_mesh(path: str) -> mrmeshpy.Mesh:
-    """Load a supported triangle mesh with MeshLib."""
-    ext = extension(path)
-    if ext not in SUPPORTED_MESH_EXTENSIONS:
-        raise ValueError(
-            "unsupported mesh extension %r; supported: %s"
-            % (ext, ", ".join(SUPPORTED_MESH_EXTENSIONS))
-        )
-    return mrmeshpy.loadMesh(path)
+from . import surface
+from .outputs import validate_mesh_input
 
 
 def _self_intersections(mesh: mrmeshpy.Mesh) -> int | str:
@@ -115,17 +103,16 @@ def _validate_mesh(mesh: mrmeshpy.Mesh, *, file: str, bytes: int) -> dict[str, A
 
 def validate_arrays(vertices: np.ndarray, faces: np.ndarray) -> dict[str, Any]:
     """Apply the complete MeshLib validation contract before serialization."""
-    mesh = mrmeshnumpy.meshFromFacesVerts(
-        np.ascontiguousarray(faces, dtype=np.int32),
-        np.ascontiguousarray(vertices, dtype=np.float64),
+    return _validate_mesh(
+        surface.from_arrays(vertices, faces), file="<in-memory>", bytes=0
     )
-    return _validate_mesh(mesh, file="<in-memory>", bytes=0)
 
 
 def validate(path: str) -> dict[str, Any]:
     """Full quality report and a single validity result for a mesh file."""
+    validate_mesh_input(path)
     return _validate_mesh(
-        _load_mesh(path),
+        mrmeshpy.loadMesh(path),
         file=os.path.basename(path),
         bytes=os.path.getsize(path),
     )

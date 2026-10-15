@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import os
 import time
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -12,7 +11,7 @@ from typing import Any, Callable, Mapping, Sequence
 import numpy as np
 import SimpleITK as sitk
 
-from . import fusion, labelnames, pipeline, registration, surface
+from . import fusion, labelnames, pipeline, registration
 from . import volume as volume_mod
 from .catalog import DicomSource, FileSource, VolumeCandidate, same_source
 from .defaults import (
@@ -23,11 +22,10 @@ from .defaults import (
     DEFAULT_LABELMAP_SURFACE_SMOOTH_ITERS,
     SUPPORTED_MESH_EXTENSIONS,
 )
-from .outputs import volume_output
+from .outputs import validate_mesh_output, volume_output
 from .presets import DestepSettings
-from .stages import ProgressSink, stage_runner
+from .stages import Logger, ProgressSink, Reporter, stage_runner
 
-Logger = Callable[[str], None]
 SettingsForLabel = Callable[[int], pipeline.SurfaceSettings]
 
 
@@ -75,40 +73,22 @@ def resolve_surface_settings(
     keep_largest_component: bool | None = None,
     destep: DestepSettings | None = None,
 ) -> pipeline.SurfaceSettings:
-    base = default_surface_settings()
-    settings = replace(
-        base,
-        resample_mm=base.resample_mm if resample_mm is None else resample_mm,
-        mask_smooth_mm=(
-            base.mask_smooth_mm if mask_smooth_mm is None else float(mask_smooth_mm)
-        ),
-        surface_smooth_iters=(
-            base.surface_smooth_iters
-            if surface_smooth_iters is None
-            else surface_smooth_iters
-        ),
-        simplify_error_mm=(
-            base.simplify_error_mm if simplify_error_mm is None else simplify_error_mm
-        ),
-        post_surface_smooth_iters=(
-            base.post_surface_smooth_iters
-            if post_surface_smooth_iters is None
-            else post_surface_smooth_iters
-        ),
-        keep_largest_component=(
-            base.keep_largest_component
-            if keep_largest_component is None
-            else keep_largest_component
-        ),
-        destep=destep,
-    )
+    """Apply the given (non-``None``) controls on top of the labelmap defaults."""
+    overrides: dict[str, Any] = {
+        name: value
+        for name, value in (
+            ("resample_mm", resample_mm),
+            ("mask_smooth_mm", None if mask_smooth_mm is None else float(mask_smooth_mm)),
+            ("surface_smooth_iters", surface_smooth_iters),
+            ("simplify_error_mm", simplify_error_mm),
+            ("post_surface_smooth_iters", post_surface_smooth_iters),
+            ("keep_largest_component", keep_largest_component),
+        )
+        if value is not None
+    }
+    settings = replace(default_surface_settings(), destep=destep, **overrides)
     pipeline.validate_surface_settings(settings)
     return settings
-
-
-def surface_provenance(settings: pipeline.SurfaceSettings) -> dict[str, Any]:
-    """Record the external labelmap surface controls."""
-    return asdict(settings)
 
 
 def normalize_labels(labels: Sequence[int] | None) -> tuple[int, ...] | None:
@@ -127,7 +107,7 @@ def normalize_labels(labels: Sequence[int] | None) -> tuple[int, ...] | None:
     return tuple(sorted(normalized))
 
 
-def _validate_labelmap(image: sitk.Image) -> bool:
+def validate_labelmap(image: sitk.Image) -> bool:
     """Reject non-discrete label volumes; return whether any voxel is nonzero."""
     values = sitk.GetArrayViewFromImage(image)
     is_float = np.issubdtype(values.dtype, np.floating)
@@ -161,7 +141,7 @@ def _selected_mask(image: sitk.Image, labels: tuple[int, ...]) -> sitk.Image:
 def _binary_mask(image: sitk.Image, labels: Sequence[int] | None = None) -> sitk.Image:
     """Validate a discrete label volume and union every nonzero or selected label."""
     selection = normalize_labels(labels)
-    if not _validate_labelmap(image):
+    if not validate_labelmap(image):
         raise ValueError("labelmap contains no nonzero foreground voxels")
     if selection is None:
         return sitk.Cast(sitk.NotEqual(image, 0), sitk.sitkUInt8)
@@ -197,7 +177,7 @@ def inspect_labels(image: sitk.Image) -> dict[int, LabelStats]:
 
     The image must already be a valid discrete labelmap; label 0 is background.
     """
-    if not _validate_labelmap(image):
+    if not validate_labelmap(image):
         return {}
     discrete = sitk.Cast(image, sitk.sitkUInt32)
     shape = sitk.LabelShapeStatisticsImageFilter()
@@ -229,7 +209,7 @@ def inspect_labels(image: sitk.Image) -> dict[int, LabelStats]:
     return stats
 
 
-def _load_volume(
+def load_volume(
     candidate: VolumeCandidate,
     *,
     allow_large_volume: bool = False,
@@ -248,7 +228,7 @@ def load(
     labels: Sequence[int] | None = None,
 ) -> LoadedLabelmap:
     selection = normalize_labels(labels)
-    volume = _load_volume(candidate, allow_large_volume=allow_large_volume)
+    volume = load_volume(candidate, allow_large_volume=allow_large_volume)
     mask = _binary_mask(volume.image, selection)
     provenance = volume_mod.provenance_for(volume)
     provenance.update(
@@ -295,28 +275,11 @@ def extract(
         keep_largest_component=keep_largest_component,
         destep=destep,
     )
-    surface.validate_output_path(output_path)
+    validate_mesh_output(output_path)
     started = time.time()
-
-    def say(message: str) -> None:
-        if log:
-            log(message)
-
-    step = stage_runner(say, progress, 34)
-
-    warnings: list[str] = []
-
-    def add_warning(message: str) -> None:
-        warnings.append(message)
-        if warn:
-            warn(message)
-
-    for message in (
-        pipeline.mask_smoothing_warning(settings.mask_smooth_mm),
-        pipeline.destep_warning(settings.destep),
-    ):
-        if message:
-            add_warning(message)
+    reporter = Reporter(log, warn, progress, 34)
+    say, step = reporter.say, reporter.step
+    reporter.warn_all(pipeline.settings_warnings(settings.mask_smooth_mm, settings.destep))
 
     loaded = step(
         "load labelmap",
@@ -324,8 +287,7 @@ def extract(
             candidate, allow_large_volume=allow_large_volume, labels=selection
         ),
     )
-    for message in volume_mod.warnings_for(loaded.volume):
-        add_warning(message)
+    reporter.warn_all(volume_mod.warnings_for(loaded.volume))
     say(
         "labelmap %s  spacing %s mm  foreground %s"
         % (
@@ -343,11 +305,11 @@ def extract(
         allow_large_volume=allow_large_volume,
         step=step,
         log=say,
-        warn=add_warning,
+        warn=reporter.warn,
     )
     provenance = {
         "input": loaded.provenance,
-        "surface": surface_provenance(settings),
+        "surface": asdict(settings),
         "surface_finishing": meshed.surface_finishing,
         "capped_field_of_view": meshed.capped_field_of_view,
         "allow_large_volume": bool(allow_large_volume),
@@ -362,7 +324,7 @@ def extract(
         surface_components=meshed.surface_components,
         capped_field_of_view=meshed.capped_field_of_view,
         seconds=time.time() - started,
-        warnings=warnings,
+        warnings=reporter.warnings,
         provenance=provenance,
         quality=meshed.quality,
     )
@@ -509,7 +471,7 @@ def extract_labels(
         )
     selection = normalize_labels(labels)
     if combined_path is not None:
-        surface.validate_output_path(combined_path)
+        validate_mesh_output(combined_path)
     directory = Path(output_dir)
     if directory.exists() and not directory.is_dir():
         raise ValueError("split output path is not a directory: %s" % directory)
@@ -525,24 +487,13 @@ def extract_labels(
         return chosen
 
     started = time.time()
-    warnings: list[str] = []
-
-    def say(message: str) -> None:
-        if log:
-            log(message)
-
-    def add_warning(message: str) -> None:
-        warnings.append(message)
-        if warn:
-            warn(message)
-
-    step = stage_runner(say, progress, 34)
+    reporter = Reporter(log, warn, progress, 34)
+    say, step, add_warning = reporter.say, reporter.step, reporter.warn
     volume = step(
         "load labelmap",
-        lambda: _load_volume(candidate, allow_large_volume=allow_large_volume),
+        lambda: load_volume(candidate, allow_large_volume=allow_large_volume),
     )
-    for message in volume_mod.warnings_for(volume):
-        add_warning(message)
+    reporter.warn_all(volume_mod.warnings_for(volume))
     image = volume.image
     stats = step("measure labels", lambda: inspect_labels(image))
     if not stats:
@@ -616,7 +567,7 @@ def extract_labels(
             capped_field_of_view=meshed.capped_field_of_view,
             seconds=time.time() - before,
             quality=meshed.quality,
-            surface=surface_provenance(label_settings),
+            surface=asdict(label_settings),
         )
 
     meshes: list[LabelMesh] = []
@@ -719,7 +670,7 @@ def extract_labels(
         skipped=skipped,
         failed=failed,
         seconds=time.time() - started,
-        warnings=warnings,
+        warnings=reporter.warnings,
         provenance=provenance,
     )
 
@@ -782,8 +733,6 @@ def fuse_labels(
     NIfTI outputs.
     """
     output = volume_output(output_path)
-    if os.path.isdir(output_path):
-        raise ValueError("volume output path is a directory: %s" % output_path)
     if not movings:
         raise ValueError("fusion needs at least one moving labelmap")
     inputs = [fixed, *movings]
@@ -791,22 +740,11 @@ def fuse_labels(
         for second in inputs[index + 1 :]:
             if same_source(first, second):
                 raise fusion.FusionError("two fusion inputs resolve to the same labelmap")
-    if not np.isfinite(grid_mm) or grid_mm <= 0:
-        raise ValueError("grid_mm must be finite and greater than zero")
+    fusion.validate_grid_mm(grid_mm)
     selection = normalize_labels(labels)
     started = time.time()
-
-    def say(message: str) -> None:
-        if log:
-            log(message)
-
-    step = stage_runner(say, progress, 36)
-    warnings: list[str] = []
-
-    def add_warning(message: str) -> None:
-        warnings.append(message)
-        if warn:
-            warn(message)
+    reporter = Reporter(log, warn, progress, 36)
+    say, step, add_warning = reporter.say, reporter.step, reporter.warn
 
     add_warning(
         "subject identity is not verified; confirm that every input shows the "
@@ -826,12 +764,11 @@ def fuse_labels(
         say("%-8s ID %d  %s  %s" % (role, candidate.id, candidate.format, candidate.source_name))
         volume = step(
             "load %s labelmap" % role,
-            lambda candidate=candidate: _load_volume(
+            lambda candidate=candidate: load_volume(
                 candidate, allow_large_volume=allow_large_volume
             ),
         )
-        for message in volume_mod.warnings_for(volume):
-            add_warning(message)
+        reporter.warn_all(volume_mod.warnings_for(volume))
         unions.append(_binary_mask(volume.image, selection))
         volumes.append(volume)
         for label, name in embedded_label_names(candidate).items():
@@ -863,13 +800,9 @@ def fuse_labels(
         transforms.append(registered.transform)
     unions.clear()
 
-    finest = min(min(volume.image.GetSpacing()) for volume in volumes)
-    if grid_mm > finest:
-        add_warning(
-            "the fused grid is %.2f mm but the finest input voxel is %.3f mm; "
-            "structures thinner than the grid are lost. Lower --grid-mm to keep "
-            "them, at cubic cost in memory." % (grid_mm, finest)
-        )
+    coarse_grid = fusion.grid_warning(grid_mm, [volume.image for volume in volumes])
+    if coarse_grid is not None:
+        add_warning(coarse_grid)
 
     fused = step(
         "fuse label occupancy",
@@ -941,7 +874,7 @@ def fuse_labels(
         registrations=registrations,
         labels=label_payload,
         seconds=time.time() - started,
-        warnings=warnings,
+        warnings=reporter.warnings,
     )
     result.provenance = {
         "output": {
@@ -962,7 +895,7 @@ def fuse_labels(
             for record in provenance_inputs
         ],
         "registrations": [
-            fusion._registration_provenance(registered) for registered in registrations
+            fusion.registration_provenance(registered) for registered in registrations
         ],
         "fusion": {
             "method": "per-label antialiased occupancy, best label above 0.5",

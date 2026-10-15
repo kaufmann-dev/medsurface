@@ -260,6 +260,20 @@ def validate_pack_id(pack_id: str) -> None:
         )
 
 
+def validate_world_options(output: Path, options: WorldOptions) -> None:
+    """Reject a ``to_world`` request before any labelmap is loaded."""
+    if os.path.lexists(output):
+        raise ValueError("output %s already exists; refusing to overwrite it" % output)
+    if not output.name:
+        raise ValueError("output must name a world directory")
+    validate_pack_id(options.pack_id)
+    for option, value in (("--world-name", options.world_name), ("--source-name", options.source_name)):
+        if value is not None and not value.strip():
+            raise ValueError("%s must not be empty" % option)
+    blockgrid.validate_options(options.transform)
+    _vertical_index(options)
+
+
 def _vertical_index(options: WorldOptions) -> int:
     anatomical = options.transform.orientation == "anatomical"
     if anatomical and options.vertical_axis not in (None, "z"):
@@ -275,8 +289,8 @@ def _vertical_index(options: WorldOptions) -> int:
 def _load_labelmap(
     candidate: VolumeCandidate, *, allow_large_volume: bool
 ) -> tuple[sitk.Image, dict[int, str]]:
-    volume = labelmap_mod._load_volume(candidate, allow_large_volume=allow_large_volume)
-    labelmap_mod._validate_labelmap(volume.image)
+    volume = labelmap_mod.load_volume(candidate, allow_large_volume=allow_large_volume)
+    labelmap_mod.validate_labelmap(volume.image)
     return volume.image, labelmap_mod.embedded_label_names(candidate)
 
 
@@ -789,7 +803,11 @@ def decode_world(world: Path, manifest: Manifest) -> np.ndarray:
 def _write_volume(
     owner: list[sitk.Image], output: Path, names: Mapping[int, str], present: set[int]
 ) -> str:
-    """Atomically write a verified labelmap and embed names in NIfTI outputs."""
+    """Atomically write a verified labelmap and embed names in NIfTI outputs.
+
+    ``owner`` must hold the only reference to the image so it can be released
+    before the written file is read back for verification.
+    """
     result = volume_mod.write_verified_volume(owner[0], str(output), release_source=owner.clear)
     kept = {label: name for label, name in names.items() if label in present}
     if result.output.format == "NIfTI" and kept:
@@ -807,15 +825,7 @@ def to_world(
 ) -> WorldResult:
     """Convert one labelmap into a new Minecraft Java world directory."""
     started = time.time()
-    if os.path.lexists(output):
-        raise ValueError("output %s already exists; refusing to overwrite it" % output)
-    if not output.name:
-        raise ValueError("output must name a world directory")
-    validate_pack_id(options.pack_id)
-    for option, value in (("--world-name", options.world_name), ("--source-name", options.source_name)):
-        if value is not None and not value.strip():
-            raise ValueError("%s must not be empty" % option)
-    blockgrid.validate_options(options.transform)
+    validate_world_options(output, options)
     vertical = _vertical_index(options)
 
     _say(log, "Loading labelmap ...")
@@ -887,8 +897,9 @@ def resample(
     pixel_type = sitk.GetArrayViewFromImage(derived).dtype.name
     size = tuple(int(value) for value in derived.GetSize())
     _say(log, "Writing %s ..." % output)
-    output_format = _write_volume([derived], output, names, set(counts))
+    owner = [derived]
     del derived
+    output_format = _write_volume(owner, output, names, set(counts))
     return VolumeResult(
         output_path=str(output),
         format=output_format,
@@ -928,8 +939,9 @@ def to_labelmap(world: Path, output: Path, *, log: Logger | None = None) -> Volu
     image.SetDirection(manifest.direction)
     names = {entry.label: entry.name for entry in manifest.palette if entry.name}
     _say(log, "Writing %s ..." % output)
-    output_format = _write_volume([image], output, names, set(counts))
+    owner = [image]
     del image
+    output_format = _write_volume(owner, output, names, set(counts))
     return VolumeResult(
         output_path=str(output),
         format=output_format,

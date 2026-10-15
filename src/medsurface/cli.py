@@ -31,7 +31,7 @@ from rich.text import Text
 
 from . import __version__, defaults
 from . import presets as presets_mod
-from .outputs import VolumeOutput, extension, volume_output
+from .outputs import extension, validate_mesh_input, validate_mesh_output, volume_output
 from .presets import PRESETS
 
 
@@ -178,31 +178,24 @@ def _destep_settings(
 stdout_console = Console(highlight=False, markup=False)
 stderr_console = Console(stderr=True, highlight=False, markup=False)
 
-app = typer.Typer(
-    add_completion=False,
-    help="Convert volumes, fuse scans or labelmaps, extract surface meshes, and edit labelmaps in Minecraft.",
-    invoke_without_command=True,
-    no_args_is_help=False,
-    pretty_exceptions_show_locals=False,
-    rich_markup_mode="rich",
+def _typer(help: str) -> typer.Typer:
+    return typer.Typer(
+        add_completion=False,
+        help=help,
+        invoke_without_command=True,
+        no_args_is_help=False,
+        pretty_exceptions_show_locals=False,
+        rich_markup_mode="rich",
+    )
+
+
+app = _typer(
+    "Convert volumes, fuse scans or labelmaps, extract surface meshes, and edit "
+    "labelmaps in Minecraft."
 )
-labelmap_app = typer.Typer(
-    add_completion=False,
-    help="Fuse labelmaps or extract their surface meshes.",
-    invoke_without_command=True,
-    no_args_is_help=False,
-    pretty_exceptions_show_locals=False,
-    rich_markup_mode="rich",
-)
+labelmap_app = _typer("Fuse labelmaps or extract their surface meshes.")
 app.add_typer(labelmap_app, name="labelmap")
-minecraft_app = typer.Typer(
-    add_completion=False,
-    help="Round-trip labelmaps through editable Minecraft Java worlds.",
-    invoke_without_command=True,
-    no_args_is_help=False,
-    pretty_exceptions_show_locals=False,
-    rich_markup_mode="rich",
-)
+minecraft_app = _typer("Round-trip labelmaps through editable Minecraft Java worlds.")
 app.add_typer(minecraft_app, name="minecraft")
 
 
@@ -577,35 +570,29 @@ def _warn_if_invalid(report: dict[str, Any], subject: str) -> None:
         _warn("%s failed validation: %s" % (subject, "; ".join(report["problems"])))
 
 
-def _validate_mesh_output(path: Path) -> None:
-    output_extension = extension(path)
-    if output_extension not in defaults.SUPPORTED_MESH_EXTENSIONS:
-        _error(
-            "unsupported output extension %r; supported: %s"
-            % (output_extension, ", ".join(defaults.SUPPORTED_MESH_EXTENSIONS))
-        )
-        raise typer.Exit(2)
-
-
-def _validate_mesh_input(path: Path) -> None:
-    input_extension = extension(path)
-    if input_extension not in defaults.SUPPORTED_MESH_EXTENSIONS:
-        _error(
-            "unsupported mesh extension %r; supported: %s"
-            % (input_extension, ", ".join(defaults.SUPPORTED_MESH_EXTENSIONS))
-        )
-        raise typer.Exit(2)
-
-
-def _validate_volume_output(path: Path) -> VolumeOutput:
+@contextmanager
+def _usage_errors():
+    """Report a ``ValueError`` raised before processing as a usage error."""
     try:
-        output = volume_output(path)
-        if path.exists() and path.is_dir():
-            raise ValueError("volume output path is a directory: %s" % path)
-        return output
+        yield
     except ValueError as exc:
         _error(exc)
         raise typer.Exit(2) from None
+
+
+def _validate_mesh_output(path: Path) -> None:
+    with _usage_errors():
+        validate_mesh_output(path)
+
+
+def _validate_mesh_input(path: Path) -> None:
+    with _usage_errors():
+        validate_mesh_input(path)
+
+
+def _validate_volume_output(path: Path) -> None:
+    with _usage_errors():
+        volume_output(path)
 
 
 def _fusion_result_payload(result: Any) -> dict[str, Any]:
@@ -652,16 +639,6 @@ def _print_fusion_result(result: Any) -> None:
             "MODEL.stl",
         ],
     )
-
-
-def _emit_remaining_warnings(messages: list[str], emitted: list[str]) -> None:
-    """Render result warnings not already streamed by the processing layer."""
-    streamed = Counter(emitted)
-    for message in messages:
-        if streamed[message]:
-            streamed[message] -= 1
-        else:
-            _warn(message)
 
 
 def _parse_threshold(
@@ -986,16 +963,85 @@ def _restore_output_on_failure(path: Path):
             os.unlink(backup)
 
 
+def _protect_paths(inputs: list[Path], output: Path, json_file: Path | None) -> None:
+    """Refuse outputs that alias an input or each other, as a usage error."""
+    from .paths import protect_outputs
+
+    with _usage_errors():
+        protect_outputs(inputs, output, json_file)
+
+
 def _protect_output_paths(
     candidates: list[Any], output: Path, json_file: Path | None
 ) -> None:
     from . import catalog
-    from .paths import protect_outputs
 
-    inputs = [
-        path for candidate in candidates for path in catalog.source_paths(candidate)
-    ]
-    protect_outputs(inputs, output, json_file)
+    _protect_paths(
+        [path for candidate in candidates for path in catalog.source_paths(candidate)],
+        output,
+        json_file,
+    )
+
+
+def _output_transaction(output: Path, json_file: Path | None):
+    """Roll back ``output`` if the ``--json`` report written after it fails."""
+    return _restore_output_on_failure(output) if json_file is not None else nullcontext()
+
+
+def _select_volume(
+    input_path: Path, volume_id: int | None, output: Path, json_file: Path | None
+):
+    """Discover, select, and protect one volume for a single-input command."""
+    found = _discover(input_path)
+    if not found:
+        _error("no supported volumes found under %s" % input_path)
+        raise typer.Exit(1)
+
+    from . import catalog
+
+    with _usage_errors():
+        chosen = catalog.select(found, volume_id)
+    _protect_output_paths(found, output, json_file)
+    return chosen
+
+
+def _report_written(json_file: Path | None) -> None:
+    if json_file is not None:
+        _success("wrote %s" % json_file)
+
+
+def _surface_payload(result: Any) -> dict[str, Any]:
+    """``--json`` report shared by single-mesh extraction commands."""
+    return {
+        "result": {
+            "output": result.output_path,
+            "triangles": result.triangles,
+            "vertices": result.vertices,
+            "bounds_mm": list(result.bounds_mm),
+            "seconds": result.seconds,
+            "capped_field_of_view": result.capped_field_of_view,
+            "labelmap_components": result.labelmap_components,
+            "surface_components": result.surface_components,
+            "warnings": result.warnings,
+        },
+        "provenance": result.provenance,
+        "quality": result.quality,
+    }
+
+
+def _finish_surface_command(result: Any, quiet: bool, json_file: Path | None) -> None:
+    """Print a single-mesh extraction result and exit nonzero if it is invalid."""
+    report = result.quality
+    if not quiet:
+        _success("wrote %s" % result.output_path)
+        _log(
+            "triangles %s   vertices %s   %.1fs"
+            % (f"{result.triangles:,}", f"{result.vertices:,}", result.seconds)
+        )
+        _print_quality(report)
+        _report_written(json_file)
+    _warn_if_invalid(report, "output")
+    _exit_for_quality(report)
 
 
 @app.command("list")
@@ -1025,11 +1071,7 @@ def list_volumes(
             _error("no supported volumes found under %s" % input_path)
             raise typer.Exit(1)
         if json_file is not None:
-            try:
-                _protect_output_paths(found, json_file, None)
-            except ValueError as exc:
-                _error(exc)
-                raise typer.Exit(2) from None
+            _protect_output_paths(found, json_file, None)
 
     from . import catalog
 
@@ -1109,8 +1151,7 @@ def list_volumes(
                 "out.stl",
             ],
         )
-    if json_file is not None:
-        _success("wrote %s" % json_file)
+    _report_written(json_file)
 
 
 @app.command()
@@ -1212,48 +1253,24 @@ def convert(
 ) -> None:
     """Preserve one image while changing only its storage format."""
     _validate_volume_output(output)
-    emitted_warnings: list[str] = []
-
-    def emit_warning(message: str) -> None:
-        emitted_warnings.append(message)
-        _warn(message)
-
     progress = _progress_display(progress_format, quiet, "Discovering volumes ...")
     with progress:
-        found = _discover(input_path)
-        if not found:
-            _error("no supported volumes found under %s" % input_path)
-            raise typer.Exit(1)
-
-        from . import catalog
-
-        try:
-            chosen = catalog.select(found, volume_id)
-            _protect_output_paths(found, output, json_file)
-        except ValueError as exc:
-            _error(exc)
-            raise typer.Exit(2) from None
-
+        chosen = _select_volume(input_path, volume_id, output, json_file)
         progress.log(
             "volume ID %d  %s  %s" % (chosen.id, chosen.format, chosen.source_name)
         )
         progress.update("Loading volume conversion engine ...")
         from . import volume as volume_mod
 
-        transaction = (
-            _restore_output_on_failure(output)
-            if json_file is not None
-            else nullcontext()
-        )
         try:
-            with transaction:
+            with _output_transaction(output, json_file):
                 result = volume_mod.convert(
                     candidate=chosen,
                     output_path=str(output),
                     strip_metadata=strip_metadata,
                     allow_large_volume=allow_large_volume,
                     log=progress.log,
-                    warn=emit_warning,
+                    warn=_warn,
                     progress=_progress_sink(progress),
                 )
                 payload = {
@@ -1280,7 +1297,6 @@ def convert(
             _error(exc)
             raise typer.Exit(1) from None
 
-    _emit_remaining_warnings(result.warnings, emitted_warnings)
     if not quiet:
         _success("wrote %s" % result.output_path)
         _log(
@@ -1291,8 +1307,7 @@ def convert(
                 result.seconds,
             )
         )
-        if json_file is not None:
-            _success("wrote %s" % json_file)
+        _report_written(json_file)
 
 
 @app.command()
@@ -1426,28 +1441,9 @@ def extract(
         destep_iters,
         destep_max_mm,
     )
-    emitted_warnings: list[str] = []
-
-    def emit_warning(message: str) -> None:
-        emitted_warnings.append(message)
-        _warn(message)
-
     progress = _progress_display(progress_format, quiet, "Discovering volumes ...")
     with progress:
-        found = _discover(input_path)
-        if not found:
-            _error("no supported volumes found under %s" % input_path)
-            raise typer.Exit(1)
-
-        from . import catalog
-
-        try:
-            chosen = catalog.select(found, volume_id)
-            _protect_output_paths(found, output, json_file)
-        except ValueError as exc:
-            _error(exc)
-            raise typer.Exit(2) from None
-
+        chosen = _select_volume(input_path, volume_id, output, json_file)
         progress.log(
             "volume ID %d  %s  %s" % (chosen.id, chosen.format, chosen.source_name)
         )
@@ -1479,47 +1475,15 @@ def extract(
                 cap_field_of_view=not no_cap,
                 allow_large_volume=allow_large_volume,
                 log=progress.log,
-                warn=emit_warning,
+                warn=_warn,
                 progress=_progress_sink(progress),
             )
         except ValueError as exc:
             _error(exc)
             raise typer.Exit(1) from None
+        _publish_report(progress, json_file, _surface_payload(result))
 
-        report = result.quality
-
-        payload = {
-            "result": {
-                "output": result.output_path,
-                "triangles": result.triangles,
-                "vertices": result.vertices,
-                "bounds_mm": list(result.bounds_mm),
-                "seconds": result.seconds,
-                "capped_field_of_view": result.capped_field_of_view,
-                "labelmap_components": result.labelmap_components,
-                "surface_components": result.surface_components,
-                "warnings": result.warnings,
-            },
-            "provenance": result.provenance,
-            "quality": report,
-        }
-        _publish_report(progress, json_file, payload)
-
-    _emit_remaining_warnings(result.warnings, emitted_warnings)
-
-    if not quiet:
-        _success("wrote %s" % result.output_path)
-        _log(
-            "triangles %s   vertices %s   %.1fs"
-            % (f"{result.triangles:,}", f"{result.vertices:,}", result.seconds)
-        )
-        _print_quality(report)
-        if json_file is not None:
-            _success("wrote %s" % json_file)
-
-    _warn_if_invalid(report, "output")
-
-    _exit_for_quality(report)
+    _finish_surface_command(result, quiet, json_file)
 
 
 def _parse_label_selection(value: str | None) -> list[int] | None:
@@ -1705,21 +1669,10 @@ def extract_labelmap(
         )
         return
     assert output is not None
-    emitted_warnings: list[str] = []
-
-    def emit_warning(message: str) -> None:
-        emitted_warnings.append(message)
-        _warn(message)
-
     progress = _progress_display(progress_format, quiet, "Discovering labelmap ...")
     with progress:
         chosen, found = _select_labelmap(input_path)
-        try:
-            _protect_output_paths(found, output, json_file)
-        except ValueError as exc:
-            _error(exc)
-            raise typer.Exit(2) from None
-
+        _protect_output_paths(found, output, json_file)
         progress.update("Loading labelmap extraction engine ...")
         from . import labelmap as labelmap_mod
 
@@ -1737,44 +1690,16 @@ def extract_labelmap(
                 cap_field_of_view=not no_cap,
                 allow_large_volume=allow_large_volume,
                 log=progress.log,
-                warn=emit_warning,
+                warn=_warn,
                 labels=selection,
                 progress=_progress_sink(progress),
             )
         except (OSError, RuntimeError, ValueError) as exc:
             _error(exc)
             raise typer.Exit(1) from None
+        _publish_report(progress, json_file, _surface_payload(result))
 
-        report = result.quality
-        payload = {
-            "result": {
-                "output": result.output_path,
-                "triangles": result.triangles,
-                "vertices": result.vertices,
-                "bounds_mm": list(result.bounds_mm),
-                "seconds": result.seconds,
-                "capped_field_of_view": result.capped_field_of_view,
-                "labelmap_components": result.labelmap_components,
-                "surface_components": result.surface_components,
-                "warnings": result.warnings,
-            },
-            "provenance": result.provenance,
-            "quality": report,
-        }
-        _publish_report(progress, json_file, payload)
-
-    _emit_remaining_warnings(result.warnings, emitted_warnings)
-    if not quiet:
-        _success("wrote %s" % result.output_path)
-        _log(
-            "triangles %s   vertices %s   %.1fs"
-            % (f"{result.triangles:,}", f"{result.vertices:,}", result.seconds)
-        )
-        _print_quality(report)
-        if json_file is not None:
-            _success("wrote %s" % json_file)
-    _warn_if_invalid(report, "output")
-    _exit_for_quality(report)
+    _finish_surface_command(result, quiet, json_file)
 
 
 def _extract_labelmap_split(
@@ -1801,23 +1726,13 @@ def _extract_labelmap_split(
         _error("--split must name a directory: %s" % split)
         raise typer.Exit(2)
     mesh_format = extension(output).lstrip(".") if output is not None else "stl"
-    emitted_warnings: list[str] = []
-
-    def emit_warning(message: str) -> None:
-        emitted_warnings.append(message)
-        _warn(message)
-
     progress = _progress_display(progress_format, quiet, "Discovering labelmap ...")
     with progress:
         chosen, found = _select_labelmap(input_path)
-        try:
-            if output is not None:
-                _protect_output_paths(found, output, json_file)
-            elif json_file is not None:
-                _protect_output_paths(found, json_file, None)
-        except ValueError as exc:
-            _error(exc)
-            raise typer.Exit(2) from None
+        if output is not None:
+            _protect_output_paths(found, output, json_file)
+        elif json_file is not None:
+            _protect_output_paths(found, json_file, None)
 
         progress.update("Loading labelmap extraction engine ...")
         from . import labelmap as labelmap_mod
@@ -1843,7 +1758,7 @@ def _extract_labelmap_split(
                 cap_field_of_view=not no_cap,
                 allow_large_volume=allow_large_volume,
                 log=progress.log,
-                warn=emit_warning,
+                warn=_warn,
                 progress=_progress_sink(progress),
             )
         except (OSError, RuntimeError, ValueError) as exc:
@@ -1866,7 +1781,6 @@ def _extract_labelmap_split(
         }
         _publish_report(progress, json_file, payload)
 
-    _emit_remaining_warnings(result.warnings, emitted_warnings)
     meshes = [*result.meshes, *([result.combined] if result.combined else [])]
     if not quiet:
         for mesh in meshes:
@@ -1882,8 +1796,7 @@ def _extract_labelmap_split(
                 result.seconds,
             )
         )
-        if json_file is not None:
-            _success("wrote %s" % json_file)
+        _report_written(json_file)
     for mesh in meshes:
         _warn_if_invalid(mesh.quality, mesh.output_path)
     for failure in result.failed:
@@ -1991,12 +1904,6 @@ def fuse_labelmaps(
     if names is not None and not preserve_labels:
         _error("--label-names requires --preserve-labels")
         raise typer.Exit(2)
-    emitted_warnings: list[str] = []
-
-    def emit_warning(message: str) -> None:
-        emitted_warnings.append(message)
-        _warn(message)
-
     progress = _progress_display(progress_format, quiet, "Discovering fixed labelmap ...")
     with progress:
         fixed, fixed_found = _select_labelmap(fixed_input, "fixed")
@@ -2008,23 +1915,14 @@ def fuse_labelmaps(
             moving, moving_found = _select_labelmap(moving_input, role)
             movings.append(moving)
             found.extend(moving_found)
-        try:
-            _protect_output_paths(found, output, json_file)
-        except ValueError as exc:
-            _error(exc)
-            raise typer.Exit(2) from None
+        _protect_output_paths(found, output, json_file)
 
         progress.update("Loading labelmap fusion engine ...")
         from . import fusion as fusion_mod
         from . import labelmap as labelmap_mod
 
-        transaction = (
-            _restore_output_on_failure(output)
-            if json_file is not None
-            else nullcontext()
-        )
         try:
-            with transaction:
+            with _output_transaction(output, json_file):
                 result = labelmap_mod.fuse_labels(
                     fixed,
                     movings,
@@ -2036,7 +1934,7 @@ def fuse_labelmaps(
                     force=force,
                     allow_large_volume=allow_large_volume,
                     log=progress.log,
-                    warn=emit_warning,
+                    warn=_warn,
                     progress=_progress_sink(progress),
                 )
                 payload = {
@@ -2053,7 +1951,6 @@ def fuse_labelmaps(
             _error(exc)
             raise typer.Exit(1) from None
 
-    _emit_remaining_warnings(result.warnings, emitted_warnings)
     if not quiet:
         _success("wrote %s" % result.output_path)
         _log(
@@ -2079,8 +1976,7 @@ def fuse_labelmaps(
                 "Extract a surface with:  ",
                 ["medsurface", "labelmap", "extract", result.output_path, "-o", "MODEL.stl"],
             )
-        if json_file is not None:
-            _success("wrote %s" % json_file)
+        _report_written(json_file)
 
 
 @app.command()
@@ -2190,12 +2086,6 @@ def fuse(
         ],
         positive=(("--grid-mm", grid_mm),),
     )
-    emitted_warnings: list[str] = []
-
-    def emit_warning(message: str) -> None:
-        emitted_warnings.append(message)
-        _warn(message)
-
     progress = _progress_display(progress_format, quiet, "Discovering fixed volumes ...")
     with progress:
         fixed_found = _discover(fixed_input)
@@ -2220,11 +2110,7 @@ def fuse(
         except ValueError as exc:
             _error("moving input: %s" % exc)
             raise typer.Exit(2) from None
-        try:
-            _protect_output_paths([*fixed_found, *moving_found], output, json_file)
-        except ValueError as exc:
-            _error(exc)
-            raise typer.Exit(2) from None
+        _protect_output_paths([*fixed_found, *moving_found], output, json_file)
 
         resolved_preset = presets_mod.get(preset.value)
         resolved_preset = presets_mod.override(
@@ -2238,13 +2124,8 @@ def fuse(
         progress.update("Loading fusion engine ...")
         from . import fusion as fusion_mod
 
-        transaction = (
-            _restore_output_on_failure(output)
-            if json_file is not None
-            else nullcontext()
-        )
         try:
-            with transaction:
+            with _output_transaction(output, json_file):
                 result = fusion_mod.fuse(
                     fixed=fixed_candidate,
                     moving=moving_candidate,
@@ -2256,7 +2137,7 @@ def fuse(
                     force=force,
                     allow_large_volume=allow_large_volume,
                     log=progress.log,
-                    warn=emit_warning,
+                    warn=_warn,
                     progress=_progress_sink(progress),
                 )
                 payload = {
@@ -2273,12 +2154,9 @@ def fuse(
             _error(exc)
             raise typer.Exit(2) from None
 
-    _emit_remaining_warnings(result.warnings, emitted_warnings)
-
     if not quiet:
         _print_fusion_result(result)
-        if json_file is not None:
-            _success("wrote %s" % json_file)
+        _report_written(json_file)
 
 
 @app.command()
@@ -2322,8 +2200,7 @@ def validate(
     if not quiet:
         stdout_console.print(_plain(mesh, "bold"))
         _print_quality(report)
-        if json_file is not None:
-            _success("wrote %s" % json_file)
+        _report_written(json_file)
     _exit_for_quality(report)
 
 
@@ -2350,24 +2227,13 @@ def repair(
     """Make a non-watertight mesh watertight."""
     _validate_mesh_input(mesh)
     _validate_mesh_output(output)
-    from .paths import protect_outputs
-
-    try:
-        protect_outputs([mesh], output, json_file)
-    except ValueError as exc:
-        _error(exc)
-        raise typer.Exit(2) from None
+    _protect_paths([mesh], output, json_file)
     progress = _progress_display(progress_format, quiet, "Loading repair engine ...")
     with progress:
         from . import repair as repair_mod
 
-        transaction = (
-            _restore_output_on_failure(output)
-            if json_file is not None
-            else nullcontext()
-        )
         try:
-            with transaction:
+            with _output_transaction(output, json_file):
                 result = repair_mod.repair(
                     str(mesh),
                     str(output),
@@ -2389,12 +2255,10 @@ def repair(
             _error("cannot repair %s: %s" % (mesh, exc))
             raise typer.Exit(1) from None
 
-    report = result.quality
     if not quiet:
         _success("wrote %s" % output)
-        _print_quality(report)
-        if json_file is not None:
-            _success("wrote %s" % json_file)
+        _print_quality(result.quality)
+        _report_written(json_file)
 
 
 class OrientChoice(str, Enum):
@@ -2489,8 +2353,7 @@ def minecraft_blocks(
         color = str(entry["hex"])
         table.add_row(_plain(entry["block"]), Text("██ ", style=color) + color)
     stdout_console.print(table)
-    if json_file is not None:
-        _success("wrote %s" % json_file)
+    _report_written(json_file)
 
 
 @minecraft_app.command("to-world")
@@ -2562,42 +2425,27 @@ def minecraft_to_world(
     from .minecraft import world as world_mod
 
     try:
-        if os.path.lexists(output):
-            raise ValueError("output %s already exists; refusing to overwrite it" % output)
-        if orient is OrientChoice.ANATOMICAL and vertical_axis not in (None, AxisChoice.Z):
-            raise ValueError(
-                "--orient anatomical always places superior on Minecraft Y; "
-                "omit --vertical-axis"
-            )
-        world_mod.validate_pack_id(pack_id)
-        for option, value in (("--world-name", world_name), ("--source-name", source_name)):
-            if value is not None and not value.strip():
-                raise ValueError("%s must not be empty" % option)
-        overrides = (
-            palette_mod.parse_overrides(palette_file.read_text(encoding="utf-8"))
-            if palette_file is not None
-            else {}
+        options = world_mod.WorldOptions(
+            vertical_axis=vertical_axis.value if vertical_axis is not None else None,
+            transform=transform,
+            world_name=world_name,
+            source_name=source_name,
+            palette=(
+                palette_mod.parse_overrides(palette_file.read_text(encoding="utf-8"))
+                if palette_file is not None
+                else {}
+            ),
+            pack_id=pack_id,
         )
+        world_mod.validate_world_options(output, options)
     except (OSError, ValueError) as exc:
         _error(exc)
         raise typer.Exit(2) from None
-    options = world_mod.WorldOptions(
-        vertical_axis=vertical_axis.value if vertical_axis is not None else None,
-        transform=transform,
-        world_name=world_name,
-        source_name=source_name,
-        palette=overrides,
-        pack_id=pack_id,
-    )
 
     progress = _progress_display(progress_format, quiet, "Discovering labelmap ...")
     with progress:
         chosen, found = _select_labelmap(input_path)
-        try:
-            _protect_output_paths(found, output, json_file)
-        except ValueError as exc:
-            _error(exc)
-            raise typer.Exit(2) from None
+        _protect_output_paths(found, output, json_file)
         try:
             result = world_mod.to_world(
                 chosen,
@@ -2640,8 +2488,7 @@ def minecraft_to_world(
                     else "one voxel",
                 )
             )
-        if json_file is not None:
-            _success("wrote %s" % json_file)
+        _report_written(json_file)
         _print_command_hint(
             "After editing and closing the world, export it with:  ",
             [
@@ -2697,18 +2544,11 @@ def minecraft_resample(
     progress = _progress_display(progress_format, quiet, "Discovering labelmap ...")
     with progress:
         chosen, found = _select_labelmap(input_path)
-        try:
-            _protect_output_paths(found, output, json_file)
-        except ValueError as exc:
-            _error(exc)
-            raise typer.Exit(2) from None
+        _protect_output_paths(found, output, json_file)
         from .minecraft import world as world_mod
 
-        transaction = (
-            _restore_output_on_failure(output) if json_file is not None else nullcontext()
-        )
         try:
-            with transaction:
+            with _output_transaction(output, json_file):
                 result = world_mod.resample(
                     chosen,
                     output,
@@ -2734,8 +2574,7 @@ def minecraft_resample(
                 result.seconds,
             )
         )
-        if json_file is not None:
-            _success("wrote %s" % json_file)
+        _report_written(json_file)
 
 
 @minecraft_app.command("inspect")
@@ -2798,8 +2637,7 @@ def minecraft_inspect(
             _plain(" ".join(str(value) for value in entry.legend_position)),
         )
     stdout_console.print(table)
-    if json_file is not None:
-        _success("wrote %s" % json_file)
+    _report_written(json_file)
 
 
 @minecraft_app.command("validate")
@@ -2837,8 +2675,7 @@ def minecraft_validate(
             "valid world: %d chunks and %s voxels checked; %d labels present"
             % (result.required_chunks, f"{result.checked_voxels:,}", len(result.label_voxels))
         )
-        if json_file is not None:
-            _success("wrote %s" % json_file)
+        _report_written(json_file)
 
 
 @minecraft_app.command("to-labelmap")
@@ -2865,22 +2702,13 @@ def minecraft_to_labelmap(
     """Validate an edited world and export it as a labelmap on its original grid."""
     _validate_volume_output(output)
     _minecraft_world_dir(world)
-    from .paths import protect_outputs
-
-    try:
-        protect_outputs([], output, json_file)
-    except ValueError as exc:
-        _error(exc)
-        raise typer.Exit(2) from None
+    _protect_paths([], output, json_file)
     progress = _progress_display(progress_format, quiet, "Reading world manifest ...")
     with progress:
         from .minecraft import world as world_mod
 
-        transaction = (
-            _restore_output_on_failure(output) if json_file is not None else nullcontext()
-        )
         try:
-            with transaction:
+            with _output_transaction(output, json_file):
                 result = world_mod.to_labelmap(world, output, log=progress.log)
                 _publish_report(progress, json_file, result.as_dict())
         except typer.Exit:
@@ -2900,5 +2728,4 @@ def minecraft_to_labelmap(
                 result.seconds,
             )
         )
-        if json_file is not None:
-            _success("wrote %s" % json_file)
+        _report_written(json_file)

@@ -14,11 +14,10 @@ from . import segment, surface
 from . import volume as volume_mod
 from .catalog import VolumeCandidate
 from .defaults import DESTEP_CLAMP_WARNING_FRACTION, SURFACE_RELAX_FORCE
-from .presets import DestepSettings, Preset, validate_destep
-from .presets import validate as validate_preset
-from .stages import ProgressSink, stage_runner
+from .outputs import validate_mesh_output
+from .presets import DestepSettings, Preset, validate_destep, validate_segmentation
+from .stages import Logger, ProgressSink, Reporter
 
-Logger = Callable[[str], None]
 StepRunner = Callable[[str, Callable[[], Any]], Any]
 
 
@@ -114,6 +113,12 @@ def validate_surface_settings(settings: SurfaceSettings) -> None:
         validate_destep(settings.destep)
 
 
+def validate_preset(preset: Preset) -> None:
+    """Reject invalid processing values before image or mesh allocation begins."""
+    validate_segmentation(preset)
+    validate_surface_settings(surface_settings(preset))
+
+
 def mask_smoothing_warning(mask_smooth_mm: float) -> str | None:
     """Explain the topology-changing tradeoff of occupancy-mask smoothing."""
     if mask_smooth_mm <= 0:
@@ -134,6 +139,17 @@ def destep_warning(destep: DestepSettings | None) -> str | None:
         "it can flatten shallow anatomy such as sutures in the faired region"
         % (destep.region, destep.iterations, destep.max_displacement_mm)
     )
+
+
+def settings_warnings(
+    mask_smooth_mm: float, destep: DestepSettings | None
+) -> list[str]:
+    """Warnings for surface controls that deliberately change anatomy."""
+    return [
+        message
+        for message in (mask_smoothing_warning(mask_smooth_mm), destep_warning(destep))
+        if message
+    ]
 
 
 def _destep_clamp_warning(stats: Any) -> str | None:
@@ -354,7 +370,7 @@ def mesh_binary_mask(
     ``lattice_origin`` anchors resampling to an uncropped source's lattice.
     """
     validate_surface_settings(settings)
-    surface.validate_output_path(output_path)
+    validate_mesh_output(output_path)
 
     def count_components() -> int:
         label_stats = sitk.LabelShapeStatisticsImageFilter()
@@ -453,7 +469,7 @@ def build_mask(
     image: sitk.Image,
     preset: Preset,
     threshold: float,
-    log: Callable[[str], None] | None = None,
+    log: Logger | None = None,
 ) -> sitk.Image:
     """Threshold and clean a volume into a binary bone mask.
 
@@ -538,38 +554,18 @@ def extract(
     progress: ProgressSink | None = None,
 ) -> Result:
     validate_preset(preset)
-    surface.validate_output_path(output_path)
+    validate_mesh_output(output_path)
     t0 = time.time()
+    reporter = Reporter(log, warn, progress, 34)
+    say, step = reporter.say, reporter.step
 
-    def say(msg: str) -> None:
-        if log:
-            log(msg)
-
-    step = stage_runner(say, progress, 34)
-
-    warnings: list[str] = []
-
-    def add_warning(message: str) -> None:
-        warnings.append(message)
-        if warn:
-            warn(message)
-
-    def add_warnings(messages: list[str]) -> None:
-        for message in messages:
-            add_warning(message)
-
-    add_warnings(threshold_warnings(candidate, preset, threshold))
-    for message in (
-        mask_smoothing_warning(preset.mask_smooth_mm),
-        destep_warning(preset.destep),
-    ):
-        if message:
-            add_warning(message)
+    reporter.warn_all(threshold_warnings(candidate, preset, threshold))
+    reporter.warn_all(settings_warnings(preset.mask_smooth_mm, preset.destep))
     vol = step(
         "load volume",
         lambda: volume_mod.load(candidate, allow_large_volume=allow_large_volume),
     )
-    add_warnings(volume_mod.warnings_for(vol))
+    reporter.warn_all(volume_mod.warnings_for(vol))
     lo, hi = step("measure intensity range", vol.intensity_range)
     say(
         "volume %s  spacing %s mm  intensity %.0f..%.0f"
@@ -602,7 +598,7 @@ def extract(
         allow_large_volume=allow_large_volume,
         step=step,
         log=say,
-        warn=add_warning,
+        warn=reporter.warn,
     )
 
     provenance = {
@@ -625,7 +621,7 @@ def extract(
         surface_components=meshed.surface_components,
         capped_field_of_view=meshed.capped_field_of_view,
         seconds=time.time() - t0,
-        warnings=warnings,
+        warnings=reporter.warnings,
         provenance=provenance,
         quality=meshed.quality,
     )

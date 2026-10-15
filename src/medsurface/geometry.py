@@ -20,6 +20,8 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
+from .defaults import MIN_VOLUME_AXIS_VOXELS
+
 #: Guards against binary-float artefacts in the exact-fit case. 2.4 / 0.8 is
 #: 2.9999999999999996, not 3.0, which would floor a legitimate radius of 1 down
 #: to 0 and silently drop the filter on that axis.
@@ -64,6 +66,11 @@ def mm3_to_voxels(mm3: float, spacing: Sequence[float]) -> int:
     return max(1, int(round(mm3 / voxel_volume_mm3(spacing))))
 
 
-def is_anisotropic(spacing: Sequence[float], tol: float = 1.05) -> bool:
-    lo, hi = min(spacing), max(spacing)
-    return hi / lo > tol
+def axis_size_problem(size: Sequence[int]) -> str | None:
+    """Explain a grid too small for recursive Gaussian filtering, or ``None``."""
+    if len(size) == 3 and all(value >= MIN_VOLUME_AXIS_VOXELS for value in size):
+        return None
+    return "each volume axis must contain at least %d voxels; got %s" % (
+        MIN_VOLUME_AXIS_VOXELS,
+        "x".join(str(value) for value in size),
+    )

@@ -201,7 +201,7 @@ def test_explicit_hu_rescale_type_verifies_derived_ct():
 
 def test_every_preset_is_self_consistent():
     for name, p in presets.PRESETS.items():
-        presets.validate(p)
+        pipeline_mod.validate_preset(p)
         assert p.name == name
         assert p.description
         assert p.median_mm >= 0 and p.closing_mm >= 0 and p.opening_mm >= 0

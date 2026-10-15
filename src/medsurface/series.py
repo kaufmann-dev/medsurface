@@ -56,9 +56,15 @@ MIN_SLICE_SPACING_MM = 0.01
 ORIENTATION_TOLERANCE_DEG = 2.0
 
 
-def format_kernel_values(values: Iterable[str]) -> str:
-    """Render DICOM ConvolutionKernel values for human-readable output."""
-    return ", ".join(values)
+def plane_of_normal(normal: Iterable[float]) -> str | None:
+    """Slice plane of a normal in patient coordinates, or ``None`` if not finite."""
+    n = np.abs(np.asarray(list(normal), dtype=float))
+    axis = int(np.argmax(n))
+    if not math.isfinite(float(n[axis])):
+        return None
+    if n[axis] < 0.95:  # more than ~18 degrees off a cardinal axis
+        return "oblique"
+    return ("sagittal", "coronal", "axial")[axis]
 
 
 @dataclass
@@ -113,7 +119,7 @@ class Series:
 
     @property
     def kernel_display(self) -> str:
-        return format_kernel_values(self.kernel_values)
+        return ", ".join(self.kernel_values)
 
     @property
     def has_calibrated_hu(self) -> bool:
@@ -135,11 +141,7 @@ class Series:
         """Slice plane in patient coordinates: axial, coronal, sagittal, oblique."""
         if self.normal is None:
             return "unknown"
-        n = np.abs(np.asarray(self.normal, dtype=float))
-        axis = int(np.argmax(n))
-        if n[axis] < 0.95:  # more than ~18 degrees off a cardinal axis
-            return "oblique"
-        return ("sagittal", "coronal", "axial")[axis]
+        return plane_of_normal(self.normal) or "unknown"
 
     @property
     def unusable_reason(self) -> str | None:
@@ -169,10 +171,6 @@ class Series:
     @property
     def usable(self) -> bool:
         return self.unusable_reason is None
-
-    def label(self) -> str:
-        parts = [self.modality, self.description or "(no description)"]
-        return " ".join(p for p in parts if p)
 
 
 def _slice_normal(orientation: Iterable[float]) -> np.ndarray:

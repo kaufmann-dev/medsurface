@@ -453,7 +453,7 @@ given. A grid coarser than the finest input voxel emits a feature-loss warning.
 ### Label-preserving and N-way fusion
 
 `labelmap.fuse_labels` (CLI: `labelmap fuse`) registers every moving input to the fixed input independently,
-using each input's union mask and the gates above. `fusion.common_grid_many`
+using each input's union mask and the gates above. `fusion.common_grid`
 plans one grid over every transformed input. `fusion.fuse_label_fields` then
 streams each input: crop a bounding box plus the antialiasing margin, antialias
 for the grid, and linearly resample with the input's inverse transform onto the

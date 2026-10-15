@@ -17,6 +17,7 @@ from .geometry import (
 
 FOREGROUND = 1
 
+
 def otsu_threshold(values: np.ndarray, nbins: int = 512) -> float:
     """Otsu's threshold over a 1-D sample of intensities.
 
@@ -95,38 +96,37 @@ def binarize(image: sitk.Image, lower: float, upper: float | None) -> sitk.Image
     )
 
 
-def _radii(mm: float, spacing) -> tuple[list[int], list[float], bool]:
-    r = kernel_radius_voxels(mm, spacing)
-    extent = kernel_extent_mm(r, spacing)
-    return r, extent, any(x > 0 for x in r)
+def _kernel_radius(name: str, mm: float, image: sitk.Image, log) -> list[int] | None:
+    """Per-axis radius for a ``mm`` kernel, or ``None`` when the step is a no-op."""
+    if mm <= 0:
+        return None
+    spacing = image.GetSpacing()
+    radius = kernel_radius_voxels(mm, spacing)
+    if not any(radius):
+        if log:
+            log("%s %.2f mm: kernel collapses to 1 voxel on every axis, skipping" % (name, mm))
+        return None
+    if log:
+        log(
+            "%-7s %-11s -> %s voxels = %s mm"
+            % (name, "%.2f mm" % mm, radius, _fmt(kernel_extent_mm(radius, spacing)))
+        )
+    return radius
 
 
 def median(image: sitk.Image, mm: float, log=None) -> sitk.Image:
     """Despeckle. Removes isolated noise voxels without rounding real edges."""
-    if mm <= 0:
+    r = _kernel_radius("median", mm, image, log)
+    if r is None:
         return image
-    r, extent, active = _radii(mm, image.GetSpacing())
-    if not active:
-        if log:
-            log("median %.2f mm: kernel collapses to 1 voxel on every axis, skipping" % mm)
-        return image
-    if log:
-        log("median  %-11s -> %s voxels = %s mm"
-            % ("%.2f mm" % mm, r, _fmt(extent)))
     return sitk.BinaryMedian(image, radius=r, foregroundValue=FOREGROUND, backgroundValue=0)
 
 
 def closing(image: sitk.Image, mm: float, log=None) -> sitk.Image:
     """Seal pores smaller than the kernel (trabecular bone, thin cortical gaps)."""
-    if mm <= 0:
+    r = _kernel_radius("closing", mm, image, log)
+    if r is None:
         return image
-    r, extent, active = _radii(mm, image.GetSpacing())
-    if not active:
-        if log:
-            log("closing %.2f mm: kernel collapses to 1 voxel on every axis, skipping" % mm)
-        return image
-    if log:
-        log("closing %-11s -> %s voxels = %s mm" % ("%.2f mm" % mm, r, _fmt(extent)))
     return sitk.BinaryMorphologicalClosing(
         image, kernelRadius=r, kernelType=sitk.sitkBall,
         foregroundValue=FOREGROUND, safeBorder=True,
@@ -135,15 +135,9 @@ def closing(image: sitk.Image, mm: float, log=None) -> sitk.Image:
 
 def opening(image: sitk.Image, mm: float, log=None) -> sitk.Image:
     """Break thin bridges and shave protrusions thinner than the kernel."""
-    if mm <= 0:
+    r = _kernel_radius("opening", mm, image, log)
+    if r is None:
         return image
-    r, extent, active = _radii(mm, image.GetSpacing())
-    if not active:
-        if log:
-            log("opening %.2f mm: kernel collapses to 1 voxel on every axis, skipping" % mm)
-        return image
-    if log:
-        log("opening %-11s -> %s voxels = %s mm" % ("%.2f mm" % mm, r, _fmt(extent)))
     return sitk.BinaryMorphologicalOpening(
         image, kernelRadius=r, kernelType=sitk.sitkBall,
         foregroundValue=FOREGROUND,
@@ -201,7 +195,7 @@ ISO_OCCUPANCY = 0.5
 #: where the samples happen to land. A symmetric kernel leaves the 0.5 level of
 #: a straight edge exactly where it was, so it costs almost no volume
 #: (measured: -0.26% on a 20 mm sphere at 1 mm sampling).
-_ANTIALIAS_SIGMA_FACTOR = 0.3
+ANTIALIAS_SIGMA_FACTOR = 0.3
 
 
 def smooth_occupancy(image: sitk.Image, sigma_mm: float) -> sitk.Image:
@@ -245,7 +239,7 @@ def antialias_for_grid(image: sitk.Image, grid_mm: float) -> sitk.Image:
             continue
         blur = sitk.RecursiveGaussianImageFilter()
         blur.SetDirection(axis)
-        blur.SetSigma(_ANTIALIAS_SIGMA_FACTOR * grid_mm)
+        blur.SetSigma(ANTIALIAS_SIGMA_FACTOR * grid_mm)
         out = blur.Execute(out)
     return out
 

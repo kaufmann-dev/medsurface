@@ -35,6 +35,7 @@ from scipy.signal import fftconvolve
 from scipy.spatial import cKDTree
 
 from . import segment, surface
+from .defaults import SURFACE_RELAX_FORCE
 
 #: Voxel size of the lattice used for the exhaustive translation search. Coarse
 #: on purpose: it only has to land within ICP's capture radius.
@@ -110,29 +111,58 @@ class RegistrationResult:
 
 
 # --------------------------------------------------------------------- helpers
-def _world_lattice(mask: sitk.Image, mm: float) -> tuple[np.ndarray, np.ndarray]:
-    """Resample onto an axis-aligned world grid so lattices can be correlated."""
-    size = np.asarray(mask.GetSize())
-    corner_points = []
-    for i in (0, size[0] - 1):
-        for j in (0, size[1] - 1):
-            for k in (0, size[2] - 1):
-                corner_points.append(mask.TransformIndexToPhysicalPoint((int(i), int(j), int(k))))
-    corners = np.asarray(corner_points, dtype=float)
+def physical_corners(image: sitk.Image, transform: np.ndarray | None = None) -> np.ndarray:
+    """Physical positions of the eight corner voxel centres, optionally transformed."""
+    size = np.asarray(image.GetSize()) - 1
+    corners = np.asarray(
+        [
+            image.TransformIndexToPhysicalPoint((int(i), int(j), int(k)))
+            for i in (0, size[0])
+            for j in (0, size[1])
+            for k in (0, size[2])
+        ],
+        dtype=float,
+    )
+    if transform is None:
+        return corners
+    return corners @ transform[:3, :3].T + transform[:3, 3]
 
+
+def resample_axis_aligned(
+    image: sitk.Image,
+    size,
+    origin,
+    spacing_mm: float,
+    transform: sitk.Transform | None = None,
+    interpolator: int = sitk.sitkLinear,
+) -> sitk.Image:
+    """Resample onto an axis-aligned isotropic world lattice; outside is 0."""
+    resample = sitk.ResampleImageFilter()
+    resample.SetOutputSpacing([float(spacing_mm)] * 3)
+    resample.SetSize([int(value) for value in size])
+    resample.SetOutputOrigin([float(value) for value in origin])
+    resample.SetOutputDirection(np.eye(3).ravel().tolist())
+    resample.SetInterpolator(interpolator)
+    resample.SetDefaultPixelValue(0.0)
+    if transform is not None:
+        resample.SetTransform(transform)
+    return resample.Execute(image)
+
+
+def _covering_lattice(corners: np.ndarray, mm: float) -> tuple[np.ndarray, np.ndarray]:
+    """Origin and size of a ``mm`` lattice covering ``corners`` plus one cell."""
     lo = np.floor(corners.min(0) / mm) * mm - mm
     hi = np.ceil(corners.max(0) / mm) * mm + mm
-    out_size = np.maximum(1, np.round((hi - lo) / mm).astype(int) + 1)
+    return lo, np.maximum(1, np.round((hi - lo) / mm).astype(int) + 1)
 
-    r = sitk.ResampleImageFilter()
-    r.SetOutputSpacing((mm, mm, mm))
-    r.SetSize([int(v) for v in out_size])
-    r.SetOutputOrigin([float(v) for v in lo])
-    r.SetOutputDirection(np.eye(3).ravel().tolist())
-    r.SetInterpolator(sitk.sitkNearestNeighbor)
-    r.SetDefaultPixelValue(0)
-    arr = sitk.GetArrayFromImage(r.Execute(mask)).astype(np.float32)  # (z, y, x)
-    return arr, lo
+
+def _world_lattice(mask: sitk.Image, mm: float) -> tuple[np.ndarray, np.ndarray]:
+    """Resample onto an axis-aligned world grid so lattices can be correlated."""
+    lo, size = _covering_lattice(physical_corners(mask), mm)
+    lattice = resample_axis_aligned(
+        mask, size, lo, mm, interpolator=sitk.sitkNearestNeighbor
+    )
+    return sitk.GetArrayFromImage(lattice).astype(np.float32), lo  # (z, y, x)
 
 
 def _fft_translation(a: np.ndarray, oa: np.ndarray,
@@ -190,7 +220,7 @@ def surface_points(mask: sitk.Image, smooth_iters: int = 10):
     poly = surface.marching_cubes(padded, 0.5)
     if poly.topology.numValidFaces() == 0:
         raise RegistrationError("mask has no surface; the threshold left no foreground")
-    poly = surface.smooth(poly, smooth_iters, 0.1)
+    poly = surface.smooth(poly, smooth_iters, SURFACE_RELAX_FORCE)
     poly = surface.transform(poly, surface.index_to_physical(padded))
     return surface.vertex_normals(poly)
 
@@ -232,15 +262,9 @@ def _resample_binary(image, size, origin, spacing, transform) -> np.ndarray:
     midpoints, and a 1e-15 perturbation of the transform flips the tie. Dice then
     drops from 1.000 to 0.916 for a mesh registered against *itself*.
     """
-    r = sitk.ResampleImageFilter()
-    r.SetOutputSpacing([float(spacing)] * 3)
-    r.SetSize([int(v) for v in size])
-    r.SetOutputOrigin([float(v) for v in origin])
-    r.SetOutputDirection(np.eye(3).ravel().tolist())
-    r.SetInterpolator(sitk.sitkLinear)
-    r.SetDefaultPixelValue(0.0)
-    r.SetTransform(transform)
-    out = r.Execute(sitk.Cast(image, sitk.sitkFloat32))
+    out = resample_axis_aligned(
+        sitk.Cast(image, sitk.sitkFloat32), size, origin, spacing, transform
+    )
     return sitk.GetArrayViewFromImage(out) > 0.5
 
 
@@ -259,18 +283,9 @@ def _shared_fov_dice(mask_a, mask_b, t, mm=1.5):
     Plain Dice over the union would punish a perfectly good registration just
     because one scan covers anatomy the other never saw.
     """
-    corner_points = []
-    for mask, xform in ((mask_a, None), (mask_b, t)):
-        size = np.asarray(mask.GetSize()) - 1
-        for i in (0, size[0]):
-            for j in (0, size[1]):
-                for k in (0, size[2]):
-                    p = np.asarray(mask.TransformIndexToPhysicalPoint((int(i), int(j), int(k))))
-                    corner_points.append(p if xform is None else xform[:3, :3] @ p + xform[:3, 3])
-    corners = np.asarray(corner_points)
-    lo = np.floor(corners.min(0) / mm) * mm - mm
-    hi = np.ceil(corners.max(0) / mm) * mm + mm
-    size = np.maximum(1, np.round((hi - lo) / mm).astype(int) + 1)
+    lo, size = _covering_lattice(
+        np.vstack([physical_corners(mask_a), physical_corners(mask_b, t)]), mm
+    )
 
     ident = sitk.Transform(3, sitk.sitkIdentity)
     inv = inverse_transform(t)

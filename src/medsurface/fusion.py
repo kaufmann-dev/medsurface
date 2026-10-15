@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import math
-import os
 import time
 from dataclasses import asdict, dataclass, field
 from numbers import Real
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import SimpleITK as sitk
@@ -18,10 +17,8 @@ from .catalog import VolumeCandidate, same_source
 from .defaults import DEFAULT_FUSION_GRID_MM, MAX_VOXELS
 from .outputs import volume_output
 from .presets import Preset, validate_segmentation
-from .registration import RegistrationResult
-from .stages import ProgressSink, stage_runner
-
-Logger = Callable[[str], None]
+from .registration import RegistrationResult, physical_corners, resample_axis_aligned
+from .stages import Logger, ProgressSink, Reporter
 
 # Empirical gates selected from matching repeat studies and a deliberate
 # unrelated-anatomy impostor. The weaker directional surface overlap is the
@@ -216,81 +213,24 @@ def check_registration(result: RegistrationResult, force: bool = False) -> None:
     )
 
 
-def _corners(image: sitk.Image) -> np.ndarray:
-    size = np.asarray(image.GetSize()) - 1
-    points = []
-    for i in (0, size[0]):
-        for j in (0, size[1]):
-            for k in (0, size[2]):
-                points.append(
-                    image.TransformIndexToPhysicalPoint((int(i), int(j), int(k)))
-                )
-    return np.asarray(points, dtype=float)
+def validate_grid_mm(grid_mm: float) -> None:
+    if not math.isfinite(grid_mm) or grid_mm <= 0:
+        raise ValueError("grid_mm must be finite and greater than zero")
 
 
-def _common_grid(
-    fixed_mask: sitk.Image,
-    moving_mask: sitk.Image,
-    transform: np.ndarray,
-    grid_mm: float,
-    *,
-    allow_large_volume: bool = False,
-) -> tuple[tuple[int, int, int], np.ndarray]:
-    rotation, translation = transform[:3, :3], transform[:3, 3]
-    points = np.vstack(
-        [
-            _corners(fixed_mask),
-            (rotation @ _corners(moving_mask).T).T + translation,
-        ]
+def grid_warning(grid_mm: float, images: list[sitk.Image]) -> str | None:
+    """Explain detail lost when the fused grid is coarser than an input voxel."""
+    finest = min(min(image.GetSpacing()) for image in images)
+    if grid_mm <= finest:
+        return None
+    return (
+        "the fused grid is %.2f mm but the finest input voxel is %.3f mm; "
+        "structures thinner than the grid are lost. Lower --grid-mm to keep "
+        "them, at cubic cost in memory." % (grid_mm, finest)
     )
-    scaled = points / grid_mm
-    if not np.all(np.isfinite(scaled)):
-        raise FusionError(
-            "the fused grid coordinates overflow at %.4g mm; raise --grid-mm" % grid_mm
-        )
-    low_index = np.floor(scaled.min(0)) - 2
-    high_index = np.ceil(scaled.max(0)) + 2
-    planned = high_index - low_index + 1
-    if not np.all(np.isfinite(planned)):
-        raise FusionError(
-            "the fused grid is too large at %.4g mm; raise --grid-mm" % grid_mm
-        )
-    if not allow_large_volume and np.any(planned > MAX_VOXELS):
-        raise FusionError(
-            "the fused grid is too large at %.4g mm; raise --grid-mm or pass "
-            "--allow-large-volume" % grid_mm
-        )
-    size = (int(planned[0]), int(planned[1]), int(planned[2]))
-    voxels = math.prod(size)
-    if voxels > MAX_VOXELS and not allow_large_volume:
-        raise FusionError(
-            "the fused grid would hold %s voxels at %.4g mm, above the default "
-            "limit of %s; raise --grid-mm or pass --allow-large-volume to attempt "
-            "it (this may exhaust memory)" % (f"{voxels:,}", grid_mm, f"{MAX_VOXELS:,}")
-        )
-    origin = np.asarray(low_index * grid_mm, dtype=float)
-    return size, origin
 
 
-def _resample_field(
-    image: sitk.Image,
-    size: tuple[int, int, int],
-    origin: np.ndarray,
-    grid_mm: float,
-    transform: sitk.Transform,
-) -> sitk.Image:
-    resample = sitk.ResampleImageFilter()
-    resample.SetOutputSpacing((grid_mm, grid_mm, grid_mm))
-    resample.SetSize([int(value) for value in size])
-    resample.SetOutputOrigin([float(value) for value in origin])
-    resample.SetOutputDirection(np.eye(3).ravel().tolist())
-    resample.SetInterpolator(sitk.sitkLinear)
-    resample.SetDefaultPixelValue(0.0)
-    resample.SetTransform(transform)
-    return resample.Execute(image)
-
-
-def _registration_provenance(result: RegistrationResult) -> dict[str, Any]:
+def registration_provenance(result: RegistrationResult) -> dict[str, Any]:
     return {
         "transform_moving_to_fixed": result.transform.tolist(),
         "fft_translation_mm": result.fft_translation_mm.tolist(),
@@ -323,7 +263,7 @@ def _base_provenance(result: FusionResult) -> dict[str, Any]:
             "origin_mm": list(result.grid_origin_mm),
             "direction": list(result.grid_direction),
         },
-        "registration": _registration_provenance(result.registration),
+        "registration": registration_provenance(result.registration),
     }
 
 
@@ -341,24 +281,10 @@ def fuse_masks(
 ) -> FusionResult:
     """Register, union, quantize, and publish two binary foreground masks."""
     output = volume_output(output_path)
-    if os.path.isdir(output_path):
-        raise ValueError("volume output path is a directory: %s" % output_path)
-    if not math.isfinite(grid_mm) or grid_mm <= 0:
-        raise ValueError("grid_mm must be finite and greater than zero")
+    validate_grid_mm(grid_mm)
     started = time.time()
-
-    def say(message: str) -> None:
-        if log:
-            log(message)
-
-    step = stage_runner(say, progress, 36)
-
-    warnings: list[str] = []
-
-    def add_warning(message: str) -> None:
-        warnings.append(message)
-        if warn:
-            warn(message)
+    reporter = Reporter(log, warn, progress, 36)
+    say, step = reporter.say, reporter.step
 
     def register() -> RegistrationResult:
         try:
@@ -376,20 +302,15 @@ def fuse_masks(
     for line in registered.summary().splitlines():
         say("  " + line.strip())
 
-    finest = min(min(fixed_mask.GetSpacing()), min(moving_mask.GetSpacing()))
-    if grid_mm > finest:
-        add_warning(
-            "the fused grid is %.2f mm but the finest input voxel is %.3f mm; "
-            "structures thinner than the grid are lost. Lower --grid-mm to keep "
-            "them, at cubic cost in memory." % (grid_mm, finest)
-        )
+    coarse_grid = grid_warning(grid_mm, [fixed_mask, moving_mask])
+    if coarse_grid is not None:
+        reporter.warn(coarse_grid)
 
     size, origin = step(
         "plan fused grid",
-        lambda: _common_grid(
-            fixed_mask,
-            moving_mask,
-            registered.transform,
+        lambda: common_grid(
+            [fixed_mask, moving_mask],
+            [np.eye(4), registered.transform],
             grid_mm,
             allow_large_volume=allow_large_volume,
         ),
@@ -406,7 +327,7 @@ def fuse_masks(
     inverse = registration.inverse_transform(registered.transform)
     fixed_field = step(
         "resample fixed",
-        lambda: _resample_field(
+        lambda: resample_axis_aligned(
             segment.antialias_for_grid(fixed_mask, grid_mm),
             size,
             origin,
@@ -416,7 +337,7 @@ def fuse_masks(
     )
     moving_field = step(
         "resample moving",
-        lambda: _resample_field(
+        lambda: resample_axis_aligned(
             segment.antialias_for_grid(moving_mask, grid_mm),
             size,
             origin,
@@ -492,7 +413,7 @@ def fuse_masks(
         volume_moving_mm3=moving_count * voxel_mm3,
         volume_fused_mm3=fused_count * voxel_mm3,
         seconds=time.time() - started,
-        warnings=warnings,
+        warnings=reporter.warnings,
     )
     result.provenance = _base_provenance(result)
     return result
@@ -532,10 +453,7 @@ def fuse(
 ) -> FusionResult:
     """Segment two intensity volumes independently and fuse their foreground."""
     volume_output(output_path)
-    if os.path.isdir(output_path):
-        raise ValueError("volume output path is a directory: %s" % output_path)
-    if not math.isfinite(grid_mm) or grid_mm <= 0:
-        raise ValueError("grid_mm must be finite and greater than zero")
+    validate_grid_mm(grid_mm)
     validate_segmentation(preset)
     for name, threshold in (
         ("fixed_threshold", fixed_threshold),
@@ -544,30 +462,16 @@ def fuse(
         if threshold not in (None, "auto") and not math.isfinite(float(threshold)):
             raise ValueError("%s must be finite or 'auto'" % name)
     started = time.time()
+    reporter = Reporter(log, warn, progress, 36)
+    say, step = reporter.say, reporter.step
 
-    def say(message: str) -> None:
-        if log:
-            log(message)
-
-    step = stage_runner(say, progress, 36)
-
-    warnings: list[str] = []
-
-    def add_warning(message: str) -> None:
-        warnings.append(message)
-        if warn:
-            warn(message)
-
-    for message in check_compatible(fixed, moving):
-        add_warning(message)
-    for message in pipeline.threshold_warnings(
-        fixed, preset, fixed_threshold, "--fixed-threshold"
-    ):
-        add_warning(message)
-    for message in pipeline.threshold_warnings(
-        moving, preset, moving_threshold, "--moving-threshold"
-    ):
-        add_warning(message)
+    reporter.warn_all(check_compatible(fixed, moving))
+    reporter.warn_all(
+        pipeline.threshold_warnings(fixed, preset, fixed_threshold, "--fixed-threshold")
+    )
+    reporter.warn_all(
+        pipeline.threshold_warnings(moving, preset, moving_threshold, "--moving-threshold")
+    )
 
     say("fixed  ID %d  %s  %s" % (fixed.id, fixed.format, fixed.source_name))
     say("moving ID %d  %s  %s" % (moving.id, moving.format, moving.source_name))
@@ -575,14 +479,12 @@ def fuse(
         "load fixed volume",
         lambda: volume_mod.load(fixed, allow_large_volume=allow_large_volume),
     )
-    for message in volume_mod.warnings_for(fixed_volume):
-        add_warning(message)
+    reporter.warn_all(volume_mod.warnings_for(fixed_volume))
     moving_volume = step(
         "load moving volume",
         lambda: volume_mod.load(moving, allow_large_volume=allow_large_volume),
     )
-    for message in volume_mod.warnings_for(moving_volume):
-        add_warning(message)
+    reporter.warn_all(volume_mod.warnings_for(moving_volume))
 
     fixed_value, fixed_source = step(
         "resolve fixed threshold",
@@ -627,7 +529,7 @@ def fuse(
         progress=progress,
     )
     result.seconds = time.time() - started
-    result.warnings = warnings + result.warnings
+    result.warnings = reporter.warnings + result.warnings
     result.provenance.update(
         {
             "fixed": fixed_provenance,
@@ -645,7 +547,7 @@ def fuse(
 
 
 # ------------------------------------------------------- N-way label fusion
-def common_grid_many(
+def common_grid(
     images: list[sitk.Image],
     transforms: list[np.ndarray],
     grid_mm: float,
@@ -654,10 +556,7 @@ def common_grid_many(
 ) -> tuple[tuple[int, int, int], np.ndarray]:
     """Axis-aligned grid covering every image after its moving->fixed transform."""
     points = np.vstack(
-        [
-            (transform[:3, :3] @ _corners(image).T).T + transform[:3, 3]
-            for image, transform in zip(images, transforms)
-        ]
+        [physical_corners(image, transform) for image, transform in zip(images, transforms)]
     )
     scaled = points / grid_mm
     if not np.all(np.isfinite(scaled)):
@@ -682,7 +581,7 @@ def common_grid_many(
 
 def _antialias_margin(image: sitk.Image, grid_mm: float) -> list[int]:
     """Input voxels needed around a crop for antialiasing plus linear support."""
-    sigma_mm = segment._ANTIALIAS_SIGMA_FACTOR * grid_mm
+    sigma_mm = segment.ANTIALIAS_SIGMA_FACTOR * grid_mm
     return [
         int(math.ceil(4.0 * sigma_mm / spacing)) + 2 for spacing in image.GetSpacing()
     ]
@@ -708,7 +607,7 @@ def fuse_label_fields(
     binary: bool = False,
     allow_large_volume: bool = False,
     log: Logger | None = None,
-    progress: Callable[[dict[str, Any]], None] | None = None,
+    progress: ProgressSink | None = None,
 ) -> LabelFieldResult:
     """Stream every label of every input onto one grid.
 
@@ -725,7 +624,7 @@ def fuse_label_fields(
         if log:
             log(message)
 
-    size, origin = common_grid_many(
+    size, origin = common_grid(
         images, transforms, grid_mm, allow_large_volume=allow_large_volume
     )
     shape_zyx = (size[2], size[1], size[0])
@@ -770,7 +669,7 @@ def fuse_label_fields(
                 mask = sitk.GetImageFromArray(selected.astype(np.uint8))
                 mask.CopyInformation(cropped)
             occupancy = segment.antialias_for_grid(mask, grid_mm)
-            corners = (transform[:3, :3] @ _corners(occupancy).T).T + transform[:3, 3]
+            corners = physical_corners(occupancy, transform)
             low_index = np.floor((corners.min(0) - origin) / grid_mm).astype(int) - 1
             high_index = np.ceil((corners.max(0) - origin) / grid_mm).astype(int) + 2
             low_index = np.maximum(low_index, 0)
@@ -778,7 +677,7 @@ def fuse_label_fields(
             sub_size = high_index - low_index
             if np.any(sub_size <= 0):
                 return None
-            field = _resample_field(
+            field = resample_axis_aligned(
                 occupancy,
                 (int(sub_size[0]), int(sub_size[1]), int(sub_size[2])),
                 origin + low_index * grid_mm,

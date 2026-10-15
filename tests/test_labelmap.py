@@ -402,7 +402,7 @@ def test_labelmap_fuse_rejects_the_same_input_before_loading(tmp_path, monkeypat
     candidate = _write(source, _two_labels())
     monkeypatch.setattr(
         labelmap,
-        "_load_volume",
+        "load_volume",
         lambda *_args, **_kwargs: pytest.fail(
             "duplicate inputs must fail before loading"
         ),
